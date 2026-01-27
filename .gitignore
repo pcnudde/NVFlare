@@ -170,3 +170,4 @@ __pycache__
 .pyc
 
 docs/apidocs/
+integration_test.xml

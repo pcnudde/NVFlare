@@ -9,7 +9,7 @@ PYTHONPATH="${PWD}/../.."
 export GRPC_POLL_STRATEGY="poll"
 export GRPC_ENABLE_FORK_SUPPORT="False"
 
-backends=(numpy tensorflow pytorch auth preflight cifar auto stats xgboost client_api client_api_qa model_controller_api)
+backends=(numpy tensorflow pytorch auth preflight cifar stats xgboost client_api client_api_qa model_controller_api examples)
 
 usage()
 {
@@ -73,10 +73,20 @@ run_tensorflow()
     eval "$cmd"
 }
 
+run_examples_test()
+{
+    echo "Running example integration tests."
+    cmd="PYTHONPATH=${PYTHONPATH} $cmd test_examples.py"
+    echo "$cmd"
+    eval "$cmd"
+}
+
 if [[ $m == "tensorflow" ]]; then
     run_tensorflow
 elif [[ $m == "preflight" ]]; then
     run_preflight_check_test
+elif [[ $m == "examples" ]]; then
+    run_examples_test
 else
     run_system_test
 fi
