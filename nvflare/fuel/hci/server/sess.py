@@ -15,7 +15,7 @@ import json
 import threading
 import time
 import uuid
-from typing import List
+from typing import List, Optional
 
 from nvflare.fuel.f3.cellnet.defs import CellChannel
 from nvflare.fuel.f3.message import Message as CellMessage
@@ -31,7 +31,7 @@ CHECK_SESSION_CMD_NAME = InternalCommands.CHECK_SESSION
 
 
 class Session(object):
-    def __init__(self, sess_id, user_name, org, role, origin_fqcn):
+    def __init__(self, sess_id, user_name, org, role, origin_fqcn, token_expiry_time: Optional[float] = None):
         """Object keeping track of an admin client session with token and time data."""
         self.sess_id = sess_id
         self.user_name = user_name
@@ -40,9 +40,43 @@ class Session(object):
         self.origin_fqcn = origin_fqcn
         self.start_time = time.time()
         self.last_active_time = time.time()
+        self.token_expiry_time = token_expiry_time
 
     def mark_active(self):
         self.last_active_time = time.time()
+
+    def is_idle_timed_out(self, idle_timeout: float, now: Optional[float] = None) -> bool:
+        if idle_timeout <= 0:
+            return False
+        ts = now if now is not None else time.time()
+        return (ts - self.last_active_time) > idle_timeout
+
+    def is_session_ttl_expired(self, session_ttl: float, now: Optional[float] = None) -> bool:
+        if session_ttl <= 0:
+            return False
+        ts = now if now is not None else time.time()
+        return (ts - self.start_time) > session_ttl
+
+    def is_token_expired(self, now: Optional[float] = None) -> bool:
+        if self.token_expiry_time is None:
+            return False
+        ts = now if now is not None else time.time()
+        return ts >= self.token_expiry_time
+
+    def should_refresh(self, refresh_window: float, now: Optional[float] = None) -> bool:
+        if self.token_expiry_time is None or refresh_window <= 0:
+            return False
+        ts = now if now is not None else time.time()
+        seconds_to_expire = self.token_expiry_time - ts
+        return 0 < seconds_to_expire <= refresh_window
+
+    def is_expired(self, idle_timeout: float, session_ttl: float = 0, now: Optional[float] = None) -> bool:
+        ts = now if now is not None else time.time()
+        return (
+            self.is_idle_timed_out(idle_timeout=idle_timeout, now=ts)
+            or self.is_session_ttl_expired(session_ttl=session_ttl, now=ts)
+            or self.is_token_expired(now=ts)
+        )
 
     def make_token(self, id_asserter: IdentityAsserter):
         user = {
@@ -51,6 +85,8 @@ class Session(object):
             "o": self.user_org,
             "s": self.sess_id,
         }
+        if self.token_expiry_time is not None:
+            user["e"] = self.token_expiry_time
         ds = json.dumps(user)
         bds = str_to_b64str(ds)
         signature = id_asserter.sign(ds, return_str=True)
@@ -83,16 +119,18 @@ class Session(object):
             org=user.get("o"),
             sess_id=user.get("s"),
             origin_fqcn="",
+            token_expiry_time=user.get("e"),
         )
 
 
 class SessionManager(CommandModule):
-    def __init__(self, cell, idle_timeout=1800, monitor_interval=5):
+    def __init__(self, cell, idle_timeout=1800, monitor_interval=5, session_ttl=0):
         """Session manager.
 
         Args:
             idle_timeout: session idle timeout
             monitor_interval: interval for obtaining updates when monitoring
+            session_ttl: maximum lifetime of session from creation time, 0 disables limit
         """
         if monitor_interval <= 0:
             monitor_interval = 5
@@ -102,6 +140,7 @@ class SessionManager(CommandModule):
         self.sessions = {}  # token => Session
         self.idle_timeout = idle_timeout
         self.monitor_interval = monitor_interval
+        self.session_ttl = session_ttl
         self.asked_to_stop = False
         self.monitor = threading.Thread(target=self.monitor_sessions)
         self.monitor.daemon = True
@@ -115,10 +154,10 @@ class SessionManager(CommandModule):
                 break
 
             dead_sess = None
-            for _, sess in self.sessions.items():
-                time_passed = time.time() - sess.last_active_time
-                # print('time passed: {} secs'.format(time_passed))
-                if time_passed > self.idle_timeout:
+            with self.sess_update_lock:
+                sess_list = list(self.sessions.values())
+            for sess in sess_list:
+                if sess.is_expired(idle_timeout=self.idle_timeout, session_ttl=self.session_ttl):
                     dead_sess = sess
                     break
 
@@ -134,7 +173,7 @@ class SessionManager(CommandModule):
     def shutdown(self):
         self.asked_to_stop = True
 
-    def create_session(self, user_name, user_org, user_role, origin_fqcn):
+    def create_session(self, user_name, user_org, user_role, origin_fqcn, token_expiry_time: Optional[float] = None):
         """Creates new session with a new session token.
 
         Args:
@@ -142,6 +181,7 @@ class SessionManager(CommandModule):
             user_org: org of the user
             user_role: user's role
             origin_fqcn: request origin FQCN
+            token_expiry_time: optional absolute epoch time for upstream-token expiry
             id_asserter: used to sign session token
 
         Returns: Session
@@ -154,6 +194,7 @@ class SessionManager(CommandModule):
             org=user_org,
             role=user_role,
             origin_fqcn=origin_fqcn,
+            token_expiry_time=token_expiry_time,
         )
         with self.sess_update_lock:
             self.sessions[sess_id] = sess
@@ -173,7 +214,11 @@ class SessionManager(CommandModule):
             return None
 
         with self.sess_update_lock:
-            return self.sessions.get(sess.sess_id)
+            stored = self.sessions.get(sess.sess_id)
+            if stored and stored.is_expired(idle_timeout=self.idle_timeout, session_ttl=self.session_ttl):
+                self.sessions.pop(sess.sess_id, None)
+                return None
+            return stored
 
     def get_sessions(self):
         result = []
