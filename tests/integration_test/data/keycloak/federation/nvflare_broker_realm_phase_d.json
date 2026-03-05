@@ -1,0 +1,185 @@
+{
+  "realm": "nvflare-broker",
+  "enabled": true,
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "clients": [
+    {
+      "clientId": "nvflare-admin",
+      "name": "NVFlare Admin Broker Client",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "nvflare-secret",
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "attributes": {
+        "oauth2.token.exchange.grant.enabled": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "org",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "org",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "org",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "nvf_role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "nvf_role",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "nvf_role",
+            "jsonType.label": "String"
+          }
+        },
+        {
+          "name": "nvflare-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "nvflare-admin",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "identityProviders": [
+    {
+      "alias": "idp-org-a",
+      "providerId": "oidc",
+      "enabled": true,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "authenticateByDefault": false,
+      "linkOnly": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "issuer": "http://127.0.0.1:8080/realms/org-a-idp",
+        "authorizationUrl": "http://127.0.0.1:8080/realms/org-a-idp/protocol/openid-connect/auth",
+        "tokenUrl": "http://127.0.0.1:8080/realms/org-a-idp/protocol/openid-connect/token",
+        "jwksUrl": "http://127.0.0.1:8080/realms/org-a-idp/protocol/openid-connect/certs",
+        "userInfoUrl": "http://127.0.0.1:8080/realms/org-a-idp/protocol/openid-connect/userinfo",
+        "logoutUrl": "http://127.0.0.1:8080/realms/org-a-idp/protocol/openid-connect/logout",
+        "clientId": "broker-org-a",
+        "clientSecret": "broker-secret-a",
+        "backchannelSupported": "false",
+        "useJwksUrl": "true",
+        "validateSignature": "true",
+        "disableUserInfo": "false",
+        "defaultScope": "openid profile email"
+      }
+    },
+    {
+      "alias": "idp-org-b",
+      "providerId": "oidc",
+      "enabled": true,
+      "trustEmail": true,
+      "storeToken": false,
+      "addReadTokenRoleOnCreate": false,
+      "authenticateByDefault": false,
+      "linkOnly": false,
+      "firstBrokerLoginFlowAlias": "first broker login",
+      "config": {
+        "issuer": "http://127.0.0.1:8080/realms/org-b-idp",
+        "authorizationUrl": "http://127.0.0.1:8080/realms/org-b-idp/protocol/openid-connect/auth",
+        "tokenUrl": "http://127.0.0.1:8080/realms/org-b-idp/protocol/openid-connect/token",
+        "jwksUrl": "http://127.0.0.1:8080/realms/org-b-idp/protocol/openid-connect/certs",
+        "userInfoUrl": "http://127.0.0.1:8080/realms/org-b-idp/protocol/openid-connect/userinfo",
+        "logoutUrl": "http://127.0.0.1:8080/realms/org-b-idp/protocol/openid-connect/logout",
+        "clientId": "broker-org-b",
+        "clientSecret": "broker-secret-b",
+        "backchannelSupported": "false",
+        "useJwksUrl": "true",
+        "validateSignature": "true",
+        "disableUserInfo": "false",
+        "defaultScope": "openid profile email"
+      }
+    }
+  ],
+  "users": [
+    {
+      "id": "33333333-3333-3333-3333-333333333333",
+      "username": "alice-broker",
+      "enabled": true,
+      "firstName": "Alice",
+      "lastName": "Broker",
+      "email": "alice@orga.com",
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": {
+        "org": [
+          "org_a"
+        ],
+        "nvf_role": [
+          "lead"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alicebrokerpass",
+          "temporary": false
+        }
+      ],
+      "federatedIdentities": [
+        {
+          "identityProvider": "idp-org-a",
+          "userId": "11111111-1111-1111-1111-111111111111",
+          "userName": "alice"
+        }
+      ]
+    },
+    {
+      "id": "44444444-4444-4444-4444-444444444444",
+      "username": "bob-broker",
+      "enabled": true,
+      "firstName": "Bob",
+      "lastName": "Broker",
+      "email": "bob@orgb.com",
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": {
+        "org": [
+          "org_b"
+        ],
+        "nvf_role": [
+          "org_admin"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bobbrokerpass",
+          "temporary": false
+        }
+      ],
+      "federatedIdentities": [
+        {
+          "identityProvider": "idp-org-b",
+          "userId": "22222222-2222-2222-2222-222222222222",
+          "userName": "bob"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+{
+  "realm": "org-b-idp",
+  "enabled": true,
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "clients": [
+    {
+      "clientId": "org-b-cli",
+      "name": "Org B CLI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true
+    },
+    {
+      "clientId": "broker-org-b",
+      "name": "Broker Org B Client",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "broker-secret-b",
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true
+    }
+  ],
+  "users": [
+    {
+      "id": "22222222-2222-2222-2222-222222222222",
+      "username": "bob",
+      "enabled": true,
+      "firstName": "Bob",
+      "lastName": "OrgB",
+      "email": "bob@orgb.com",
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": {
+        "org": [
+          "org_b"
+        ],
+        "nvf_role": [
+          "org_admin"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "bobpass",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

@@ -132,15 +132,15 @@ class TokenValidator:
     def _validate_temporal_claims(self, claims: Mapping[str, Any], now: Optional[float]):
         clock = float(now if now is not None else time.time())
         skew = float(self.config.clock_skew_seconds)
-        exp = _get_numeric_claim(claims, "exp")
-        nbf = _get_numeric_claim(claims, "nbf")
-        iat = _get_numeric_claim(claims, "iat")
+        exp = _get_optional_numeric_claim(claims, "exp", required=("exp" in self.config.required_claims))
+        nbf = _get_optional_numeric_claim(claims, "nbf", required=("nbf" in self.config.required_claims))
+        iat = _get_optional_numeric_claim(claims, "iat", required=("iat" in self.config.required_claims))
 
-        if clock >= exp + skew:
+        if exp is not None and clock >= exp + skew:
             raise TokenValidationError("token expired")
-        if clock + skew < nbf:
+        if nbf is not None and clock + skew < nbf:
             raise TokenValidationError("token not before violation")
-        if iat > clock + skew:
+        if iat is not None and iat > clock + skew:
             raise TokenValidationError("token issued at time is in the future")
 
 
@@ -210,6 +210,17 @@ class ClaimMapper:
 
 def _get_numeric_claim(claims: Mapping[str, Any], claim_name: str) -> float:
     value = claims.get(claim_name)
+    if not isinstance(value, (int, float)):
+        raise TokenValidationError(f"claim '{claim_name}' must be numeric timestamp")
+    return float(value)
+
+
+def _get_optional_numeric_claim(claims: Mapping[str, Any], claim_name: str, required: bool) -> Optional[float]:
+    value = claims.get(claim_name)
+    if value is None:
+        if required:
+            raise TokenValidationError(f"claim '{claim_name}' must be numeric timestamp")
+        return None
     if not isinstance(value, (int, float)):
         raise TokenValidationError(f"claim '{claim_name}' must be numeric timestamp")
     return float(value)

@@ -258,3 +258,25 @@ def test_pre_command_populates_same_authz_context_for_cert_and_token(token_login
 def test_pre_command_allows_token_login_without_existing_session(token_login_module):
     conn = Connection()
     assert token_login_module.pre_command(conn, [InternalCommands.TOKEN_LOGIN])
+
+
+def test_pre_command_rejects_expired_token_after_session_recreate_attempt(
+    token_login_module, signing_material, monkeypatch
+):
+    private_key_pem, _ = signing_material
+    now = int(time.time())
+    hci = _DummyHCI()
+    jwt_token, claims = _make_token(private_key_pem, now, exp=now + 2)
+    login_conn = _make_conn(hci=hci, cmd_headers={"authorization": f"Bearer {jwt_token}"})
+    token_login_module.handle_token_login(login_conn, [InternalCommands.TOKEN_LOGIN])
+    session_token = _extract_token(_read_conn_items(login_conn))
+    assert session_token
+
+    # Simulate session cache loss (server restart) so pre_command tries recreate_session().
+    token_login_module.session_mgr.sessions = {}
+
+    monkeypatch.setattr("nvflare.fuel.hci.server.sess.time.time", lambda: claims["exp"] + 1)
+    expired_cmd_conn = _make_command_conn(hci=hci, token=session_token)
+    assert not token_login_module.pre_command(expired_cmd_conn, ["list_jobs"])
+    items = _read_conn_items(expired_cmd_conn)
+    assert any(item.get(ProtoKey.TYPE) == ProtoKey.ERROR and item.get(ProtoKey.DATA) == "session_inactive" for item in items)

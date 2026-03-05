@@ -157,6 +157,24 @@ def test_validate_jwt_rejects_unknown_kid(signing_material):
         _validator().validate(token=token, jwks=jwks, now=now)
 
 
+def test_validate_jwt_allows_missing_nbf_when_not_required(signing_material):
+    now = int(time.time())
+    private_key_pem, jwks = signing_material
+    claims = _build_claims(now)
+    claims.pop("nbf", None)
+    token = _make_token(private_key_pem, claims)
+    validator = TokenValidator(
+        TokenValidationConfig(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            alg_allowlist=["RS256"],
+            required_claims=("iss", "aud", "exp", "iat"),
+        )
+    )
+    parsed = validator.validate(token=token, jwks=jwks, now=now)
+    assert parsed["sub"] == "alice-sub"
+
+
 def _mapper():
     return ClaimMapper(
         ClaimMappingConfig(

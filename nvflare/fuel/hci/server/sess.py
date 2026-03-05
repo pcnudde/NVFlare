@@ -202,6 +202,10 @@ class SessionManager(CommandModule):
 
     def recreate_session(self, token: str, origin_fqcn, id_asserter: IdentityAsserter):
         sess = Session.decode_token(token, id_asserter)
+        if not isinstance(sess, Session):
+            raise ValueError("invalid session token")
+        if sess.is_expired(idle_timeout=self.idle_timeout, session_ttl=self.session_ttl):
+            raise ValueError("session token expired")
         sess.origin_fqcn = origin_fqcn
         with self.sess_update_lock:
             self.sessions[sess.sess_id] = sess

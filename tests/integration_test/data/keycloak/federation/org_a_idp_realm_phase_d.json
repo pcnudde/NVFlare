@@ -1,0 +1,59 @@
+{
+  "realm": "org-a-idp",
+  "enabled": true,
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "clients": [
+    {
+      "clientId": "org-a-cli",
+      "name": "Org A CLI",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true
+    },
+    {
+      "clientId": "broker-org-a",
+      "name": "Broker Org A Client",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "broker-secret-a",
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true
+    }
+  ],
+  "users": [
+    {
+      "id": "11111111-1111-1111-1111-111111111111",
+      "username": "alice",
+      "enabled": true,
+      "firstName": "Alice",
+      "lastName": "OrgA",
+      "email": "alice@orga.com",
+      "emailVerified": true,
+      "requiredActions": [],
+      "attributes": {
+        "org": [
+          "org_a"
+        ],
+        "nvf_role": [
+          "lead"
+        ]
+      },
+      "credentials": [
+        {
+          "type": "password",
+          "value": "alicepass",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

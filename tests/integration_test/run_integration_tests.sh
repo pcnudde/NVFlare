@@ -9,7 +9,7 @@ PYTHONPATH="${PWD}/../.."
 export GRPC_POLL_STRATEGY="poll"
 export GRPC_ENABLE_FORK_SUPPORT="False"
 
-backends=(numpy tensorflow pytorch auth preflight cifar stats xgboost client_api client_api_qa model_controller_api)
+backends=(numpy tensorflow pytorch auth preflight cifar stats xgboost client_api client_api_qa model_controller_api keycloak keycloak_federation)
 
 usage()
 {
@@ -73,8 +73,37 @@ run_tensorflow()
     eval "$cmd"
 }
 
+run_keycloak_phase_c_test()
+{
+    echo "Running Keycloak Phase C integration tests."
+    # Default to auto-starting Keycloak container unless an external KEYCLOAK_BASE_URL is provided.
+    if [[ -z "${KEYCLOAK_BASE_URL:-}" ]]; then
+        export KEYCLOAK_AUTO_START="${KEYCLOAK_AUTO_START:-1}"
+    fi
+    export KEYCLOAK_REQUIRED="${KEYCLOAK_REQUIRED:-1}"
+    cmd="$prefix $cmd test_keycloak_phase_c.py"
+    echo "$cmd"
+    eval "$cmd"
+}
+
+run_keycloak_phase_d_test()
+{
+    echo "Running Keycloak Phase D federation integration tests."
+    if [[ -z "${KEYCLOAK_BASE_URL:-}" ]]; then
+        export KEYCLOAK_AUTO_START="${KEYCLOAK_AUTO_START:-1}"
+    fi
+    export KEYCLOAK_REQUIRED="${KEYCLOAK_REQUIRED:-1}"
+    cmd="$prefix $cmd test_keycloak_phase_d_federation.py"
+    echo "$cmd"
+    eval "$cmd"
+}
+
 if [[ $m == "tensorflow" ]]; then
     run_tensorflow
+elif [[ $m == "keycloak" ]]; then
+    run_keycloak_phase_c_test
+elif [[ $m == "keycloak_federation" ]]; then
+    run_keycloak_phase_d_test
 elif [[ $m == "preflight" ]]; then
     run_preflight_check_test
 else

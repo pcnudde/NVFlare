@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nvflare.fuel.hci.server.sess import Session
+import pytest
+
+from nvflare.fuel.hci.server.sess import Session, SessionManager
 
 
 class _DummyIdentityAsserter:
@@ -66,3 +68,22 @@ def test_session_token_roundtrip_preserves_token_expiry():
     decoded = Session.decode_token(token=token)
     assert decoded is not None
     assert decoded.token_expiry_time == 1234.5
+
+
+def test_recreate_session_rejects_invalid_decoded_session(monkeypatch):
+    mgr = SessionManager(cell=None, idle_timeout=20, monitor_interval=3600)
+    monkeypatch.setattr("nvflare.fuel.hci.server.sess.Session.decode_token", lambda token, id_asserter=None: None)
+    with pytest.raises(ValueError, match="invalid session token"):
+        mgr.recreate_session(token="token", origin_fqcn="admin@site", id_asserter=None)
+    mgr.shutdown()
+
+
+def test_recreate_session_rejects_expired_decoded_session(monkeypatch):
+    mgr = SessionManager(cell=None, idle_timeout=20, monitor_interval=3600)
+    expired = _new_session()
+    expired.token_expiry_time = 100.0
+    monkeypatch.setattr("nvflare.fuel.hci.server.sess.Session.decode_token", lambda token, id_asserter=None: expired)
+    monkeypatch.setattr("nvflare.fuel.hci.server.sess.time.time", lambda: 101.0)
+    with pytest.raises(ValueError, match="session token expired"):
+        mgr.recreate_session(token="token", origin_fqcn="admin@site", id_asserter=None)
+    mgr.shutdown()
