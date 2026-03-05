@@ -501,6 +501,7 @@ class JobCommandModule(CommandModule, CommandUtil, BinaryTransfer):
                 job_meta[JobMetaKey.SUBMITTER_NAME.value] = conn.get_prop(ConnProps.USER_NAME)
                 job_meta[JobMetaKey.SUBMITTER_ORG.value] = conn.get_prop(ConnProps.USER_ORG)
                 job_meta[JobMetaKey.SUBMITTER_ROLE.value] = conn.get_prop(ConnProps.USER_ROLE)
+                job_meta[JobMetaKey.SUBMITTER_AUTH_SOURCE.value] = conn.get_prop(ConnProps.AUTH_SOURCE, "cert")
                 job_meta[JobMetaKey.CLONED_FROM.value] = job_id
 
                 meta = job_def_manager.clone(from_jid=job_id, meta=job_meta, fl_ctx=fl_ctx)
@@ -598,6 +599,7 @@ class JobCommandModule(CommandModule, CommandUtil, BinaryTransfer):
                 meta[JobMetaKey.SUBMITTER_NAME.value] = conn.get_prop(ConnProps.USER_NAME, "")
                 meta[JobMetaKey.SUBMITTER_ORG.value] = conn.get_prop(ConnProps.USER_ORG, "")
                 meta[JobMetaKey.SUBMITTER_ROLE.value] = conn.get_prop(ConnProps.USER_ROLE, "")
+                meta[JobMetaKey.SUBMITTER_AUTH_SOURCE.value] = conn.get_prop(ConnProps.AUTH_SOURCE, "cert")
                 meta[JobMetaKey.JOB_FOLDER_NAME.value] = folder_name
                 custom_props = conn.get_prop(ConnProps.CUSTOM_PROPS)
                 if custom_props:

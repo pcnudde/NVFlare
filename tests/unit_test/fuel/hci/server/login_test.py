@@ -183,6 +183,7 @@ def test_token_login_success(token_login_module, signing_material):
     assert sess.user_org == "org_a"
     assert sess.user_role == "lead"
     assert sess.token_expiry_time == claims["exp"]
+    assert sess.auth_source == "token"
 
 
 def test_token_login_rejects_invalid_token(token_login_module, signing_material):
@@ -222,6 +223,7 @@ def test_cert_login_compatibility(monkeypatch, session_mgr):
     assert sess.user_name == "alice"
     assert sess.user_org == "org_a"
     assert sess.user_role == "lead"
+    assert sess.auth_source == "cert"
 
 
 def test_pre_command_populates_same_authz_context_for_cert_and_token(token_login_module, signing_material, monkeypatch):
@@ -253,6 +255,8 @@ def test_pre_command_populates_same_authz_context_for_cert_and_token(token_login
     assert cert_cmd_conn.get_prop(ConnProps.USER_NAME) == token_cmd_conn.get_prop(ConnProps.USER_NAME) == "alice"
     assert cert_cmd_conn.get_prop(ConnProps.USER_ORG) == token_cmd_conn.get_prop(ConnProps.USER_ORG) == "org_a"
     assert cert_cmd_conn.get_prop(ConnProps.USER_ROLE) == token_cmd_conn.get_prop(ConnProps.USER_ROLE) == "lead"
+    assert cert_cmd_conn.get_prop(ConnProps.AUTH_SOURCE) == "cert"
+    assert token_cmd_conn.get_prop(ConnProps.AUTH_SOURCE) == "token"
 
 
 def test_pre_command_allows_token_login_without_existing_session(token_login_module):

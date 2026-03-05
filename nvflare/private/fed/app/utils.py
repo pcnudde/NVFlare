@@ -22,9 +22,13 @@ from urllib.request import urlopen
 
 import psutil
 
-from nvflare.apis.fl_constant import FLContextKey, WorkspaceConstants
+from nvflare.apis.fl_constant import ConnectionSecurity, FLContextKey, SystemConfigs, WorkspaceConstants
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.fl_exception import UnsafeComponentError
+from nvflare.fuel.f3.cellnet.cell import Cell
+from nvflare.fuel.f3.cellnet.fqcn import FQCN
+from nvflare.fuel.f3.drivers.driver_params import DriverParams
+from nvflare.fuel.f3.mpm import MainProcessMonitor as mpm
 from nvflare.fuel.hci.server.token_auth import (
     ClaimMapper,
     ClaimMappingConfig,
@@ -32,6 +36,7 @@ from nvflare.fuel.hci.server.token_auth import (
     TokenValidator,
 )
 from nvflare.fuel.sec.security_content_service import SecurityContentService
+from nvflare.fuel.utils.config_service import ConfigService
 from nvflare.private.fed.runner import Runner
 from nvflare.private.fed.server.admin import FedAdminServer
 from nvflare.private.fed.server.fed_server import FederatedServer
@@ -329,6 +334,18 @@ def build_admin_token_login_kwargs(
         raise ValueError("server.admin_auth.token_login requires 'jwks', 'jwks_file', 'jwks_uri', or 'discovery_url'")
 
 
+def _merge_admin_server_config_with_resources(server_conf: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    merged = dict(server_conf or {})
+    resource_servers = ConfigService._get_from_config(
+        lambda _name, value: value, name="servers", conf=SystemConfigs.RESOURCES_CONF, default=None
+    )
+    if isinstance(resource_servers, list) and resource_servers and isinstance(resource_servers[0], Mapping):
+        merged.update(dict(resource_servers[0]))
+    elif isinstance(resource_servers, Mapping):
+        merged.update(dict(resource_servers))
+    return merged
+
+
 def monitor_parent_process(runner: Runner, parent_pid, stop_event: threading.Event):
     while True:
         if stop_event.is_set() or not psutil.pid_exists(parent_pid):
@@ -368,16 +385,61 @@ def create_admin_server(fl_server: FederatedServer, server_conf=None, args=None)
     Returns:
         A FedAdminServer.
     """
-    token_login_kwargs = build_admin_token_login_kwargs(server_conf=server_conf, workspace_dir=args.workspace)
+    admin_server_conf = _merge_admin_server_config_with_resources(server_conf)
+    token_login_kwargs = build_admin_token_login_kwargs(server_conf=admin_server_conf, workspace_dir=args.workspace)
+    target = admin_server_conf.get("service", {}).get("target", "0.0.0.0:6007")
+    scheme = admin_server_conf.get("service", {}).get("scheme", "grpc")
+    target_parts = target.split(":")
+    fl_port = int(target_parts[-1])
+    admin_port = int(admin_server_conf.get("admin_port", fl_port))
+    admin_conn_sec = str(
+        admin_server_conf.get(
+            "admin_connection_security",
+            admin_server_conf.get("connection_security", ConnectionSecurity.MTLS),
+        )
+    ).strip()
+    admin_identity = admin_server_conf.get("admin_interface_identity", f"{FQCN.ROOT_SERVER}.admin")
+
+    def _resolve_startup_file(file_name: str) -> str:
+        if os.path.isabs(file_name):
+            return file_name
+        return os.path.join(args.workspace, WorkspaceConstants.STARTUP_FOLDER_NAME, file_name)
+
+    command_cell = fl_server.cell
+    own_command_cell = False
+    if admin_port != fl_port:
+        secure_conn = admin_conn_sec != ConnectionSecurity.CLEAR
+        credentials = {}
+        if secure_conn:
+            credentials = {
+                DriverParams.CA_CERT.value: _resolve_startup_file(admin_server_conf.get("ssl_root_cert")),
+                DriverParams.SERVER_CERT.value: _resolve_startup_file(admin_server_conf.get("ssl_cert")),
+                DriverParams.SERVER_KEY.value: _resolve_startup_file(admin_server_conf.get("ssl_private_key")),
+                DriverParams.CONNECTION_SECURITY.value: admin_conn_sec,
+            }
+
+        command_cell = Cell(
+            fqcn=admin_identity,
+            root_url=f"{scheme}://0:{admin_port}",
+            secure=secure_conn,
+            credentials=credentials,
+            create_internal_listener=False,
+            parent_url=None,
+        )
+        command_cell.start()
+        mpm.add_cleanup_cb(command_cell.stop)
+        own_command_cell = True
 
     admin_server = FedAdminServer(
-        cell=fl_server.cell,
+        cell=command_cell,
         fed_admin_interface=fl_server.engine,
         cmd_modules=fl_server.cmd_modules,
-        file_upload_dir=os.path.join(args.workspace, server_conf.get("admin_storage", "tmp")),
-        file_download_dir=os.path.join(args.workspace, server_conf.get("admin_storage", "tmp")),
-        download_job_url=server_conf.get("download_job_url", "http://"),
-        timeout=server_conf.get("admin_timeout", 10.0),
+        file_upload_dir=os.path.join(args.workspace, admin_server_conf.get("admin_storage", "tmp")),
+        file_download_dir=os.path.join(args.workspace, admin_server_conf.get("admin_storage", "tmp")),
+        download_job_url=admin_server_conf.get("download_job_url", "http://"),
+        timeout=admin_server_conf.get("admin_timeout", 10.0),
+        network_cell=fl_server.cell,
+        own_command_cell=own_command_cell,
         **token_login_kwargs,
     )
     return admin_server

@@ -15,3 +15,4 @@
 NVFLARE_PREFIX = ".__nvfl_"
 NVFLARE_SIG_FILE = ".__nvfl_sig.json"
 NVFLARE_SUBMITTER_CRT_FILE = ".__nvfl_submitter.crt"
+NVFLARE_SUBMISSION_ATTESTATION_FILE = ".__nvfl_submission_attestation.json"

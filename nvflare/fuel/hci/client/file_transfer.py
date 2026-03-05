@@ -303,11 +303,13 @@ class FileTransferModule(CommandModule):
         if not os.path.isdir(full_path):
             return {"status": APIStatus.ERROR_RUNTIME, "details": f"'{full_path}' is not a valid folder."}
 
-        # sign folders and files
         api = ctx.get_api()
-        client_key_file_path = api.client_key
-        private_key = load_private_key_file(client_key_file_path)
-        sign_folders(full_path, private_key, api.client_cert)
+        if getattr(api, "auth_mode", "cert") == "cert":
+            client_key_file_path = api.client_key
+            if not client_key_file_path or not api.client_cert:
+                return {"status": APIStatus.ERROR_RUNTIME, "details": "missing client signing credentials"}
+            private_key = load_private_key_file(client_key_file_path)
+            sign_folders(full_path, private_key, api.client_cert)
 
         # zip the data
         out_file = os.path.join(tempfile.gettempdir(), str(uuid.uuid4()))

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import json
 import os
 import random
@@ -29,12 +30,14 @@ from nvflare.cli_exception import CLIException
 from nvflare.cli_unknown_cmd_exception import CLIUnknownCmdException
 from nvflare.fuel.utils.config import ConfigFormat
 from nvflare.fuel.utils.gpu_utils import get_host_gpu_ids
-from nvflare.lighter.constants import ProvisionMode
+from nvflare.lighter.constants import ProvisionMode, ProvFileName
 from nvflare.lighter.prov_utils import prepare_builders, prepare_packager
 from nvflare.lighter.provision import gen_default_project_config, prepare_project
 from nvflare.lighter.provisioner import Provisioner
 from nvflare.lighter.utils import (
     load_yaml,
+    load_private_key,
+    sign_folders,
     update_project_server_name_config,
     update_server_default_host,
     update_storage_locations,
@@ -241,10 +244,12 @@ def get_other_admins(project_config: OrderedDict):
     return get_fl_admins(project_config, is_project_admin=False)
 
 
-def get_proj_admin(project_config: OrderedDict):
+def get_proj_admin(project_config: OrderedDict, default_project_admin: Optional[str] = None):
     admins = get_fl_admins(project_config, is_project_admin=True)
     if len(admins) == 1:
         return admins[0]
+    if len(admins) == 0 and default_project_admin:
+        return default_project_admin
     else:
         raise CLIException(f"project should have only one project admin, but {len(admins)} are provided: {admins}")
 
@@ -262,6 +267,7 @@ def local_provision(
     docker_image: str,
     use_he: bool = False,
     project_conf_path: str = "",
+    default_project_admin: Optional[str] = None,
 ) -> Tuple:
     user_provided_project_config = False
     if project_conf_path:
@@ -285,20 +291,21 @@ def local_provision(
             project_config = update_static_file_builder(docker_image, project_config)
     project_config = update_server_default_host(project_config, "localhost")
     save_project_config(project_config, dst_project_file)
-    service_config = get_service_config(project_config)
+    service_config = get_service_config(project_config, default_project_admin=default_project_admin)
+    return_project_config = copy.deepcopy(project_config)
     project = prepare_project(project_config)
     builders = prepare_builders(project_config)
     packager = prepare_packager(project_config)
     provisioner = Provisioner(workspace, builders, packager)
     provisioner.provision(project, mode=ProvisionMode.POC)
 
-    return project_config, service_config
+    return return_project_config, service_config
 
 
-def get_service_config(project_config):
+def get_service_config(project_config, default_project_admin: Optional[str] = None):
     service_config = {
         SC.FLARE_SERVER: get_fl_server_name(project_config),
-        SC.FLARE_PROJ_ADMIN: get_proj_admin(project_config),
+        SC.FLARE_PROJ_ADMIN: get_proj_admin(project_config, default_project_admin=default_project_admin),
         SC.FLARE_OTHER_ADMINS: get_other_admins(project_config),
         SC.FLARE_CLIENTS: get_fl_client_names(project_config),
         SC.IS_DOCKER_RUN: is_docker_run(project_config),
@@ -427,6 +434,7 @@ def prepare_poc(cmd_args):
         cmd_args.docker_image,
         cmd_args.he,
         project_conf_path,
+        cmd_args if cmd_args.enable_fedauth else None,
     )
 
 
@@ -438,6 +446,7 @@ def _prepare_poc(
     use_he: bool = False,
     project_conf_path: str = "",
     examples_dir: Optional[str] = None,
+    fedauth_args=None,
 ) -> bool:
     if clients:
         number_of_clients = len(clients)
@@ -466,13 +475,325 @@ def _prepare_poc(
         else:
             return False
 
+    default_project_admin = SC.FLARE_PROJ_ADMIN if fedauth_args else None
     project_config = prepare_poc_provision(
-        clients, number_of_clients, workspace, docker_image, use_he, project_conf_path, examples_dir
+        clients,
+        number_of_clients,
+        workspace,
+        docker_image,
+        use_he,
+        project_conf_path,
+        examples_dir,
+        default_project_admin=default_project_admin,
     )
+    if fedauth_args:
+        service_config = get_service_config(project_config, default_project_admin=default_project_admin)
+        project_name = project_config.get("name") if project_config else DEFAULT_PROJECT_NAME
+        prod_dir = get_prod_dir(workspace, project_name)
+        apply_fedauth_to_poc_startup_kit(
+            prod_dir=prod_dir,
+            server_name=service_config[SC.FLARE_SERVER],
+            admin_name=service_config[SC.FLARE_PROJ_ADMIN],
+            fedauth_args=fedauth_args,
+        )
 
     project_name = project_config.get("name") if project_config else None
     save_startup_kit_dir_config(workspace, project_name)
     return True
+
+
+def _load_json_file(path: str) -> dict:
+    with open(path, "r") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise CLIException(f"invalid JSON object in {path}")
+    return payload
+
+
+def _write_json_file(path: str, payload: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _parse_role_mappings(role_mapping_items: List[str]) -> Dict[str, str]:
+    mappings = {}
+    for item in role_mapping_items:
+        if "=" not in item:
+            raise CLIException(f"invalid --fedauth_role_mappings value '{item}': expected <source>=<target>")
+        source, target = item.split("=", 1)
+        source = source.strip()
+        target = target.strip()
+        if not source or not target:
+            raise CLIException(f"invalid --fedauth_role_mappings value '{item}': expected non-empty source/target")
+        mappings[source] = target
+    return mappings
+
+
+def _read_server_startup_config(prod_dir: str, server_name: str) -> dict:
+    server_startup_path = os.path.join(prod_dir, server_name, "startup", ProvFileName.FED_SERVER_JSON)
+    if not os.path.isfile(server_startup_path):
+        raise CLIException(f"missing server startup config in {os.path.dirname(server_startup_path)}")
+
+    server_startup = _load_json_file(server_startup_path)
+    servers = server_startup.get("servers")
+    if not isinstance(servers, list) or not servers or not isinstance(servers[0], dict):
+        raise CLIException(f"invalid server startup config: {server_startup_path}")
+    return servers[0]
+
+
+def _load_project_root_signing_key(prod_dir: str):
+    cert_state_path = os.path.join(str(Path(prod_dir).parent), "state", "cert.json")
+    if not os.path.isfile(cert_state_path):
+        raise CLIException(f"missing project cert state: {cert_state_path}")
+
+    cert_state = _load_json_file(cert_state_path)
+    root_pri_key = cert_state.get("root_pri_key")
+    if not isinstance(root_pri_key, str) or not root_pri_key.strip():
+        raise CLIException(f"missing root_pri_key in project cert state: {cert_state_path}")
+    return load_private_key(root_pri_key)
+
+
+def _ensure_fedauth_admin_profile(prod_dir: str, server_name: str, admin_name: str):
+    admin_dir = os.path.join(prod_dir, admin_name)
+    startup_dir = os.path.join(admin_dir, "startup")
+    local_dir = os.path.join(admin_dir, "local")
+    transfer_dir = os.path.join(admin_dir, SC.TRANSFER)
+    os.makedirs(startup_dir, exist_ok=True)
+    os.makedirs(local_dir, exist_ok=True)
+    os.makedirs(transfer_dir, exist_ok=True)
+
+    server_entry = _read_server_startup_config(prod_dir, server_name)
+    service = server_entry.get("service") if isinstance(server_entry.get("service"), dict) else {}
+    admin_port = server_entry.get("admin_port")
+    if not isinstance(admin_port, int):
+        raise CLIException(f"invalid or missing admin_port in server startup config for {server_name}")
+
+    root_ca_src = os.path.join(prod_dir, server_name, "startup", "rootCA.pem")
+    root_ca_dst = os.path.join(startup_dir, "rootCA.pem")
+    if not os.path.isfile(root_ca_src):
+        raise CLIException(f"missing root CA file: {root_ca_src}")
+    if not os.path.isfile(root_ca_dst):
+        shutil.copyfile(root_ca_src, root_ca_dst)
+
+    fed_admin_path = os.path.join(startup_dir, ProvFileName.FED_ADMIN_JSON)
+    if not os.path.isfile(fed_admin_path):
+        _write_json_file(
+            fed_admin_path,
+            {
+                "format_version": 1,
+                "admin": {
+                    "project_name": server_entry.get("name") or Path(prod_dir).parent.name,
+                    "username": "",
+                    "server_identity": server_name,
+                    "scheme": service.get("scheme", "http"),
+                    "host": server_entry.get("admin_server", server_name),
+                    "port": admin_port,
+                    "connection_security": "tls",
+                    "uid_source": "user_input",
+                    "with_file_transfer": True,
+                    "upload_dir": SC.TRANSFER,
+                    "download_dir": SC.TRANSFER,
+                    "client_key": "",
+                    "client_cert": "",
+                    "ca_cert": "rootCA.pem",
+                },
+            },
+        )
+
+    fl_admin_path = os.path.join(startup_dir, ProvFileName.FL_ADMIN_SH)
+    if not os.path.isfile(fl_admin_path):
+        with open(fl_admin_path, "w") as f:
+            f.write(
+                "#!/usr/bin/env bash\n"
+                'DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"\n'
+                "mkdir -p $DIR/../transfer\n"
+                "python3 -m nvflare.fuel.hci.tools.admin -m $DIR/.. -s fed_admin.json\n"
+            )
+        os.chmod(fl_admin_path, 0o755)
+
+    admin_resources = os.path.join(local_dir, "resources.json")
+    admin_resources_default = os.path.join(local_dir, "resources.json.default")
+    if not os.path.isfile(admin_resources) and not os.path.isfile(admin_resources_default):
+        _write_json_file(
+            admin_resources,
+            {
+                "format_version": 1,
+                "admin": {
+                    "idle_timeout": 900.0,
+                    "login_timeout": 10.0,
+                    "with_debug": False,
+                    "authenticate_msg_timeout": 2.0,
+                    "prompt": "> ",
+                },
+            },
+        )
+
+
+def _sign_fedauth_admin_profile(prod_dir: str, admin_name: str):
+    admin_dir = os.path.join(prod_dir, admin_name)
+    root_pri_key = _load_project_root_signing_key(prod_dir)
+    sign_folders(os.path.join(admin_dir, "startup"), root_pri_key, signature_file=ProvFileName.SIGNATURE_JSON)
+    sign_folders(os.path.join(admin_dir, "local"), root_pri_key, signature_file=ProvFileName.SIGNATURE_JSON)
+
+
+_LOCAL_ADMIN_OVERRIDE_KEYS = {
+    "auth_mode",
+    "token",
+    "token_file",
+    "token_env_var",
+    "project_name",
+    "username",
+    "server_identity",
+    "scheme",
+    "host",
+    "port",
+    "connection_security",
+    "uid_source",
+    "client_key",
+    "client_cert",
+    "ca_cert",
+    "oidc_issuer",
+    "oidc_client_id",
+    "oidc_scopes",
+    "oidc_audience",
+    "oidc_discovery_url",
+    "oidc_authorization_endpoint",
+    "oidc_token_endpoint",
+    "oidc_callback_host",
+    "oidc_callback_port",
+    "oidc_callback_path",
+    "oidc_auth_timeout_seconds",
+    "oidc_refresh_skew_seconds",
+    "oidc_open_browser",
+}
+
+
+def apply_fedauth_to_poc_startup_kit(prod_dir: str, server_name: str, admin_name: str, fedauth_args):
+    issuer = str(getattr(fedauth_args, "fedauth_issuer", "")).strip()
+    if not issuer:
+        raise CLIException("--enable_fedauth requires --fedauth_issuer")
+
+    audience = getattr(fedauth_args, "fedauth_audience", "nvflare-admin")
+    if not isinstance(audience, str) or not audience.strip():
+        raise CLIException("fedauth_audience must be non-empty")
+    audience = audience.strip()
+
+    alg_allowlist = list(getattr(fedauth_args, "fedauth_alg_allowlist", ["RS256"]))
+    required_claims = list(getattr(fedauth_args, "fedauth_required_claims", ["iss", "aud", "exp", "iat"]))
+    user_name_claims = list(getattr(fedauth_args, "fedauth_user_name_claims", ["preferred_username", "email"]))
+    user_org_claim = str(getattr(fedauth_args, "fedauth_user_org_claim", "org")).strip() or "org"
+    user_role_claim = str(getattr(fedauth_args, "fedauth_user_role_claim", "nvf_role")).strip() or "nvf_role"
+    role_mappings = _parse_role_mappings(list(getattr(fedauth_args, "fedauth_role_mappings", ["lead=project_admin"])))
+
+    token_login = {
+        "enabled": True,
+        "issuer": issuer,
+        "audience": audience,
+        "alg_allowlist": alg_allowlist,
+        "required_claims": required_claims,
+        "claim_mappings": {
+            "user_name_claims": user_name_claims,
+            "user_org_claim": user_org_claim,
+            "user_role_claim": user_role_claim,
+            "role_mappings": role_mappings,
+        },
+    }
+    jwks_uri = getattr(fedauth_args, "fedauth_jwks_uri", None)
+    discovery_url = getattr(fedauth_args, "fedauth_discovery_url", None)
+    if isinstance(jwks_uri, str) and jwks_uri.strip():
+        token_login["jwks_uri"] = jwks_uri.strip()
+    elif isinstance(discovery_url, str) and discovery_url.strip():
+        token_login["discovery_url"] = discovery_url.strip()
+    else:
+        token_login["discovery_url"] = f"{issuer.rstrip('/')}/.well-known/openid-configuration"
+
+    server_local_dir = os.path.join(prod_dir, server_name, "local")
+    server_resources = os.path.join(server_local_dir, "resources.json")
+    server_resources_default = os.path.join(server_local_dir, "resources.json.default")
+    if os.path.exists(server_resources):
+        server_payload = _load_json_file(server_resources)
+    elif os.path.exists(server_resources_default):
+        server_payload = _load_json_file(server_resources_default)
+    else:
+        raise CLIException(f"missing server resources config in {server_local_dir}")
+    servers = server_payload.get("servers")
+    if not isinstance(servers, list) or not servers:
+        raise CLIException(f"invalid server resources config: {server_resources}")
+    server_entry = servers[0]
+    if not isinstance(server_entry, dict):
+        raise CLIException(f"invalid first server entry in resources config: {server_resources}")
+    admin_auth = server_entry.get("admin_auth")
+    if not isinstance(admin_auth, dict):
+        admin_auth = {}
+    admin_auth["token_login"] = token_login
+    server_entry["admin_auth"] = admin_auth
+    server_entry["admin_connection_security"] = "tls"
+    server_entry["admin_interface_identity"] = "server.admin"
+    _write_json_file(server_resources, server_payload)
+
+    _ensure_fedauth_admin_profile(prod_dir=prod_dir, server_name=server_name, admin_name=admin_name)
+    admin_startup_dir = os.path.join(prod_dir, admin_name, "startup")
+    admin_startup_config = os.path.join(admin_startup_dir, ProvFileName.FED_ADMIN_JSON)
+    admin_startup_payload = _load_json_file(admin_startup_config)
+    startup_admin_section = admin_startup_payload.get("admin")
+    if not isinstance(startup_admin_section, dict):
+        raise CLIException(f"invalid admin startup config: {admin_startup_config}")
+
+    admin_local_dir = os.path.join(prod_dir, admin_name, "local")
+    admin_resources = os.path.join(admin_local_dir, "resources.json")
+    admin_resources_default = os.path.join(admin_local_dir, "resources.json.default")
+    if os.path.exists(admin_resources):
+        admin_payload = _load_json_file(admin_resources)
+    elif os.path.exists(admin_resources_default):
+        admin_payload = _load_json_file(admin_resources_default)
+    else:
+        admin_payload = {"format_version": 1, "admin": {}}
+    admin_section = admin_payload.get("admin")
+    if not isinstance(admin_section, dict):
+        admin_section = {}
+    for key in _LOCAL_ADMIN_OVERRIDE_KEYS:
+        admin_section.pop(key, None)
+
+    startup_updates = {
+        "connection_security": "tls",
+        "server_identity": "server.admin",
+        "uid_source": "user_input",
+        "client_key": "",
+        "client_cert": "",
+    }
+    admin_mode = str(getattr(fedauth_args, "fedauth_admin_mode", "oidc")).strip().lower()
+    if admin_mode == "oidc":
+        startup_updates["auth_mode"] = "oidc"
+        startup_updates["oidc_issuer"] = issuer
+        startup_updates["oidc_client_id"] = str(
+            getattr(fedauth_args, "fedauth_oidc_client_id", getattr(fedauth_args, "fedauth_audience", audience))
+        ).strip()
+        startup_updates["oidc_scopes"] = str(
+            getattr(fedauth_args, "fedauth_oidc_scopes", "openid profile email")
+        ).strip()
+        startup_updates["oidc_audience"] = audience
+        oidc_discovery_url = getattr(fedauth_args, "fedauth_oidc_discovery_url", None)
+        if isinstance(oidc_discovery_url, str) and oidc_discovery_url.strip():
+            startup_updates["oidc_discovery_url"] = oidc_discovery_url.strip()
+        startup_updates["oidc_callback_host"] = str(getattr(fedauth_args, "fedauth_oidc_callback_host", "127.0.0.1"))
+        startup_updates["oidc_callback_port"] = int(getattr(fedauth_args, "fedauth_oidc_callback_port", 39123))
+        startup_updates["oidc_callback_path"] = str(getattr(fedauth_args, "fedauth_oidc_callback_path", "/callback"))
+        startup_updates["oidc_refresh_skew_seconds"] = int(getattr(fedauth_args, "fedauth_oidc_refresh_skew_seconds", 60))
+        startup_updates["oidc_open_browser"] = bool(getattr(fedauth_args, "fedauth_oidc_open_browser", True))
+    elif admin_mode == "token":
+        startup_updates["auth_mode"] = "token"
+        startup_updates["token_file"] = str(getattr(fedauth_args, "fedauth_admin_token_file", "/tmp/nvflare_admin.token"))
+    else:
+        raise CLIException(f"invalid fedauth_admin_mode '{admin_mode}': expected 'oidc' or 'token'")
+
+    startup_admin_section.update(startup_updates)
+    admin_startup_payload["admin"] = startup_admin_section
+    _write_json_file(admin_startup_config, admin_startup_payload)
+
+    admin_payload["admin"] = admin_section
+    _write_json_file(admin_resources, admin_payload)
+    _sign_fedauth_admin_profile(prod_dir=prod_dir, admin_name=admin_name)
 
 
 def get_or_create_hidden_nvflare_config_path() -> str:
@@ -496,11 +817,18 @@ def prepare_poc_provision(
     use_he: bool = False,
     project_conf_path: str = "",
     examples_dir: Optional[str] = None,
+    default_project_admin: Optional[str] = None,
 ) -> Dict:
     os.makedirs(workspace, exist_ok=True)
     os.makedirs(os.path.join(workspace, "data"), exist_ok=True)
     project_config, service_config = local_provision(
-        clients, number_of_clients, workspace, docker_image, use_he, project_conf_path
+        clients,
+        number_of_clients,
+        workspace,
+        docker_image,
+        use_he,
+        project_conf_path,
+        default_project_admin=default_project_admin,
     )
     project_name = project_config.get("name")
     server_name = service_config[SC.FLARE_SERVER]
@@ -627,7 +955,7 @@ def _start_poc(poc_workspace: str, gpu_ids: List[int], excluded=None, services_l
         if admin_dir not in services_list:
             excluded.append(admin_dir)
 
-    validate_services(project_config, services_list, excluded)
+    validate_services(project_config, services_list, excluded, service_config=service_config)
     validate_poc_workspace(poc_workspace, service_config, project_config)
     _run_poc(
         SC.CMD_START,
@@ -640,8 +968,13 @@ def _start_poc(poc_workspace: str, gpu_ids: List[int], excluded=None, services_l
     )
 
 
-def validate_services(project_config, services_list: List, excluded: List):
+def validate_services(project_config, services_list: List, excluded: List, service_config=None):
     participant_names = [p["name"] for p in project_config["participants"]]
+    if service_config:
+        admin_names = [service_config.get(SC.FLARE_PROJ_ADMIN)] + list(service_config.get(SC.FLARE_OTHER_ADMINS, []))
+        for admin_name in admin_names:
+            if admin_name and admin_name not in participant_names:
+                participant_names.append(admin_name)
     validate_participants(participant_names, services_list)
     validate_participants(participant_names, excluded)
 
@@ -657,7 +990,16 @@ def setup_service_config(poc_workspace) -> Tuple:
     project_file = os.path.join(poc_workspace, "project.yml")
     if os.path.isfile(project_file):
         project_config = load_yaml(project_file)
-        service_config = get_service_config(project_config) if project_config else None
+        default_project_admin = None
+        if project_config:
+            project_name = project_config.get("name") if project_config else DEFAULT_PROJECT_NAME
+            prod_dir = get_prod_dir(poc_workspace, project_name)
+            admin_dir = os.path.join(prod_dir, SC.FLARE_PROJ_ADMIN)
+            if not get_fl_admins(project_config, is_project_admin=True) and os.path.isdir(admin_dir):
+                default_project_admin = SC.FLARE_PROJ_ADMIN
+        service_config = (
+            get_service_config(project_config, default_project_admin=default_project_admin) if project_config else None
+        )
         return project_config, service_config
     else:
         raise CLIException(f"{project_file} is missing, make sure you have first run 'nvflare poc prepare'")
@@ -680,7 +1022,7 @@ def _stop_poc(poc_workspace: str, excluded=None, services_list=None):
     else:
         excluded.append(service_config[SC.FLARE_PROJ_ADMIN])
 
-    validate_services(project_config, services_list, excluded)
+    validate_services(project_config, services_list, excluded, service_config=service_config)
 
     validate_poc_workspace(poc_workspace, service_config, project_config)
     gpu_ids: List[int] = []
@@ -961,6 +1303,133 @@ def define_prepare_parser(poc_parser, cmd: Optional[str] = None, help_str: Optio
         const="nvflare/nvflare",
         help="generate docker.sh based on the docker_image, used in '--prepare' command. and generate docker.sh "
         + " 'start/stop' commands will start with docker.sh ",
+    )
+
+    prepare_parser.add_argument(
+        "--enable_fedauth",
+        action="store_true",
+        help="automatically configure server/admin startup kits for OIDC token-based admin auth",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_issuer",
+        type=str,
+        default="",
+        help="OIDC issuer URL used to validate admin tokens (required when --enable_fedauth is set)",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_audience",
+        type=str,
+        default="nvflare-admin",
+        help="OIDC audience for admin access tokens",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_jwks_uri",
+        type=str,
+        default="",
+        help="optional JWKS URI for token signature verification (if omitted, discovery is used)",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_discovery_url",
+        type=str,
+        default="",
+        help="optional OIDC discovery URL for JWKS lookup",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_alg_allowlist",
+        nargs="+",
+        default=["RS256"],
+        help="allowed JWT signature algorithms",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_required_claims",
+        nargs="+",
+        default=["iss", "aud", "exp", "iat"],
+        help="required JWT claims",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_user_name_claims",
+        nargs="+",
+        default=["preferred_username", "email"],
+        help="ordered user-name claim candidates",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_user_org_claim",
+        type=str,
+        default="org",
+        help="claim name for user org",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_user_role_claim",
+        type=str,
+        default="nvf_role",
+        help="claim name for user role",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_role_mappings",
+        nargs="*",
+        default=["lead=project_admin"],
+        help="claim-role mappings in SOURCE=TARGET format",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_admin_mode",
+        choices=["oidc", "token"],
+        default="oidc",
+        help="admin auth mode to configure in startup kit",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_admin_token_file",
+        type=str,
+        default="/tmp/nvflare_admin.token",
+        help="token file path used when --fedauth_admin_mode token",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_oidc_client_id",
+        type=str,
+        default="nvflare-admin",
+        help="OIDC client ID used by admin CLI when --fedauth_admin_mode oidc",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_oidc_scopes",
+        type=str,
+        default="openid profile email",
+        help="OIDC scopes used by admin CLI browser login",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_oidc_discovery_url",
+        type=str,
+        default="",
+        help="optional OIDC discovery URL for admin CLI browser login",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_oidc_callback_host",
+        type=str,
+        default="127.0.0.1",
+        help="loopback callback host for admin browser login",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_oidc_callback_port",
+        type=int,
+        default=39123,
+        help="loopback callback port for admin browser login",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_oidc_callback_path",
+        type=str,
+        default="/callback",
+        help="loopback callback path for admin browser login",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_oidc_refresh_skew_seconds",
+        type=int,
+        default=60,
+        help="refresh lead time in seconds for admin access token",
+    )
+    prepare_parser.add_argument(
+        "--fedauth_oidc_no_open_browser",
+        dest="fedauth_oidc_open_browser",
+        action="store_false",
+        default=True,
+        help="disable automatic browser open for admin OIDC login",
     )
 
     prepare_parser.add_argument("-debug", "--debug", action="store_true", help="debug is on")

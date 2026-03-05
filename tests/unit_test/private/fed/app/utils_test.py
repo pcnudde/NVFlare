@@ -154,3 +154,34 @@ def test_create_admin_server_passes_token_login_components(tmp_path):
     assert isinstance(kwargs["token_validator"], TokenValidator)
     assert isinstance(kwargs["claim_mapper"], ClaimMapper)
     assert kwargs["token_jwks"] == {"keys": [{"kid": "test-kid"}]}
+
+
+def test_create_admin_server_uses_resource_override_for_admin_connection_security(tmp_path):
+    fl_server = Mock()
+    fl_server.cell = object()
+    fl_server.engine = object()
+    fl_server.cmd_modules = []
+    args = Namespace(workspace=str(tmp_path))
+    conf = {
+        "service": {"target": "server:8002", "scheme": "http"},
+        "admin_port": 8003,
+        "connection_security": "mtls",
+        "ssl_root_cert": "rootCA.pem",
+        "ssl_cert": "server.crt",
+        "ssl_private_key": "server.key",
+    }
+
+    with patch(
+        "nvflare.private.fed.app.utils.ConfigService._get_from_config",
+        return_value=[{"admin_connection_security": "tls"}],
+    ):
+        with patch("nvflare.private.fed.app.utils.Cell") as cell_ctor:
+            cell_instance = Mock()
+            cell_ctor.return_value = cell_instance
+            fed_admin_server = Mock()
+            with patch("nvflare.private.fed.app.utils.FedAdminServer", fed_admin_server):
+                create_admin_server(fl_server=fl_server, server_conf=conf, args=args)
+
+    _, cell_kwargs = cell_ctor.call_args
+    assert cell_kwargs["credentials"]["connection_security"] == "tls"
+    assert fed_admin_server.call_args.kwargs["cell"] == cell_instance

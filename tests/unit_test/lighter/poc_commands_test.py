@@ -205,3 +205,27 @@ class TestPOCCommands:
         assert "server1" == global_config[SC.FLARE_SERVER]
         assert "admin@nvidia.com" == global_config[SC.FLARE_PROJ_ADMIN]
         assert ["client-1", "client-2"] == global_config[SC.FLARE_CLIENTS]
+
+    def test_get_packages_config_uses_default_project_admin_when_requested(self):
+        project_config = {
+            "participants": [
+                {"name": "server1", "org": "nvidia", "type": "server"},
+                {"name": "client-1", "org": "nvidia", "type": "client"},
+                {"name": "client-2", "org": "nvidia", "type": "client"},
+            ],
+            "builders": [
+                {
+                    "path": "nvflare.lighter.impl.static_file.StaticFileBuilder",
+                    "args": {"overseer_agent": {"args": {"sp_end_point": "server1: 8002: 8003"}}},
+                },
+                {"path": "nvflare.lighter.impl.cert.CertBuilder", "args": {}},
+            ],
+        }
+
+        project_config = collections.OrderedDict(project_config)
+
+        global_config = get_service_config(project_config, default_project_admin=SC.FLARE_PROJ_ADMIN)
+        assert "server1" == global_config[SC.FLARE_SERVER]
+        assert "admin@nvidia.com" == global_config[SC.FLARE_PROJ_ADMIN]
+        assert [] == global_config[SC.FLARE_OTHER_ADMINS]
+        assert ["client-1", "client-2"] == global_config[SC.FLARE_CLIENTS]

@@ -103,6 +103,8 @@ class FedAdminServer(AdminServer):
         file_download_dir,
         download_job_url="",
         timeout: float = 10.0,
+        network_cell: Optional[Cell] = None,
+        own_command_cell: bool = False,
         token_validator: Optional[TokenValidator] = None,
         claim_mapper: Optional[ClaimMapper] = None,
         token_jwks: Optional[Mapping[str, Any]] = None,
@@ -125,6 +127,8 @@ class FedAdminServer(AdminServer):
         cmd_reg = new_command_register_with_builtin_module(app_ctx=fed_admin_interface)
         self.sai = fed_admin_interface
         self.cell = cell
+        self.network_cell = network_cell if network_cell else cell
+        self.own_command_cell = own_command_cell
         self.client_lock = threading.Lock()
 
         sess_mgr = SessionManager(cell)
@@ -285,7 +289,7 @@ class FedAdminServer(AdminServer):
             request.set_header(ServerCommandKey.PEER_FL_CONTEXT, shared_fl_ctx)
 
         return send_requests(
-            cell=self.cell,
+            cell=self.network_cell,
             command="admin",
             requests=requests,
             clients=self.clients,
@@ -295,4 +299,6 @@ class FedAdminServer(AdminServer):
 
     def stop(self):
         super().stop()
+        if self.own_command_cell and self.cell:
+            self.cell.stop()
         self.sai.close()

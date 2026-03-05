@@ -15,12 +15,15 @@
 import json
 import os
 import shutil
+import socket
 import tempfile
 import time
+from argparse import Namespace
 from pathlib import Path
 
 import jwt
 import pytest
+import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -72,8 +75,39 @@ def _make_access_token(private_key_pem: str):
     return jwt.encode(claims, private_key_pem, algorithm="RS256", headers={"kid": KEY_ID})
 
 
+def _make_fedauth_args():
+    return Namespace(
+        fedauth_issuer=ISSUER,
+        fedauth_audience=AUDIENCE,
+        fedauth_jwks_uri="http://127.0.0.1:39080/jwks",
+        fedauth_discovery_url=None,
+        fedauth_alg_allowlist=["RS256"],
+        fedauth_required_claims=["iss", "aud", "exp", "iat"],
+        fedauth_user_name_claims=["preferred_username", "email"],
+        fedauth_user_org_claim="org",
+        fedauth_user_role_claim="nvf_role",
+        fedauth_role_mappings=["project_admin=project_admin"],
+        fedauth_admin_mode="token",
+        fedauth_admin_token_file="/tmp/nvflare-token-auth-admin.token",
+        fedauth_oidc_client_id=AUDIENCE,
+        fedauth_oidc_scopes="openid profile email offline_access",
+        fedauth_oidc_callback_host="127.0.0.1",
+        fedauth_oidc_callback_port=39123,
+        fedauth_oidc_callback_path="/callback",
+        fedauth_oidc_refresh_skew_seconds=60,
+        fedauth_oidc_open_browser=False,
+        fedauth_oidc_discovery_url=None,
+    )
+
+
 def _server_resource_file(workspace_root: str) -> str:
     return os.path.join(workspace_root, "server", "local", "resources.json")
+
+
+def _get_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
 def _enable_token_auth_on_server(workspace_root: str, jwks: dict):
@@ -85,6 +119,8 @@ def _enable_token_auth_on_server(workspace_root: str, jwks: dict):
         raise RuntimeError(f"invalid server resources file: {resource_file}")
 
     server_entry = resources["servers"][0]
+    server_entry["admin_connection_security"] = "tls"
+    server_entry["admin_interface_identity"] = "server.admin"
     server_entry["admin_auth"] = {
         "token_login": {
             "enabled": True,
@@ -111,10 +147,17 @@ def _read_admin_config(workspace_root: str, admin_user_name: str) -> dict:
     return conf.get_admin_config()
 
 
-def _create_token_admin_api(workspace_root: str, upload_dir: str, download_dir: str, token: str):
+def _create_token_admin_api(workspace_root: str, upload_dir: str, download_dir: str, token: str, admin_port: int):
     admin_config = _read_admin_config(workspace_root=workspace_root, admin_user_name=TOKEN_LOGIN_USER)
     admin_config[AdminConfigKey.AUTH_MODE] = "token"
     admin_config[AdminConfigKey.TOKEN] = token
+    admin_config[AdminConfigKey.CONNECTION_SECURITY] = "tls"
+    admin_config[AdminConfigKey.HOST] = "127.0.0.1"
+    admin_config[AdminConfigKey.PORT] = admin_port
+    admin_config[AdminConfigKey.SERVER_IDENTITY] = "server.admin"
+    admin_config[AdminConfigKey.UID_SOURCE] = "user_input"
+    admin_config[AdminConfigKey.CLIENT_CERT] = ""
+    admin_config[AdminConfigKey.CLIENT_KEY] = ""
 
     api = FLAdminAPI(
         upload_dir=upload_dir,
@@ -157,9 +200,21 @@ def test_token_auth_poc_example_e2e():
     jobs_root_dir = str(Path(__file__).parent / "data" / "jobs")
     private_key_pem, jwks = _make_signing_material()
     access_token = _make_access_token(private_key_pem=private_key_pem)
+    fl_port = _get_free_port()
+    admin_port = _get_free_port()
 
-    site_launcher = POCSiteLauncher(n_servers=1, n_clients=2)
+    site_launcher = POCSiteLauncher(
+        n_servers=1,
+        n_clients=2,
+        fed_learn_port=fl_port,
+        admin_port=admin_port,
+        include_project_admin=False,
+        fedauth_args=_make_fedauth_args(),
+    )
     workspace_root = site_launcher.prepare_workspace()
+    with open(site_launcher.project_conf_path, "r") as f:
+        project_config = yaml.safe_load(f)
+    assert not [p for p in project_config["participants"] if p.get("type") == "admin"]
     _enable_token_auth_on_server(workspace_root=workspace_root, jwks=jwks)
 
     download_dir = tempfile.mkdtemp(prefix="nvflare-token-auth-download-")
@@ -173,6 +228,7 @@ def test_token_auth_poc_example_e2e():
             upload_dir=jobs_root_dir,
             download_dir=download_dir,
             token=access_token,
+            admin_port=admin_port,
         )
         assert admin_api.is_ready(), "admin API failed to login with token auth"
 

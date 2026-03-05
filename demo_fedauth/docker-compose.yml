@@ -1,0 +1,53 @@
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.7
+    container_name: fedauth-keycloak
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    command:
+      - start-dev
+      - --http-port=8080
+      - --hostname=localhost
+      - --import-realm
+      - --features=token-exchange
+    ports:
+      - "38080:8080"
+    volumes:
+      - ./keycloak/nvflare_realm.json:/opt/keycloak/data/import/nvflare_realm.json:ro
+
+  server:
+    image: nvflare-fedauth-demo:local
+    build:
+      context: ..
+      dockerfile: demo_fedauth/Dockerfile
+    container_name: fedauth-server
+    depends_on:
+      - keycloak
+    working_dir: /workspace/server
+    command: ["/bin/bash", "-lc", "./startup/sub_start.sh"]
+    ports:
+      - "8002:8002"
+      - "8003:8003"
+    volumes:
+      - ./workspace/fedauth_prod_demo/prod_00/server:/workspace/server
+
+  site-1:
+    image: nvflare-fedauth-demo:local
+    container_name: fedauth-site-1
+    depends_on:
+      - server
+    working_dir: /workspace/site-1
+    command: ["/bin/bash", "-lc", "./startup/sub_start.sh"]
+    volumes:
+      - ./workspace/fedauth_prod_demo/prod_00/site-1:/workspace/site-1
+
+  site-2:
+    image: nvflare-fedauth-demo:local
+    container_name: fedauth-site-2
+    depends_on:
+      - server
+    working_dir: /workspace/site-2
+    command: ["/bin/bash", "-lc", "./startup/sub_start.sh"]
+    volumes:
+      - ./workspace/fedauth_prod_demo/prod_00/site-2:/workspace/site-2

@@ -17,7 +17,12 @@ import shutil
 import sys
 import tempfile
 import time
+from argparse import Namespace
+from pathlib import Path
 
+import yaml
+
+from nvflare.lighter.provision import gen_default_project_config
 from nvflare.tool.poc.poc_commands import _prepare_poc
 
 from .constants import CLIENT_NVF_CONFIG, CLIENT_SCRIPT, SERVER_NVF_CONFIG, SERVER_SCRIPT
@@ -30,18 +35,68 @@ def _get_client_name(client_id: int):
 
 
 class POCSiteLauncher(SiteLauncher):
-    def __init__(self, n_servers: int, n_clients: int):
+    def __init__(
+        self,
+        n_servers: int,
+        n_clients: int,
+        fed_learn_port: int = None,
+        admin_port: int = None,
+        include_project_admin: bool = True,
+        fedauth_args: Namespace = None,
+    ):
         """Launches and keeps track of servers and clients."""
         super().__init__()
 
         self.poc_temp_dir = tempfile.mkdtemp()
         if os.path.exists(self.poc_temp_dir):
             shutil.rmtree(self.poc_temp_dir)
-        _prepare_poc(clients=[], number_of_clients=n_clients, workspace=self.poc_temp_dir)
+        self.project_conf_path = self._create_project_config(
+            fed_learn_port=fed_learn_port,
+            admin_port=admin_port,
+            include_project_admin=include_project_admin,
+        )
+        _prepare_poc(
+            clients=[],
+            number_of_clients=n_clients,
+            workspace=self.poc_temp_dir,
+            project_conf_path=self.project_conf_path,
+            fedauth_args=fedauth_args,
+        )
         self.poc_dir = os.path.join(self.poc_temp_dir, "example_project", "prod_00")
         print(f"Using POC at dir: {self.poc_dir}")
         self.n_servers = n_servers
         self.n_clients = n_clients
+
+    def _create_project_config(
+        self, fed_learn_port: int = None, admin_port: int = None, include_project_admin: bool = True
+    ) -> str:
+        if fed_learn_port is None and admin_port is None:
+            return ""
+
+        fd, path = tempfile.mkstemp(prefix="nvflare-poc-project-", suffix=".yml")
+        os.close(fd)
+        gen_default_project_config("dummy_project.yml", path)
+
+        with open(path, "r") as f:
+            project_config = yaml.safe_load(f)
+
+        if not include_project_admin:
+            project_config["participants"] = [
+                participant for participant in project_config.get("participants", []) if participant.get("type") != "admin"
+            ]
+
+        for participant in project_config.get("participants", []):
+            if participant.get("type") == "server":
+                participant["name"] = "server"
+                if fed_learn_port is not None:
+                    participant["fed_learn_port"] = fed_learn_port
+                if admin_port is not None:
+                    participant["admin_port"] = admin_port
+
+        with open(path, "w") as f:
+            yaml.safe_dump(project_config, f)
+
+        return path
 
     def start_overseer(self):
         raise RuntimeError("POC mode does not have overseer.")
@@ -103,3 +158,5 @@ class POCSiteLauncher(SiteLauncher):
         cleanup_job_and_snapshot(self.poc_dir, "server")
         print(f"Deleting temporary directory: {self.poc_temp_dir}.")
         shutil.rmtree(self.poc_temp_dir)
+        if self.project_conf_path:
+            Path(self.project_conf_path).unlink(missing_ok=True)

@@ -141,6 +141,7 @@ class LoginModule(CommandModule, CommandFilter):
             user_org=identity.get(IdentityKey.ORG, ""),
             user_role=identity.get(IdentityKey.ROLE, ""),
             origin_fqcn=origin,
+            auth_source="cert",
         )
         token = session.make_token(id_asserter)
         self.logger.info(f"Created user session for {user_name}")
@@ -169,6 +170,9 @@ class LoginModule(CommandModule, CommandFilter):
             token_expiry_time = claims.get("exp")
             if token_expiry_time is not None and not isinstance(token_expiry_time, (int, float)):
                 raise ValueError("invalid token exp claim")
+            auth_source = headers.get("auth_mode", "token") if isinstance(headers, dict) else "token"
+            if auth_source not in ("token", "oidc"):
+                auth_source = "token"
 
             session = self.session_mgr.create_session(
                 user_name=mapped_identity.user_name,
@@ -176,6 +180,7 @@ class LoginModule(CommandModule, CommandFilter):
                 user_role=mapped_identity.user_role,
                 origin_fqcn=origin,
                 token_expiry_time=float(token_expiry_time) if token_expiry_time is not None else None,
+                auth_source=auth_source,
             )
             session_token = session.make_token(id_asserter)
             self.logger.info(f"Created token-auth user session for {mapped_identity.user_name}")
@@ -259,6 +264,7 @@ class LoginModule(CommandModule, CommandFilter):
         conn.set_prop(ConnProps.USER_NAME, sess.user_name)
         conn.set_prop(ConnProps.USER_ORG, sess.user_org)
         conn.set_prop(ConnProps.USER_ROLE, sess.user_role)
+        conn.set_prop(ConnProps.AUTH_SOURCE, sess.auth_source)
         conn.set_prop(ConnProps.TOKEN, token)
         return True
 

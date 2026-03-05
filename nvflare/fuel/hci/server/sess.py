@@ -31,7 +31,16 @@ CHECK_SESSION_CMD_NAME = InternalCommands.CHECK_SESSION
 
 
 class Session(object):
-    def __init__(self, sess_id, user_name, org, role, origin_fqcn, token_expiry_time: Optional[float] = None):
+    def __init__(
+        self,
+        sess_id,
+        user_name,
+        org,
+        role,
+        origin_fqcn,
+        token_expiry_time: Optional[float] = None,
+        auth_source: str = "cert",
+    ):
         """Object keeping track of an admin client session with token and time data."""
         self.sess_id = sess_id
         self.user_name = user_name
@@ -41,6 +50,7 @@ class Session(object):
         self.start_time = time.time()
         self.last_active_time = time.time()
         self.token_expiry_time = token_expiry_time
+        self.auth_source = auth_source or "cert"
 
     def mark_active(self):
         self.last_active_time = time.time()
@@ -87,6 +97,8 @@ class Session(object):
         }
         if self.token_expiry_time is not None:
             user["e"] = self.token_expiry_time
+        if self.auth_source:
+            user["a"] = self.auth_source
         ds = json.dumps(user)
         bds = str_to_b64str(ds)
         signature = id_asserter.sign(ds, return_str=True)
@@ -120,6 +132,7 @@ class Session(object):
             sess_id=user.get("s"),
             origin_fqcn="",
             token_expiry_time=user.get("e"),
+            auth_source=user.get("a", "cert"),
         )
 
 
@@ -173,7 +186,15 @@ class SessionManager(CommandModule):
     def shutdown(self):
         self.asked_to_stop = True
 
-    def create_session(self, user_name, user_org, user_role, origin_fqcn, token_expiry_time: Optional[float] = None):
+    def create_session(
+        self,
+        user_name,
+        user_org,
+        user_role,
+        origin_fqcn,
+        token_expiry_time: Optional[float] = None,
+        auth_source: str = "cert",
+    ):
         """Creates new session with a new session token.
 
         Args:
@@ -195,6 +216,7 @@ class SessionManager(CommandModule):
             role=user_role,
             origin_fqcn=origin_fqcn,
             token_expiry_time=token_expiry_time,
+            auth_source=auth_source,
         )
         with self.sess_update_lock:
             self.sessions[sess_id] = sess

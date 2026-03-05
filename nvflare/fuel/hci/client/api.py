@@ -75,6 +75,7 @@ from .api_spec import (
     UidSource,
 )
 from .api_status import APIStatus
+from .oidc import OIDCTokenManager
 
 _CMD_TYPE_UNKNOWN = 0
 _CMD_TYPE_CLIENT = 1
@@ -84,6 +85,7 @@ MAX_AUTO_LOGIN_TRIES = 300
 AUTO_LOGIN_INTERVAL = 1.5
 _AUTH_MODE_CERT = "cert"
 _AUTH_MODE_TOKEN = "token"
+_AUTH_MODE_OIDC = "oidc"
 
 
 class FileWaiter(threading.Event):
@@ -296,22 +298,29 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
         self.login_token_value = admin_config.get(AdminConfigKey.TOKEN)
         self.login_token_file = admin_config.get(AdminConfigKey.TOKEN_FILE)
         self.login_token_env_var = admin_config.get(AdminConfigKey.TOKEN_ENV_VAR)
+        self.oidc_token_manager = None
         self.user_name = user_name
         self.event_handlers = event_handlers
 
-        if self.auth_mode not in [_AUTH_MODE_CERT, _AUTH_MODE_TOKEN]:
+        if self.auth_mode not in [_AUTH_MODE_CERT, _AUTH_MODE_TOKEN, _AUTH_MODE_OIDC]:
             raise ConfigError(
-                f"invalid auth mode '{self.auth_mode}': must be '{_AUTH_MODE_CERT}' or '{_AUTH_MODE_TOKEN}'"
+                f"invalid auth mode '{self.auth_mode}': must be '{_AUTH_MODE_CERT}', '{_AUTH_MODE_TOKEN}', or '{_AUTH_MODE_OIDC}'"
             )
+        if self.auth_mode == _AUTH_MODE_OIDC:
+            self.oidc_token_manager = OIDCTokenManager(config=admin_config)
 
         if not self.ca_cert:
             raise ConfigError("missing CA Cert file name")
-        if not self.client_cert:
-            raise ConfigError("missing Client Cert file name")
-        if not self.client_key:
-            raise ConfigError("missing Client Key file name")
+        conn_sec = (self.conn_sec or ConnectionSecurity.MTLS).lower()
+        if conn_sec not in [ConnectionSecurity.TLS, ConnectionSecurity.CLEAR]:
+            if not self.client_cert:
+                raise ConfigError("missing Client Cert file name")
+            if not self.client_key:
+                raise ConfigError("missing Client Key file name")
 
         if self.uid_source == UidSource.CERT:
+            if not self.client_cert:
+                raise ConfigError("uid_source 'cert' requires client_cert")
             # We'll find the username from the client cert
             cert = load_cert_file(self.client_cert)
             self.user_name = get_cn_from_cert(cert)
@@ -384,19 +393,17 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
             return
 
         my_fqcn = new_admin_client_name()
-        credentials = {
-            DriverParams.CA_CERT.value: self.ca_cert,
-            DriverParams.CLIENT_CERT.value: self.client_cert,
-            DriverParams.CLIENT_KEY.value: self.client_key,
-        }
+        conn_sec = (self.conn_sec or ConnectionSecurity.MTLS).lower()
+        credentials = {DriverParams.CA_CERT.value: self.ca_cert}
+        if conn_sec not in [ConnectionSecurity.TLS, ConnectionSecurity.CLEAR]:
+            credentials[DriverParams.CLIENT_CERT.value] = self.client_cert
+            credentials[DriverParams.CLIENT_KEY.value] = self.client_key
 
         root_url = f"{self.scheme}://{self.host}:{self.port}"
         secure_conn = True
-        if self.conn_sec:
-            conn_sec = self.conn_sec.lower()
-            credentials[DriverParams.CONNECTION_SECURITY.value] = conn_sec
-            if conn_sec == ConnectionSecurity.CLEAR:
-                secure_conn = False
+        credentials[DriverParams.CONNECTION_SECURITY.value] = conn_sec
+        if conn_sec == ConnectionSecurity.CLEAR:
+            secure_conn = False
 
         flare_decomposers.register()
 
@@ -419,44 +426,6 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
 
         NetAgent(self.cell)
         self.cell.start()
-
-        # authenticate
-        authenticator = Authenticator(
-            cell=self.cell,
-            project_name=self.project_name,
-            client_name=self.user_name,
-            client_type=ClientType.ADMIN,
-            expected_sp_identity=self.server_identity,
-            secure_mode=True,  # always True to authenticate the cell endpoint!
-            root_cert_file=self.ca_cert,
-            private_key_file=self.client_key,
-            cert_file=self.client_cert,
-            msg_timeout=self.authenticate_msg_timeout,
-            retry_interval=1.0,
-            timeout=timeout,
-        )
-
-        abort_signal = Signal()
-        shared_fl_ctx = FLContext()
-        shared_fl_ctx.set_public_props({ReservedKey.IDENTITY_NAME: self.user_name})
-        token, token_signature, ssid, token_verifier = authenticator.authenticate(
-            shared_fl_ctx=shared_fl_ctx,
-            abort_signal=abort_signal,
-        )
-
-        if not isinstance(token_verifier, TokenVerifier):
-            raise RuntimeError(f"expect token_verifier to be TokenVerifier but got {type(token_verifier)}")
-
-        set_add_auth_headers_filters(self.cell, self.user_name, token, token_signature, ssid)
-
-        self.cell.core_cell.add_incoming_filter(
-            channel="*",
-            topic="*",
-            cb=validate_auth_headers,
-            token_verifier=token_verifier,
-            logger=self.logger,
-        )
-        self.debug(f"Successfully authenticated to {self.server_identity}: {token=} {ssid=}")
 
         self.aux_runner = AuxRunner(self)
         self.object_streamer = ObjectStreamer(self.aux_runner)
@@ -504,6 +473,10 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
 
     def _handle_session_expired(self, message: CellMessage):
         self.debug("received session timeout from server")
+        if self.auth_mode == _AUTH_MODE_OIDC:
+            self.server_sess_active = False
+            self.debug("OIDC session expired: will re-login on next command")
+            return
         self.close()
         self.fire_session_event(EventType.SESSION_TIMEOUT, message.payload)
 
@@ -664,7 +637,7 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
         Returns:
             A dict of login status and details
         """
-        if self.auth_mode == _AUTH_MODE_TOKEN:
+        if self.auth_mode in [_AUTH_MODE_TOKEN, _AUTH_MODE_OIDC]:
             return self._token_login()
 
         command = f"{InternalCommands.CERT_LOGIN} {self.user_name}"
@@ -693,6 +666,11 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
         return self._after_login()
 
     def _resolve_login_token(self) -> Optional[str]:
+        if self.auth_mode == _AUTH_MODE_OIDC:
+            if not self.oidc_token_manager:
+                raise RuntimeError("OIDC token manager is not initialized")
+            return self.oidc_token_manager.get_access_token()
+
         if isinstance(self.login_token_value, str) and self.login_token_value.strip():
             return self.login_token_value.strip()
 
@@ -710,7 +688,13 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
         return None
 
     def _token_login(self):
-        token = self._resolve_login_token()
+        try:
+            token = self._resolve_login_token()
+        except Exception as e:
+            return {
+                ResultKey.STATUS: APIStatus.ERROR_AUTHENTICATION,
+                ResultKey.DETAILS: f"Cannot obtain login token: {secure_format_exception(e)}",
+            }
         if not token:
             return {
                 ResultKey.STATUS: APIStatus.ERROR_AUTHENTICATION,
@@ -721,7 +705,7 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
         self.server_execute(
             InternalCommands.TOKEN_LOGIN,
             _LoginReplyProcessor(),
-            headers={"authorization": f"Bearer {token}"},
+            headers={"authorization": f"Bearer {token}", "auth_mode": self.auth_mode},
         )
         if self.login_result is None:
             return {
@@ -773,7 +757,7 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
             cell_reply = self.cell.send_request(
                 channel=CellChannel.HCI,
                 topic="command",
-                target=FQCN.ROOT_SERVER,
+                target=self.server_identity,
                 request=request,
                 timeout=timeout,
             )
@@ -903,12 +887,12 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
                 stream_ctx=stream_ctx,
                 file_name=file_name,
                 fl_ctx=fl_ctx,
-                targets=[FQCN.ROOT_SERVER],  # to server
+                targets=[self.server_identity],  # to server
             )
             if rc != ReturnCode.OK:
                 self.logger.error(f"failed to stream file to server: {rc}")
                 return None
-            reply = replies.get(FQCN.ROOT_SERVER)
+            reply = replies.get(self.server_identity)
             assert isinstance(reply, Shareable)
             end_result = reply.get_header(HeaderKey.END_RESULT)
             return end_result
@@ -942,12 +926,34 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
 
         # server command
         if not self.server_sess_active:
-            return {
-                ResultKey.STATUS: APIStatus.ERROR_INACTIVE_SESSION,
-                ResultKey.DETAILS: "Session is inactive, please try later",
-            }
+            if self.auth_mode == _AUTH_MODE_OIDC:
+                login_result = self.login()
+                if login_result.get(ResultKey.STATUS) != APIStatus.SUCCESS:
+                    return {
+                        ResultKey.STATUS: APIStatus.ERROR_INACTIVE_SESSION,
+                        ResultKey.DETAILS: f"Session refresh failed: {login_result.get(ResultKey.DETAILS)}",
+                    }
+            else:
+                return {
+                    ResultKey.STATUS: APIStatus.ERROR_INACTIVE_SESSION,
+                    ResultKey.DETAILS: "Session is inactive, please try later",
+                }
 
-        return self.server_execute(command, cmd_entry=ent, props=props)
+        result = self.server_execute(command, cmd_entry=ent, props=props)
+        if self.auth_mode == _AUTH_MODE_OIDC and result.get(ResultKey.STATUS) == APIStatus.ERROR_INACTIVE_SESSION:
+            self.server_sess_active = False
+            if self.oidc_token_manager:
+                self.oidc_token_manager.invalidate_access_token()
+
+            login_result = self.login()
+            if login_result.get(ResultKey.STATUS) != APIStatus.SUCCESS:
+                return {
+                    ResultKey.STATUS: APIStatus.ERROR_INACTIVE_SESSION,
+                    ResultKey.DETAILS: f"Session refresh failed: {login_result.get(ResultKey.DETAILS)}",
+                }
+            return self.server_execute(command, cmd_entry=ent, props=props)
+
+        return result
 
     def server_execute(self, command, reply_processor=None, cmd_entry=None, cmd_ctx=None, props=None, headers=None):
         if self.in_logout and command != InternalCommands.LOGOUT:
@@ -1046,6 +1052,18 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
 
         """
         assert isinstance(self.object_streamer, ObjectStreamer)
+        aux_targets = []
+        if not targets:
+            aux_targets = [AuxMsgTarget.server_target()]
+        else:
+            for target in targets:
+                if isinstance(target, AuxMsgTarget):
+                    aux_targets.append(target)
+                elif isinstance(target, str):
+                    aux_targets.append(AuxMsgTarget(target, target))
+                else:
+                    raise TypeError(f"invalid stream target type: {type(target)}")
+
         return self.object_streamer.stream(
             channel=channel,
             topic=topic,
@@ -1054,7 +1072,7 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
             fl_ctx=fl_ctx,
             optional=optional,
             secure=secure,
-            targets=[AuxMsgTarget.server_target()],  # only stream to server!
+            targets=aux_targets,
         )
 
     def register_stream_processing(

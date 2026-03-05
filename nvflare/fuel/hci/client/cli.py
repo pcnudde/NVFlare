@@ -445,7 +445,10 @@ class AdminClient(cmd.Cmd, EventHandler):
     def run(self):
         try:
             self.api.connect(self.login_timeout)
-            self.api.login()
+            login_result = self.api.login()
+            if login_result.get("status") != APIStatus.SUCCESS:
+                print(f"Login failed: {login_result.get('details')}")
+                return
             self.last_active_time = time.time()
             monitor = threading.Thread(target=self._monitor_user, daemon=True)
             monitor.start()

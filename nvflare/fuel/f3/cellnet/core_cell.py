@@ -576,6 +576,8 @@ class CoreCell(MessageReceiver, EndpointMonitor):
                     return self.agents.get(FQCN.ROOT_SERVER) is not None
         else:
             # child cell - must be connected to parent
+            if len(self.ext_listeners) > 0:
+                return True
             parent_fqcn = FQCN.get_parent(self.my_info.fqcn)
             if parent_fqcn in self.ALL_CELLS:
                 return True
@@ -610,11 +612,18 @@ class CoreCell(MessageReceiver, EndpointMonitor):
             self._create_internal_listener()
 
     def _set_bb_for_server_child(self, parent_url: str, create_internal_listener: bool):
-        if FQCN.ROOT_SERVER in self.ALL_CELLS:
-            return
-
         if parent_url:
             self._create_internal_connector(parent_url)
+        elif self.root_url:
+            if isinstance(self.root_url, list):
+                for url in self.root_url:
+                    self.logger.info(f"{self.my_info.fqcn}: creating listener on {url}")
+                    self._create_external_listener(url)
+            else:
+                self.logger.info(f"{self.my_info.fqcn}: creating listener on {self.root_url}")
+                self._create_external_listener(self.root_url)
+        elif FQCN.ROOT_SERVER in self.ALL_CELLS:
+            return
         if create_internal_listener:
             self._create_internal_listener()
 

@@ -17,14 +17,17 @@ from typing import Union
 
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.streaming import StreamContext
+from nvflare.apis.utils.fl_context_utils import gen_new_peer_ctx
 from nvflare.app_common.streamers.file_streamer import FileStreamer
 from nvflare.fuel.f3.cellnet.cell import Cell
-from nvflare.fuel.f3.cellnet.defs import CellChannel
+from nvflare.fuel.f3.cellnet.defs import CellChannel, MessageHeaderKey
 from nvflare.fuel.f3.message import Message as CellMessage
+from nvflare.fuel.f3.cellnet.core_cell import ReturnCode as CellReturnCode
 from nvflare.fuel.hci.conn import Connection
 from nvflare.fuel.hci.proto import MetaKey, MetaStatusValue, ProtoKey, StreamChannel, make_meta, validate_proto
 from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.private.fed.server.cred_keeper import CredKeeper
+from nvflare.private.defs import new_cell_message
 from nvflare.security.logging import secure_log_traceback
 
 from .constants import ConnProps
@@ -69,6 +72,12 @@ class AdminServer:
             topic="*",
             cb=self._process_admin_request,
         )
+        if engine:
+            cell.register_request_cb(
+                channel=CellChannel.AUX_COMMUNICATION,
+                topic="*",
+                cb=self._process_aux_request,
+            )
 
         if engine:
             self.fl_ctx = engine.new_context()
@@ -171,6 +180,21 @@ class AdminServer:
             self.logger.error(f"received invalid command: {request.headers}")
         payload = conn.close()
         return CellMessage(payload=payload)
+
+    def _process_aux_request(self, request: CellMessage) -> Union[None, CellMessage]:
+        shareable = request.payload
+        with self.engine.new_context() as fl_ctx:
+            topic = request.get_header(MessageHeaderKey.TOPIC)
+            reply = self.engine.dispatch(topic=topic, request=shareable, fl_ctx=fl_ctx)
+            shared_fl_ctx = gen_new_peer_ctx(fl_ctx)
+            reply.set_peer_context(shared_fl_ctx)
+
+            if reply is not None:
+                return_message = new_cell_message({}, reply)
+                return_message.set_header(MessageHeaderKey.RETURN_CODE, CellReturnCode.OK)
+            else:
+                return_message = new_cell_message({}, None)
+            return return_message
 
     def stop(self):
         self.cmd_reg.close()

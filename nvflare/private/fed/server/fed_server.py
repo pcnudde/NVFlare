@@ -180,12 +180,7 @@ class BaseServer(ABC):
 
         fl_port = int(parts[1])
 
-        # get admin port
-        admin_port = int(grpc_args.get("admin_port", fl_port))
-
-        root_url = [f"{scheme}://0:{fl_port}"]
-        if admin_port != fl_port:
-            root_url.append(f"{scheme}://0:{admin_port}")
+        root_url = f"{scheme}://0:{fl_port}"
 
         my_fqcn = FQCN.ROOT_SERVER
         self.cell = Cell(

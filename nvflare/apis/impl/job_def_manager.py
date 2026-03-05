@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import datetime
+import json
 import os
 import pathlib
 import shutil
@@ -27,9 +28,16 @@ from nvflare.apis.job_def_manager_spec import JobDefManagerSpec, RunStatus
 from nvflare.apis.server_engine_spec import ServerEngineSpec
 from nvflare.apis.storage import WORKSPACE, StorageException, StorageSpec
 from nvflare.fuel.utils import fobs
-from nvflare.fuel.utils.zip_utils import unzip_all_from_bytes, zip_directory_to_bytes
+from nvflare.fuel.utils.zip_utils import unzip_all_from_bytes, zip_directory_to_bytes, zip_directory_to_file
+from nvflare.lighter.tool_consts import (
+    NVFLARE_SIG_FILE,
+    NVFLARE_SUBMISSION_ATTESTATION_FILE,
+    NVFLARE_SUBMITTER_CRT_FILE,
+)
+from nvflare.lighter.utils import load_private_key_file, sign_folders
 
 _OBJ_TAG_SCHEDULED = "scheduled"
+_SERVER_ATTESTED_AUTH_SOURCES = {"token", "oidc"}
 
 
 class JobInfo:
@@ -127,6 +135,82 @@ class SimpleJobDefManager(JobDefManagerSpec):
     def job_uri(self, jid: str):
         return os.path.join(self.uri_root, jid)
 
+    @staticmethod
+    def _needs_server_attestation(meta: dict) -> bool:
+        return meta.get(JobMetaKey.SUBMITTER_AUTH_SOURCE.value) in _SERVER_ATTESTED_AUTH_SOURCES
+
+    @staticmethod
+    def _remove_existing_signatures(folder: str):
+        for root, _, _ in os.walk(folder):
+            for file_name in [NVFLARE_SIG_FILE, NVFLARE_SUBMITTER_CRT_FILE, NVFLARE_SUBMISSION_ATTESTATION_FILE]:
+                path = os.path.join(root, file_name)
+                if os.path.isfile(path):
+                    os.remove(path)
+
+    @staticmethod
+    def _make_submission_attestation(meta: dict, app_name: str) -> dict:
+        return {
+            "job_id": meta.get(JobMetaKey.JOB_ID.value, ""),
+            "job_name": meta.get(JobMetaKey.JOB_NAME.value, ""),
+            "job_folder_name": meta.get(JobMetaKey.JOB_FOLDER_NAME.value, ""),
+            "app_name": app_name,
+            "submitter_name": meta.get(JobMetaKey.SUBMITTER_NAME.value, ""),
+            "submitter_org": meta.get(JobMetaKey.SUBMITTER_ORG.value, ""),
+            "submitter_role": meta.get(JobMetaKey.SUBMITTER_ROLE.value, ""),
+            "submitter_auth_source": meta.get(JobMetaKey.SUBMITTER_AUTH_SOURCE.value, ""),
+            "submit_time": meta.get(JobMetaKey.SUBMIT_TIME.value, 0),
+            "submit_time_iso": meta.get(JobMetaKey.SUBMIT_TIME_ISO.value, ""),
+            "attested_at": time.time(),
+            "attested_at_iso": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+
+    def _server_attest_job_contents(self, job_folder: str, meta: dict, fl_ctx: FLContext):
+        engine = fl_ctx.get_engine()
+        workspace = engine.get_workspace()
+        startup_dir = workspace.get_startup_kit_dir()
+        signer_key = load_private_key_file(os.path.join(startup_dir, "server.key"))
+        signer_cert_path = os.path.join(startup_dir, "server.crt")
+
+        for app_name in meta.get(JobMetaKey.DEPLOY_MAP.value, {}).keys():
+            app_path = os.path.join(job_folder, app_name)
+            if not os.path.isdir(app_path):
+                continue
+            self._remove_existing_signatures(app_path)
+            with open(os.path.join(app_path, NVFLARE_SUBMISSION_ATTESTATION_FILE), "w") as f:
+                json.dump(self._make_submission_attestation(meta=meta, app_name=app_name), f, indent=2)
+            sign_folders(app_path, signer_key, signer_cert_path)
+
+    def _prepare_uploaded_content(self, meta: dict, uploaded_content: Union[str, bytes], fl_ctx: FLContext):
+        if not self._needs_server_attestation(meta):
+            return uploaded_content
+
+        if isinstance(uploaded_content, bytes):
+            content_bytes = uploaded_content
+        elif isinstance(uploaded_content, str):
+            with open(uploaded_content, "rb") as f:
+                content_bytes = f.read()
+        else:
+            raise TypeError(f"uploaded_content must be bytes or str but got {type(uploaded_content)}")
+
+        with tempfile.TemporaryDirectory() as td:
+            unzip_all_from_bytes(content_bytes, td)
+            job_folder_name = meta.get(JobMetaKey.JOB_FOLDER_NAME.value)
+            if not isinstance(job_folder_name, str) or not job_folder_name:
+                raise RuntimeError("missing job folder name for submission attestation")
+            job_folder = os.path.join(td, job_folder_name)
+            if not os.path.isdir(job_folder):
+                raise RuntimeError(f"job folder '{job_folder_name}' missing from uploaded content")
+
+            self._server_attest_job_contents(job_folder=job_folder, meta=meta, fl_ctx=fl_ctx)
+
+            if isinstance(uploaded_content, bytes):
+                return zip_directory_to_bytes(td, "")
+
+            fd, prepared_zip = tempfile.mkstemp(suffix=".zip")
+            os.close(fd)
+            zip_directory_to_file(td, "", prepared_zip)
+            return prepared_zip
+
     def create(self, meta: dict, uploaded_content: Union[str, bytes], fl_ctx: FLContext) -> Dict[str, Any]:
         # validate meta to make sure it has:
         jid = meta.get(JobMetaKey.JOB_ID.value, None)
@@ -144,7 +228,16 @@ class SimpleJobDefManager(JobDefManagerSpec):
 
         # write it to the store
         store = self._get_job_store(fl_ctx)
-        store.create_object(self.job_uri(jid), uploaded_content, meta, overwrite_existing=True)
+        prepared_content = self._prepare_uploaded_content(meta=meta, uploaded_content=uploaded_content, fl_ctx=fl_ctx)
+        try:
+            store.create_object(self.job_uri(jid), prepared_content, meta, overwrite_existing=True)
+        finally:
+            if (
+                isinstance(prepared_content, str)
+                and prepared_content != uploaded_content
+                and os.path.exists(prepared_content)
+            ):
+                os.remove(prepared_content)
         return meta
 
     def clone(self, from_jid: str, meta: dict, fl_ctx: FLContext) -> Dict[str, Any]:
@@ -160,11 +253,19 @@ class SimpleJobDefManager(JobDefManagerSpec):
         meta[JobMetaKey.DURATION.value] = "N/A"
         meta[JobMetaKey.STATUS.value] = RunStatus.SUBMITTED.value
 
-        # write it to the store
         store = self._get_job_store(fl_ctx)
-        store.clone_object(
-            from_uri=self.job_uri(from_jid), to_uri=self.job_uri(jid), meta=meta, overwrite_existing=True
-        )
+        if self._needs_server_attestation(meta):
+            source_data = store.get_data(self.job_uri(from_jid))
+            prepared_content = self._prepare_uploaded_content(meta=meta, uploaded_content=source_data, fl_ctx=fl_ctx)
+            try:
+                store.create_object(self.job_uri(jid), prepared_content, meta, overwrite_existing=True)
+            finally:
+                if isinstance(prepared_content, str) and os.path.exists(prepared_content):
+                    os.remove(prepared_content)
+        else:
+            store.clone_object(
+                from_uri=self.job_uri(from_jid), to_uri=self.job_uri(jid), meta=meta, overwrite_existing=True
+            )
         return meta
 
     def delete(self, jid: str, fl_ctx: FLContext):
