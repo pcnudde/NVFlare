@@ -13,7 +13,7 @@
 # limitations under the License.
 import threading
 import time
-from typing import List, Optional
+from typing import Any, Callable, List, Mapping, Optional
 
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_constant import ServerCommandKey
@@ -31,6 +31,7 @@ from nvflare.fuel.hci.server.builtin import new_command_register_with_builtin_mo
 from nvflare.fuel.hci.server.constants import ConnProps
 from nvflare.fuel.hci.server.hci import AdminServer
 from nvflare.fuel.hci.server.login import LoginModule, SessionManager
+from nvflare.fuel.hci.server.token_auth import ClaimMapper, TokenValidator
 from nvflare.fuel.sec.audit import Auditor, AuditService
 from nvflare.private.admin_defs import Message
 from nvflare.private.defs import ERROR_MSG_PREFIX, RequestHeader
@@ -102,6 +103,10 @@ class FedAdminServer(AdminServer):
         file_download_dir,
         download_job_url="",
         timeout: float = 10.0,
+        token_validator: Optional[TokenValidator] = None,
+        claim_mapper: Optional[ClaimMapper] = None,
+        token_jwks: Optional[Mapping[str, Any]] = None,
+        jwks_fetcher: Optional[Callable[[], Mapping[str, Any]]] = None,
     ):
         """The FedAdminServer is the framework for developing admin commands.
 
@@ -112,6 +117,10 @@ class FedAdminServer(AdminServer):
             file_download_dir: the directory for files to be downloaded
             download_job_url: download job url
             timeout: admin command timeouts
+            token_validator: validator for token login mode
+            claim_mapper: claim mapper for token login mode
+            token_jwks: static JWKS for token verification
+            jwks_fetcher: function returning current JWKS for token verification
         """
         cmd_reg = new_command_register_with_builtin_module(app_ctx=fed_admin_interface)
         self.sai = fed_admin_interface
@@ -119,7 +128,13 @@ class FedAdminServer(AdminServer):
         self.client_lock = threading.Lock()
 
         sess_mgr = SessionManager(cell)
-        login_module = LoginModule(sess_mgr)
+        login_module = LoginModule(
+            sess_mgr,
+            token_validator=token_validator,
+            claim_mapper=claim_mapper,
+            token_jwks=token_jwks,
+            jwks_fetcher=jwks_fetcher,
+        )
         cmd_reg.register_module(login_module)
 
         # register filters - order is important!

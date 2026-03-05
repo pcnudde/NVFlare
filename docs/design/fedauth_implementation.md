@@ -320,6 +320,32 @@ Add explicit server/client config for token validation and claim mapping:
   - `user_org`: `org`
   - `user_role`: `nvf_role` (or group-to-role mapping table)
 
+Current server wiring uses the server config key `admin_auth.token_login` and accepts static JWKS either inline (`jwks`) or from file (`jwks_file`):
+
+```json
+{
+  "servers": [
+    {
+      "admin_auth": {
+        "token_login": {
+          "enabled": true,
+          "issuer": "https://id.example.com/realms/nvflare",
+          "audience": "nvflare-admin",
+          "alg_allowlist": ["RS256"],
+          "clock_skew_seconds": 60,
+          "jwks_file": "local/admin_jwks.json",
+          "claim_mappings": {
+            "user_name_claims": ["preferred_username", "email"],
+            "user_org_claim": "org",
+            "user_role_claim": "nvf_role"
+          }
+        }
+      }
+    }
+  ]
+}
+```
+
 Role mapping should be deterministic and explicit. Example:
 
 - `nvf_role=project_admin` -> `project_admin`
