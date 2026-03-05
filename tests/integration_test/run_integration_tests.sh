@@ -9,7 +9,7 @@ PYTHONPATH="${PWD}/../.."
 export GRPC_POLL_STRATEGY="poll"
 export GRPC_ENABLE_FORK_SUPPORT="False"
 
-backends=(numpy tensorflow pytorch auth preflight cifar stats xgboost client_api client_api_qa model_controller_api keycloak keycloak_federation)
+backends=(numpy tensorflow pytorch auth preflight cifar stats xgboost client_api client_api_qa model_controller_api keycloak keycloak_federation token_auth_e2e)
 
 usage()
 {
@@ -98,12 +98,23 @@ run_keycloak_phase_d_test()
     eval "$cmd"
 }
 
+run_token_auth_e2e_test()
+{
+    echo "Running token-auth end-to-end example integration test."
+    export TOKEN_AUTH_E2E_REQUIRED="${TOKEN_AUTH_E2E_REQUIRED:-1}"
+    cmd="$prefix $cmd test_token_auth_e2e_poc_example.py"
+    echo "$cmd"
+    eval "$cmd"
+}
+
 if [[ $m == "tensorflow" ]]; then
     run_tensorflow
 elif [[ $m == "keycloak" ]]; then
     run_keycloak_phase_c_test
 elif [[ $m == "keycloak_federation" ]]; then
     run_keycloak_phase_d_test
+elif [[ $m == "token_auth_e2e" ]]; then
+    run_token_auth_e2e_test
 elif [[ $m == "preflight" ]]; then
     run_preflight_check_test
 else
