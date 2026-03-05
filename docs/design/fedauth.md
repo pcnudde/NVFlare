@@ -43,20 +43,27 @@ Out of scope:
 - **Infrastructure trust plane:** unchanged PKI/mTLS + existing explicit message authentication.
 - **Human identity plane:** SSO token-based auth (OIDC, or SAML via broker/token translation).
 
-### 4.2 Keycloak federation pattern (recommended)
+### 4.2 Standards-first federation pattern (recommended)
 
-Use one Keycloak broker realm as the issuer trusted by NVFlare.  
-Keycloak federates to multiple upstream organization IdPs.
+Use one trusted OIDC issuer for NVFlare.  
+That issuer can be:
+
+- a direct enterprise IdP, or
+- a federation broker that fronts multiple organization IdPs.
 
 - Org A users authenticate through upstream IdP A.
 - Org B users authenticate through upstream IdP B.
-- Keycloak emits normalized OIDC claims consumed by NVFlare.
+- The trusted issuer emits normalized OIDC claims consumed by NVFlare.
 
 Benefits:
 
 - NVFlare validates one issuer/JWKS surface.
-- federation complexity is isolated in Keycloak.
+- federation complexity is isolated in the IdP/broker layer.
 - claim normalization is centralized.
+
+Reference deployment:
+
+- Keycloak is the reference broker for local/CI testing and initial rollout, but the NVFlare auth design must remain provider-agnostic.
 
 ## 5. Requirements
 
@@ -72,6 +79,7 @@ Benefits:
 5. NVFlare shall preserve existing authorization policy semantics unless explicitly configured otherwise.
 6. NVFlare shall support multi-org deployments where different humans authenticate through different upstream IdPs.
 7. NVFlare shall support non-interactive authentication for automation/service principals.
+8. NVFlare shall be standards-based and provider-agnostic (OIDC/SAML integration without hard dependency on one IdP product).
 
 ### 5.2 Security requirements
 
@@ -94,12 +102,13 @@ Benefits:
 1. Identity lifecycle (join/leave/role change) shall be IdP-driven for SSO users.
 2. Runbooks shall exist for JWKS rotation, IdP outage, and fallback mode activation.
 3. Multi-org claim mapping rules shall be explicit and deterministic.
+4. Release validation shall include at least one reference provider in CI and at least one additional provider in periodic compatibility testing.
 
 ## 6. Architecture Requirements
 
 ### 6.1 Canonical token contract
 
-NVFlare requires a normalized claim contract from the trusted issuer (Keycloak broker):
+NVFlare requires a normalized claim contract from the trusted issuer:
 
 - stable subject identifier (`sub` or explicitly configured equivalent)
 - human display/login identifier (`preferred_username` or `email`)
@@ -110,7 +119,12 @@ NVFlare requires a normalized claim contract from the trusted issuer (Keycloak b
 
 Post-login execution path should continue consuming `USER_*`/`SUBMITTER_*` style context to minimize disruption to federated authorization and site-specific security handlers.
 
-### 6.3 Job authorization semantics decision required
+### 6.3 Plugin boundary
+
+- Keep core token authentication and validation in NVFlare core code path.
+- Keep site-local plugin/event-handler mechanisms for deployment-specific authorization and policy extensions.
+
+### 6.4 Job authorization semantics decision required
 
 Define whether submitter role/org are:
 
@@ -124,7 +138,7 @@ This is a core policy decision and must be explicitly selected.
 The design is accepted for implementation when:
 
 1. A dual-stack auth architecture is agreed (`cert` + `sso`).
-2. Claim contract and mapping policy are approved for multi-org Keycloak federation.
+2. Claim contract and mapping policy are approved for multi-org federation.
 3. Security control checklist is approved (validation, redaction, auditing).
 4. Rollout and rollback requirements are approved.
 5. Open decisions (Section 8) have owners and target resolution milestones.
@@ -137,12 +151,11 @@ The design is accepted for implementation when:
 4. Bearer-only vs token binding in first release.
 5. Preferred non-interactive flow for automation.
 6. Deprecation horizon for cert-based human auth.
-7. Keycloak topology model (shared broker realm vs per-project realm).
-8. Keycloak account-linking policy for cross-IdP identities.
+7. Identity topology model (shared broker realm vs per-project realm vs direct IdP trust).
+8. Account-linking policy for cross-IdP identities in the selected broker/IdP platform.
 
 ## 9. Implementation Reference
 
 Detailed engineering breakdown, component-level changes, migration phases, and full testing plan are tracked in:
 
 - [fedauth_implementation.md](/Users/pcnudde/.codex/worktrees/ad00/NVFlare/docs/design/fedauth_implementation.md)
-

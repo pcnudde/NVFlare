@@ -133,18 +133,18 @@ sequenceDiagram
   Server->>Server: Authorize + execute + fanout to sites
 ```
 
-### 4.4 Keycloak federation pattern for multi-org humans
+### 4.4 Federation pattern for multi-org humans (provider-agnostic)
 
-Yes, this is a good fit: one Keycloak realm can broker authentication from multiple upstream SSO providers (OIDC and/or SAML), then issue normalized OIDC tokens that NVFlare validates.
+Use one trusted OIDC issuer for NVFlare that can federate multiple upstream SSO providers (OIDC and/or SAML) and issue normalized OIDC tokens that NVFlare validates.
 
 Recommended deployment pattern:
 
-- NVFlare trusts only one issuer: the Keycloak broker realm (for example `https://kc.example.com/realms/nvflare`).
-- Keycloak broker realm has one Identity Provider config per participating org:
+- NVFlare trusts only one issuer endpoint per deployment (for example `https://id.example.com/realms/nvflare`).
+- The selected broker/IdP has one Identity Provider config per participating org:
   - `idp-org-a` -> Org A enterprise SSO
   - `idp-org-b` -> Org B enterprise SSO
   - etc.
-- Keycloak protocol mappers normalize upstream claims into a stable token contract for NVFlare:
+- Provider mapping rules normalize upstream claims into a stable token contract for NVFlare:
   - `sub` (stable human identifier)
   - `email` or `preferred_username` (display/user input compatibility)
   - `org` (explicit organization key used by NVFlare authz context)
@@ -154,19 +154,24 @@ Suggested trust model:
 
 - NVFlare does not validate each external IdP directly.
 - NVFlare validates broker-issued JWTs only (single issuer, single JWKS trust anchor).
-- Keycloak carries federation complexity and claim normalization.
+- The broker/IdP layer carries federation complexity and claim normalization.
 
 Operational note:
 
 - Use IdP alias or mapper-injected claim to derive org deterministically; do not infer org from email domain unless explicitly approved in policy.
 
+Reference provider choice:
+
+- Keycloak is the reference broker for local and CI integration tests.
+- Production deployments may use other standards-compliant providers (for example Entra, Okta/Auth0, Cognito, ZITADEL, authentik).
+
 ```mermaid
 flowchart LR
   U1["Human (Org A)"] --> IdPA["Org A SSO"]
   U2["Human (Org B)"] --> IdPB["Org B SSO"]
-  IdPA --> KC["Keycloak Broker Realm"]
-  IdPB --> KC
-  KC --> NV["NVFlare HCI Token Login"]
+  IdPA --> BROKER["Trusted OIDC Broker/Issuer"]
+  IdPB --> BROKER
+  BROKER --> NV["NVFlare HCI Token Login"]
   NV --> AZ["Server/Client Authorization"]
 ```
 
@@ -302,11 +307,11 @@ For non-human automation:
 - define supported service principal model (OIDC client credentials or workload identity).
 - avoid reusing interactive user flows for CI/CD.
 
-### 5.8 Keycloak-specific integration details
+### 5.8 Provider-agnostic token integration details
 
-For the Keycloak-first deployment, add explicit server/client config for token validation and claim mapping:
+Add explicit server/client config for token validation and claim mapping:
 
-- `issuer`: Keycloak broker realm issuer URL
+- `issuer`: trusted OIDC issuer URL
 - `audience`: expected client audience(s)
 - `jwks_uri`: optional override (otherwise discover from issuer metadata)
 - `alg_allowlist`: allowed JWT signing algorithms
@@ -324,6 +329,36 @@ Role mapping should be deterministic and explicit. Example:
 Fallback behavior recommendation:
 
 - If required claims are missing (`org`, role mapping target), reject login with explicit reason instead of assigning default elevated privileges.
+
+Provider profiles:
+
+- Keep the schema generic and standards-based.
+- Optionally provide deployment examples for multiple providers (for example Keycloak, Entra, Okta/Auth0, Cognito), but map them into the same canonical NVFlare config keys.
+
+### 5.9 Plugin boundary and extension strategy
+
+Recommended boundary:
+
+- Keep authentication/token validation in core HCI login path.
+- Keep provider-specific adapters outside core where possible (configuration + claim mapping profiles).
+- Keep site-local/custom policy in existing plugin/event-handler path.
+
+Why:
+
+- Auth token verification is security-critical and should not diverge across deployments.
+- Site policy extensions vary by deployment and are a good fit for plugin hooks already used in NVFlare.
+
+Use plugins for:
+
+- site-local authorization constraints
+- optional post-login claim enrichment that does not weaken core validation
+- deployment-specific command restrictions
+
+Do not rely on plugins for:
+
+- skipping issuer/audience/signature checks
+- accepting non-standard token contracts without explicit mapping
+- replacing core session security controls
 
 ## 6. Security Analysis
 
@@ -405,12 +440,12 @@ Implement in phases with hard merge gates:
    - Backward compatibility tests for `_cert_login`.
    - Authz context tests (`ConnProps.USER_*`) parity between cert and token login.
    - Gate: token login path fully covered before CLI/API UX changes.
-3. **Phase C - Integration tests with Keycloak (single realm)**
-   - Spin up Keycloak in CI and validate end-to-end token login.
-   - Validate role/org mapping from Keycloak claims into NVFlare session.
+3. **Phase C - Integration tests with reference provider (single issuer)**
+   - Spin up a scriptable reference provider in CI (Keycloak for now) and validate end-to-end token login.
+   - Validate role/org mapping from provider claims into NVFlare session.
    - Validate command authorization outcomes.
    - Gate: no rollout without green integration tests.
-4. **Phase D - Federation tests with Keycloak broker + multi-org upstream IdPs**
+4. **Phase D - Federation tests with broker + multi-org upstream IdPs**
    - Validate Org A user (via IdP A) gets Org A claims/rights.
    - Validate Org B user (via IdP B) gets Org B claims/rights.
    - Validate cross-org authorization boundaries.
@@ -420,11 +455,11 @@ Implement in phases with hard merge gates:
    - Cert fallback mode validation (`auth_mode=cert`).
    - Gate: required before default switch to token-first auth.
 
-### 8.2 Local/CI Keycloak topology for testing
+### 8.2 Local/CI reference topology for testing (Keycloak baseline)
 
 Use a deterministic, scriptable identity lab:
 
-- One Keycloak instance with at least three realms (or equivalent containers):
+- One Keycloak instance with at least three realms (or equivalent containers) as the baseline reference provider:
   - `nvflare-broker` (issuer trusted by NVFlare)
   - `org-a-idp` (upstream IdP A)
   - `org-b-idp` (upstream IdP B)
@@ -437,6 +472,11 @@ Use a deterministic, scriptable identity lab:
   - negative users with missing role/org claims.
 
 All realm and client configuration should be bootstrapped by script (admin API/import JSON), not manual UI actions, so CI is reproducible.
+
+Provider-agnostic validation:
+
+- In addition to Keycloak CI gates, maintain a periodic compatibility suite against at least one non-Keycloak provider.
+- The compatibility suite should assert the same canonical claim contract and authz outcomes.
 
 ### 8.3 Functional
 
@@ -463,9 +503,9 @@ All realm and client configuration should be bootstrapped by script (admin API/i
 - IdP slow/unavailable behavior.
 - graceful fallback to existing sessions when IdP temporarily fails.
 
-### 8.6 Federation-specific negative tests (Keycloak broker)
+### 8.6 Federation-specific negative tests (broker layer)
 
-- Upstream IdP misconfiguration in broker (disabled or wrong client secret).
+- Upstream IdP misconfiguration in broker/IdP platform (disabled or wrong client secret).
 - Broker emits wrong `org` mapping for one IdP alias.
 - Same email in two orgs with different upstream `sub` values.
 - User removed from upstream IdP group but still holding old NVFlare session.
@@ -481,6 +521,24 @@ Expected outcomes must be explicitly asserted:
 - Mixed clusters during rolling upgrade:
   - old client/new server
   - new client/old server (clear error and fallback path)
+
+### 8.8 Provider compatibility matrix
+
+Define explicit test tiers to prevent provider lock-in:
+
+- Tier 1 (required in CI): reference provider (Keycloak baseline) for Phase C and Phase D.
+- Tier 2 (scheduled compatibility): at least one non-Keycloak provider validating the same canonical claim contract.
+
+Canonical checks for every provider:
+
+- OIDC discovery and JWKS retrieval.
+- issuer/audience/signature/time claim validation behavior.
+- deterministic mapping of `sub`, username claim, `org`, and role claim/group mapping.
+- equivalent authorization outcomes for representative admin commands.
+
+Failure policy:
+
+- If Tier 2 shows semantic drift (claim mapping or authz outcome mismatch), block widening provider support until mapping/config guidance is updated.
 
 ## 9. Operational Implications
 
@@ -507,9 +565,9 @@ Expected outcomes must be explicitly asserted:
 4. Do we require token binding (for example DPoP/mTLS-bound token), or accept bearer-only in v1?
 5. Which non-interactive auth flow is officially supported for automation?
 6. What is the deprecation horizon for human cert mode?
-7. Keycloak topology: one shared broker realm vs per-project realm vs per-org realm?
-8. First-login linking policy in Keycloak: auto-link, verified-email-only, or admin-approved linking?
+7. Identity topology: one shared broker realm vs per-project realm vs per-org realm vs direct enterprise IdP trust?
+8. First-login linking policy in broker/IdP platform: auto-link, verified-email-only, or admin-approved linking?
 
 ## 12. Recommended Next Step
 
-Build a small dual-stack spike that adds `_token_login` on server and client while leaving all post-login authorization and command paths unchanged. Back this spike with a Keycloak broker test environment (two upstream org IdPs) and make its integration tests required in CI. This validates identity-source decoupling and multi-org federation behavior before changing provisioning and docs at scale.
+Build a small dual-stack spike that adds `_token_login` on server and client while leaving all post-login authorization and command paths unchanged. Back this spike with a reference broker test environment (Keycloak baseline, two upstream org IdPs) and make its integration tests required in CI. Add periodic non-Keycloak compatibility runs against the same claim contract. This validates identity-source decoupling and multi-org federation behavior without provider lock-in.
