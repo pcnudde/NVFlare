@@ -313,7 +313,10 @@ Add explicit server/client config for token validation and claim mapping:
 
 - `issuer`: trusted OIDC issuer URL
 - `audience`: expected client audience(s)
-- `jwks_uri`: optional override (otherwise discover from issuer metadata)
+- `jwks_uri`: optional JWKS endpoint for remote key retrieval
+- `discovery_url`: optional OIDC discovery endpoint (used to resolve `jwks_uri` when not explicitly set)
+- `jwks_cache_ttl_seconds`: JWKS cache TTL for refresh behavior
+- `jwks_request_timeout_seconds`: network timeout for JWKS/discovery fetch
 - `alg_allowlist`: allowed JWT signing algorithms
 - `claim_mappings`:
   - `user_name`: `preferred_username` or `email`
@@ -333,7 +336,9 @@ Current server wiring uses the server config key `admin_auth.token_login` and ac
           "audience": "nvflare-admin",
           "alg_allowlist": ["RS256"],
           "clock_skew_seconds": 60,
-          "jwks_file": "local/admin_jwks.json",
+          "jwks_uri": "https://id.example.com/realms/nvflare/protocol/openid-connect/certs",
+          "jwks_cache_ttl_seconds": 300,
+          "jwks_request_timeout_seconds": 5,
           "claim_mappings": {
             "user_name_claims": ["preferred_username", "email"],
             "user_org_claim": "org",
@@ -345,6 +350,17 @@ Current server wiring uses the server config key `admin_auth.token_login` and ac
   ]
 }
 ```
+
+Client-side token login mode is configured via admin config:
+
+```json
+{
+  "auth_mode": "token",
+  "token_env_var": "NVFLARE_ADMIN_BEARER_TOKEN"
+}
+```
+
+Supported token sources are: `token` (inline), `token_file`, and `token_env_var` (in that precedence order).
 
 Role mapping should be deterministic and explicit. Example:
 

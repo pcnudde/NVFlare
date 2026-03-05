@@ -231,6 +231,10 @@ class AdminConfigKey:
     UPLOAD_DIR = "upload_dir"
     DOWNLOAD_DIR = "download_dir"
     USERNAME = "username"
+    AUTH_MODE = "auth_mode"
+    TOKEN = "token"
+    TOKEN_FILE = "token_file"
+    TOKEN_ENV_VAR = "token_env_var"
     FILE_DOWNLOAD_PROGRESS_TIMEOUT = "file_download_progress_timeout"
     AUTHENTICATE_MSG_TIMEOUT = "authenticate_msg_timeout"
 

@@ -82,6 +82,8 @@ _CMD_TYPE_SERVER = 2
 
 MAX_AUTO_LOGIN_TRIES = 300
 AUTO_LOGIN_INTERVAL = 1.5
+_AUTH_MODE_CERT = "cert"
+_AUTH_MODE_TOKEN = "token"
 
 
 class FileWaiter(threading.Event):
@@ -290,8 +292,17 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
         self.default_login_timeout = admin_config.get(AdminConfigKey.LOGIN_TIMEOUT, 10.0)
         self.file_download_progress_timeout = admin_config.get(AdminConfigKey.FILE_DOWNLOAD_PROGRESS_TIMEOUT, 5.0)
         self.authenticate_msg_timeout = admin_config.get(AdminConfigKey.AUTHENTICATE_MSG_TIMEOUT, 5.0)
+        self.auth_mode = str(admin_config.get(AdminConfigKey.AUTH_MODE, _AUTH_MODE_CERT)).strip().lower()
+        self.login_token_value = admin_config.get(AdminConfigKey.TOKEN)
+        self.login_token_file = admin_config.get(AdminConfigKey.TOKEN_FILE)
+        self.login_token_env_var = admin_config.get(AdminConfigKey.TOKEN_ENV_VAR)
         self.user_name = user_name
         self.event_handlers = event_handlers
+
+        if self.auth_mode not in [_AUTH_MODE_CERT, _AUTH_MODE_TOKEN]:
+            raise ConfigError(
+                f"invalid auth mode '{self.auth_mode}': must be '{_AUTH_MODE_CERT}' or '{_AUTH_MODE_TOKEN}'"
+            )
 
         if not self.ca_cert:
             raise ConfigError("missing CA Cert file name")
@@ -653,6 +664,9 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
         Returns:
             A dict of login status and details
         """
+        if self.auth_mode == _AUTH_MODE_TOKEN:
+            return self._token_login()
+
         command = f"{InternalCommands.CERT_LOGIN} {self.user_name}"
 
         id_asserter = IdentityAsserter(private_key_file=self.client_key, cert_file=self.client_cert)
@@ -675,6 +689,49 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
             return {
                 ResultKey.STATUS: APIStatus.ERROR_AUTHENTICATION,
                 ResultKey.DETAILS: "Incorrect user name or password",
+            }
+        return self._after_login()
+
+    def _resolve_login_token(self) -> Optional[str]:
+        if isinstance(self.login_token_value, str) and self.login_token_value.strip():
+            return self.login_token_value.strip()
+
+        if isinstance(self.login_token_file, str) and self.login_token_file.strip():
+            with open(self.login_token_file.strip(), "r") as f:
+                token = f.read().strip()
+            if token:
+                return token
+
+        if isinstance(self.login_token_env_var, str) and self.login_token_env_var.strip():
+            token = os.environ.get(self.login_token_env_var.strip(), "").strip()
+            if token:
+                return token
+
+        return None
+
+    def _token_login(self):
+        token = self._resolve_login_token()
+        if not token:
+            return {
+                ResultKey.STATUS: APIStatus.ERROR_AUTHENTICATION,
+                ResultKey.DETAILS: "Missing bearer token for token login.",
+            }
+
+        self.login_result = None
+        self.server_execute(
+            InternalCommands.TOKEN_LOGIN,
+            _LoginReplyProcessor(),
+            headers={"authorization": f"Bearer {token}"},
+        )
+        if self.login_result is None:
+            return {
+                ResultKey.STATUS: APIStatus.ERROR_RUNTIME,
+                ResultKey.DETAILS: "Communication Error - please try later",
+            }
+        elif self.login_result == "REJECT":
+            return {
+                ResultKey.STATUS: APIStatus.ERROR_AUTHENTICATION,
+                ResultKey.DETAILS: "Invalid token or token rejected",
             }
         return self._after_login()
 

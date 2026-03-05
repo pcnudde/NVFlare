@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from typing import Any, Dict, Mapping, Optional, Sequence
+from urllib.request import urlopen
 
 import psutil
 
@@ -59,6 +60,15 @@ def _get_optional_non_negative_int(config: Mapping[str, Any], key: str, full_nam
     if not isinstance(value, int) or value < 0:
         raise ValueError(f"{full_name} must be a non-negative integer")
     return value
+
+
+def _get_optional_positive_number(config: Mapping[str, Any], key: str, full_name: str) -> Optional[float]:
+    if key not in config:
+        return None
+    value = config.get(key)
+    if not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError(f"{full_name} must be a number > 0")
+    return float(value)
 
 
 def _get_optional_string_sequence(config: Mapping[str, Any], key: str, full_name: str) -> Optional[Sequence[str]]:
@@ -113,6 +123,74 @@ def _load_jwks_from_file(path: str, workspace_dir: Optional[str]) -> Dict[str, A
     if not isinstance(content, Mapping):
         raise ValueError(f"jwks file '{path}' must contain a JSON object")
     return dict(content)
+
+
+def _fetch_json_from_url(url: str, timeout: float) -> Dict[str, Any]:
+    with urlopen(url, timeout=timeout) as resp:
+        content = json.loads(resp.read().decode("utf-8"))
+    if not isinstance(content, Mapping):
+        raise ValueError(f"url '{url}' did not return a JSON object")
+    return dict(content)
+
+
+def _build_jwks_fetcher_from_remote(token_login: Mapping[str, Any], issuer: str):
+    jwks_uri = _get_optional_non_empty_string(token_login, "jwks_uri", "server.admin_auth.token_login.jwks_uri")
+    discovery_url = _get_optional_non_empty_string(
+        token_login, "discovery_url", "server.admin_auth.token_login.discovery_url"
+    )
+    cache_ttl = _get_optional_non_negative_int(
+        token_login, "jwks_cache_ttl_seconds", "server.admin_auth.token_login.jwks_cache_ttl_seconds"
+    )
+    if cache_ttl is None:
+        cache_ttl = 300
+    request_timeout = _get_optional_positive_number(
+        token_login, "jwks_request_timeout_seconds", "server.admin_auth.token_login.jwks_request_timeout_seconds"
+    )
+    if request_timeout is None:
+        request_timeout = 5.0
+
+    state = {"jwks": None, "last_fetch_time": 0.0, "jwks_uri": jwks_uri}
+    state_lock = threading.Lock()
+
+    def _discover_jwks_uri() -> str:
+        if state["jwks_uri"]:
+            return state["jwks_uri"]
+
+        openid_config_url = discovery_url
+        if not openid_config_url:
+            openid_config_url = f"{issuer.rstrip('/')}/.well-known/openid-configuration"
+
+        metadata = _fetch_json_from_url(openid_config_url, timeout=request_timeout)
+        discovered_uri = metadata.get("jwks_uri")
+        if not isinstance(discovered_uri, str) or not discovered_uri.strip():
+            raise ValueError(f"openid metadata from '{openid_config_url}' missing non-empty jwks_uri")
+        state["jwks_uri"] = discovered_uri.strip()
+        return state["jwks_uri"]
+
+    def _refresh_jwks() -> Mapping[str, Any]:
+        resolved_uri = _discover_jwks_uri()
+        jwks = _fetch_json_from_url(resolved_uri, timeout=request_timeout)
+        keys = jwks.get("keys")
+        if not isinstance(keys, list):
+            raise ValueError("fetched JWKS must contain a 'keys' list")
+        state["jwks"] = jwks
+        state["last_fetch_time"] = time.time()
+        return jwks
+
+    def _fetcher() -> Mapping[str, Any]:
+        now = time.time()
+        cached_jwks = state["jwks"]
+        if cached_jwks is not None and cache_ttl > 0 and now - state["last_fetch_time"] < cache_ttl:
+            return cached_jwks
+
+        with state_lock:
+            now = time.time()
+            cached_jwks = state["jwks"]
+            if cached_jwks is not None and cache_ttl > 0 and now - state["last_fetch_time"] < cache_ttl:
+                return cached_jwks
+            return _refresh_jwks()
+
+    return _fetcher
 
 
 def build_admin_token_login_kwargs(
@@ -210,27 +288,45 @@ def build_admin_token_login_kwargs(
 
     has_inline_jwks = "jwks" in token_login
     has_jwks_file = "jwks_file" in token_login
-    if has_inline_jwks and has_jwks_file:
-        raise ValueError("server.admin_auth.token_login must specify only one of 'jwks' or 'jwks_file'")
+    has_jwks_uri = "jwks_uri" in token_login
+    has_discovery_url = "discovery_url" in token_login
+
+    jwks_sources_count = sum([has_inline_jwks, has_jwks_file, has_jwks_uri or has_discovery_url])
+    if jwks_sources_count > 1:
+        raise ValueError(
+            "server.admin_auth.token_login must specify only one JWKS source: "
+            "'jwks', 'jwks_file', or remote ('jwks_uri'/'discovery_url')"
+        )
 
     if has_inline_jwks:
         jwks = token_login.get("jwks")
         if not isinstance(jwks, Mapping):
             raise ValueError("server.admin_auth.token_login.jwks must be a mapping")
         token_jwks = dict(jwks)
+        return {
+            "token_validator": token_validator,
+            "claim_mapper": claim_mapper,
+            "token_jwks": token_jwks,
+        }
     elif has_jwks_file:
         jwks_file = _get_required_non_empty_string(
             token_login, "jwks_file", "server.admin_auth.token_login.jwks_file"
         )
         token_jwks = _load_jwks_from_file(jwks_file, workspace_dir=workspace_dir)
+        return {
+            "token_validator": token_validator,
+            "claim_mapper": claim_mapper,
+            "token_jwks": token_jwks,
+        }
+    elif has_jwks_uri or has_discovery_url:
+        jwks_fetcher = _build_jwks_fetcher_from_remote(token_login=token_login, issuer=issuer)
+        return {
+            "token_validator": token_validator,
+            "claim_mapper": claim_mapper,
+            "jwks_fetcher": jwks_fetcher,
+        }
     else:
-        raise ValueError("server.admin_auth.token_login requires 'jwks' or 'jwks_file'")
-
-    return {
-        "token_validator": token_validator,
-        "claim_mapper": claim_mapper,
-        "token_jwks": token_jwks,
-    }
+        raise ValueError("server.admin_auth.token_login requires 'jwks', 'jwks_file', 'jwks_uri', or 'discovery_url'")
 
 
 def monitor_parent_process(runner: Runner, parent_pid, stop_event: threading.Event):
