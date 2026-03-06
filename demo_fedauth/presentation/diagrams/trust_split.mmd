@@ -1,0 +1,16 @@
+flowchart TB
+    subgraph Human["Human Identity Plane"]
+        KC["Keycloak"]
+        Admin["Admin Session"]
+        KC -->|OIDC token| Admin
+    end
+
+    subgraph Infra["Infrastructure Trust Plane"]
+        Server["Server"]
+        Site1["Site 1"]
+        Site2["Site 2"]
+        Server <-->|mTLS| Site1
+        Server <-->|mTLS| Site2
+    end
+
+    Admin -->|TLS + bearer token| Server

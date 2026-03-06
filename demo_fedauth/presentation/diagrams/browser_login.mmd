@@ -1,0 +1,15 @@
+sequenceDiagram
+    participant User
+    participant CLI as fl_admin
+    participant Browser
+    participant KC as Keycloak
+    participant Server as server.admin
+
+    User->>CLI: start fl_admin.sh
+    CLI->>Browser: open auth URL
+    Browser->>KC: authenticate user
+    KC-->>Browser: authorization code
+    Browser-->>CLI: callback on 127.0.0.1
+    CLI->>KC: exchange code for token
+    CLI->>Server: TOKEN_LOGIN
+    Server-->>CLI: authenticated admin session

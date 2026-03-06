@@ -1,0 +1,9 @@
+flowchart LR
+    Admin["Admin"]
+    Upload["submit_job"]
+    Validate["Server validates session<br/>and authorization"]
+    Digest["Server hashes accepted<br/>package"]
+    Attest["Server signs submission<br/>attestation"]
+    Run["Clients verify and run"]
+
+    Admin --> Upload --> Validate --> Digest --> Attest --> Run

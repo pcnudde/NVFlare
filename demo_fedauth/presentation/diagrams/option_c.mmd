@@ -1,0 +1,12 @@
+flowchart LR
+    User["User"]
+    Sign["Ephemeral signing key"]
+    Sigstore["Sigstore-style signer"]
+    Server["NVFlare server"]
+    Exec["Executors"]
+
+    User --> Sign
+    Sign -->|manifest signature| Server
+    Sigstore -->|short-lived cert| Server
+    Server -->|verified user bundle| Exec
+    Server -->|countersigned acceptance| Exec

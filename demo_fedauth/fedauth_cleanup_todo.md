@@ -52,10 +52,6 @@ Current cleanup backlog after the Keycloak/NVFlare demo work.
 
 ## Lower Priority
 
-9. Improve the slide export path.
-   - Current `.pptx` export is generated from Markdown.
-   - Mermaid diagrams should eventually be rendered as actual images in the deck, not raw code blocks.
-
-10. Consolidate fedauth demo documentation.
+9. Consolidate fedauth demo documentation.
    - Keep `demo_fedauth/README.md` as the single operator guide.
    - Keep the slide deck and README aligned as the demo steps change.

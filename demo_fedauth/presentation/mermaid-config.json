@@ -1,0 +1,13 @@
+{
+  "theme": "neutral",
+  "backgroundColor": "transparent",
+  "themeVariables": {
+    "fontFamily": "Helvetica, Arial, sans-serif",
+    "primaryColor": "#e8f4ee",
+    "primaryTextColor": "#173d2d",
+    "primaryBorderColor": "#0b5d3b",
+    "lineColor": "#0b5d3b",
+    "secondaryColor": "#f4f7f5",
+    "tertiaryColor": "#ffffff"
+  }
+}

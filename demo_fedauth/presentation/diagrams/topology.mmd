@@ -1,0 +1,16 @@
+flowchart LR
+    subgraph Laptop["User Laptop"]
+        Browser["Browser"]
+        CLI["fl_admin.sh"]
+    end
+
+    KC["Keycloak"]
+    Server["NVFlare Server<br/>server.admin :8003<br/>server :8002"]
+    Site1["Site 1"]
+    Site2["Site 2"]
+
+    Browser -->|OIDC login| KC
+    KC -->|code / token flow| CLI
+    CLI -->|TOKEN_LOGIN| Server
+    Server -->|mTLS| Site1
+    Server -->|mTLS| Site2

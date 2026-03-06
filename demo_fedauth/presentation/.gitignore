@@ -1,0 +1,5 @@
+node_modules/
+fedauth_demo_slides.html
+fedauth_demo_slides.pdf
+diagrams/*.svg
+diagrams/*.png

@@ -1,0 +1,18 @@
+flowchart LR
+    User["User Laptop<br/>browser + fl_admin"]
+    KC["Central Keycloak<br/>identity broker + NVFlare role source"]
+    OrgA["Org A IdP"]
+    OrgB["Org B IdP"]
+    OrgC["Org C IdP"]
+    Server["NVFlare Server<br/>trusts central Keycloak"]
+    Site1["Site 1"]
+    Site2["Site 2"]
+
+    User -->|OIDC login| KC
+    KC -->|brokered auth| OrgA
+    KC -->|brokered auth| OrgB
+    KC -->|brokered auth| OrgC
+    KC -->|NVFlare token\nnormalized claims| User
+    User -->|TOKEN_LOGIN| Server
+    Server -->|mTLS| Site1
+    Server -->|mTLS| Site2

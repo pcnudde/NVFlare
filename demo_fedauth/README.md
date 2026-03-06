@@ -26,8 +26,8 @@ This README is the canonical operator guide for the `demo_fedauth/` demo.
 - `prepare_startup_kits.sh`: provisions startup kits and applies fedauth resource config.
 - `docker-compose.yml`: launches Keycloak + server + 2 clients.
 - `Dockerfile`: local NVFlare image build (from this repo).
-- `fedauth_demo_slides.md`: slide source for the demo narrative.
-- `fedauth_demo_slides.pdf`: exported presentation deck.
+- `presentation/fedauth_demo_slides.md`: Marp-compatible slide source for the demo narrative.
+- `presentation/diagrams/*.mmd`: Mermaid source for the presentation diagrams.
 
 ## Prerequisites
 
@@ -119,6 +119,42 @@ Repeat `list_jobs` until job is `FINISHED:*`.
 cd /Users/pcnudde/.codex/worktrees/ad00/NVFlare/demo_fedauth
 podman compose down
 ```
+
+## Presenting The Slides
+
+Use Marp for presentation and Mermaid source files for the diagrams.
+
+Recommended:
+
+1. VS Code with the `Marp for VS Code` extension
+2. Marp CLI for presenting
+
+Before presenting, render the Mermaid diagrams:
+
+```bash
+cd demo_fedauth/presentation
+npm ci
+npm run render-diagrams
+```
+
+Then present the deck:
+
+```bash
+cd demo_fedauth/presentation
+marp -p fedauth_demo_slides.md
+```
+
+If you prefer VS Code:
+
+1. open `demo_fedauth/presentation/fedauth_demo_slides.md`
+2. enable Marp preview
+3. start presentation mode from the Marp extension
+
+Notes:
+
+- the deck references rendered SVGs, not raw Mermaid blocks
+- the Mermaid source of truth lives under `demo_fedauth/presentation/diagrams/`
+- rendered `.svg` files are intentionally ignored by git
 
 ## Notes
 

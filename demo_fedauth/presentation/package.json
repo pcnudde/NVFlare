@@ -1,0 +1,13 @@
+{
+  "name": "demo_fedauth_presentation",
+  "version": "1.0.0",
+  "description": "Presentation assets for the NVFlare fedauth demo.",
+  "private": true,
+  "scripts": {
+    "render-diagrams": "mmdc -c mermaid-config.json -i diagrams/federated_model.mmd -o diagrams/federated_model.svg && mmdc -c mermaid-config.json -i diagrams/topology.mmd -o diagrams/topology.svg && mmdc -c mermaid-config.json -i diagrams/trust_split.mmd -o diagrams/trust_split.svg && mmdc -c mermaid-config.json -i diagrams/browser_login.mmd -o diagrams/browser_login.svg && mmdc -c mermaid-config.json -i diagrams/job_submission.mmd -o diagrams/job_submission.svg && mmdc -c mermaid-config.json -i diagrams/option_c.mmd -o diagrams/option_c.svg",
+    "present": "marp -p fedauth_demo_slides.md"
+  },
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "^11.12.0"
+  }
+}
