@@ -26,7 +26,7 @@ Partially addressed:
 
 Still open:
 
-- #6 Temporal validation semantics unclear
+- #6 Temporal validation semantics are now documented in code and covered with skew-boundary tests; the remaining decision is only whether we want a stricter policy than current JWT leeway.
 - OIDC callback/network error-path coverage gaps
 
 ---

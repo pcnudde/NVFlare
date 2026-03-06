@@ -14,6 +14,8 @@ These review items were valid at the start of the cleanup pass, and are now addr
 - invite import no longer silently reuses an existing extracted workspace; reruns must remove the old directory or choose a new one.
 - admin-port identity verification now challenges the admin cell target while validating against the root server cert identity, so `server.admin` works in the secure token-auth flow again.
 - `invite.zip` no longer carries `local/signature.json`; local defaults are treated as mutable local state instead of implied signed bootstrap.
+- production `SessionManager` now verifies session-token signatures on decode when the server id-asserter is configured.
+- token-validation config now enforces a minimum required-claims floor (`iss`, `aud`, `exp`, `iat`) and has boundary coverage for clock-skew semantics.
 
 ## Scope
 
@@ -36,40 +38,7 @@ Review inputs:
 
 ## Main Findings
 
-### 1. Critical: cert-mode admin transport auth appears regressed
-
-Files:
-
-- `nvflare/fuel/hci/client/api.py`
-
-Relevant lines:
-
-- current `connect()` path: `379-439`
-- stale imports: `58`, `63`
-
-What changed:
-
-- `AdminAPI.connect()` now creates and starts the cell, but no longer runs the older `Authenticator` handshake or installs auth-header filters.
-- The imports for:
-  - `Authenticator`
-  - `validate_auth_headers`
-  - `set_add_auth_headers_filters`
-  are still present, but unused.
-
-Why this matters:
-
-- token/OIDC mode may still function because login moved to session auth
-- existing cert-mode admin flows appear to have lost cell-level auth behavior
-- this is the most serious compatibility/security concern in the branch
-
-Minimum-change fix strategy:
-
-1. confirm whether cert-mode admin login is still a supported path
-2. if yes, restore the old cell-level auth path for cert-mode only
-3. keep token/OIDC path separate instead of trying to unify both immediately
-4. add a regression test for legacy cert-mode admin login
-
-### 2. Medium: child-cell readiness is too optimistic
+### 1. Medium: child-cell readiness is too optimistic
 
 File:
 
@@ -93,34 +62,23 @@ Minimum-change fix strategy:
 1. tighten readiness for child cells so it reflects routability, not just listener creation
 2. add a focused test around admin child-cell readiness semantics
 
-### 3. Medium: temporal token validation semantics are permissive and unclear
+### 2. Low: OIDC error-path coverage is still thin
 
-File:
+Files:
 
-- `nvflare/fuel/hci/server/token_auth.py`
-
-Relevant lines:
-
-- `132-144`
-
-Current behavior:
-
-- `exp` accepted until `exp + skew`
-- `nbf` and `iat` also use skew in a lenient direction
+- `nvflare/fuel/hci/client/oidc.py`
+- `tests/unit_test/fuel/hci/client/oidc_test.py`
 
 Why this matters:
 
-- this effectively creates a post-expiry grace period
-- that may be acceptable, but it is not clearly documented as policy
-- without explicit intent, this is easy for another reviewer to read as a bug
+- the happy path is well covered now, but callback/server/network failures are still under-tested
+- that is an operational robustness issue more than a security blocker
 
 Minimum-change fix strategy:
 
-1. decide whether `clock_skew_seconds` means:
-   - clock drift tolerance, or
-   - explicit grace period
-2. document that choice in code and design docs
-3. add boundary tests for `exp`, `nbf`, and `iat`
+1. add callback mismatch / missing-code tests
+2. add malformed JSON / non-200 token endpoint tests
+3. classify refresh fallback failures more precisely in logs
 
 ## Items Reviewed But Not Raised As Main Findings
 
@@ -146,23 +104,22 @@ These still need cleanup, but they are not currently the main blockers.
 
 ### High Priority
 
-1. Resolve cert-mode admin auth regression in `AdminAPI.connect()`.
-2. Add or restore regression coverage for legacy cert-mode admin login.
-3. Tighten child-cell readiness semantics and test them.
-4. Clarify and test token temporal validation policy.
+1. Tighten child-cell readiness semantics and test them.
+2. Add focused OIDC callback/network error-path tests.
+3. Decide whether refresh fallback logging should distinguish revocation vs transient failure.
 
 ### Medium Priority
 
-5. Add a required containerized smoke test for `demo_fedauth`:
+4. Add a required containerized smoke test for `demo_fedauth`:
    - Keycloak up
    - server + 2 clients up
    - OIDC login
    - `check_status`
    - `submit_job`
    - completion check
-6. Improve reprovision safety in `demo_fedauth/prepare_startup_kits.sh`.
-7. Rename the generated admin console profile away from `admin@nvidia.com` to a neutral console-profile name.
-8. Keep `demo_fedauth/README.md` and the slide deck aligned as commands or topology change.
+5. Improve reprovision safety in `demo_fedauth/prepare_startup_kits.sh`.
+6. Rename the generated admin console profile away from `admin@nvidia.com` to a neutral console-profile name.
+7. Keep `demo_fedauth/README.md` and the slide deck aligned as commands or topology change.
 
 ## Cleanup Strategy To Minimize New Code
 

@@ -20,6 +20,7 @@ import jwt
 from jwt import InvalidAudienceError, InvalidIssuerError, InvalidTokenError
 
 DEFAULT_ALLOWED_ROLES = ("platform_admin", "project_admin", "org_admin", "lead", "member")
+MIN_REQUIRED_TOKEN_CLAIMS = ("iss", "aud", "exp", "iat")
 
 
 class TokenValidationError(ValueError):
@@ -35,8 +36,19 @@ class TokenValidationConfig:
     issuer: str
     audience: Union[str, Sequence[str]]
     alg_allowlist: Sequence[str] = ("RS256",)
+    # This is JWT leeway for small clock drift, not a way to disable expiry enforcement.
     clock_skew_seconds: int = 0
     required_claims: Sequence[str] = ("iss", "aud", "exp", "iat", "nbf")
+
+    def __post_init__(self):
+        if self.clock_skew_seconds < 0:
+            raise ValueError("clock_skew_seconds must be non-negative")
+
+        required_claims = tuple(dict.fromkeys(self.required_claims))
+        missing_floor = [claim for claim in MIN_REQUIRED_TOKEN_CLAIMS if claim not in required_claims]
+        if missing_floor:
+            required_claims = tuple(list(required_claims) + missing_floor)
+        object.__setattr__(self, "required_claims", required_claims)
 
 
 @dataclass(frozen=True)

@@ -78,6 +78,25 @@ def _validator(alg_allowlist=None):
     )
 
 
+def test_validation_config_enforces_minimum_required_claim_floor():
+    config = TokenValidationConfig(
+        issuer=ISSUER,
+        audience=AUDIENCE,
+        required_claims=("iss", "aud"),
+    )
+
+    assert config.required_claims == ("iss", "aud", "exp", "iat")
+
+
+def test_validation_config_rejects_negative_clock_skew():
+    with pytest.raises(ValueError, match="non-negative"):
+        TokenValidationConfig(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            clock_skew_seconds=-1,
+        )
+
+
 def test_validate_jwt_success(signing_material):
     now = int(time.time())
     private_key_pem, jwks = signing_material
@@ -112,6 +131,40 @@ def test_validate_jwt_rejects_expired_token(signing_material):
         _validator().validate(token=token, jwks=jwks, now=now)
 
 
+def test_validate_jwt_allows_expiry_within_clock_skew(signing_material):
+    now = int(time.time())
+    private_key_pem, jwks = signing_material
+    token = _make_token(private_key_pem, _build_claims(now, exp=now - 1))
+    validator = TokenValidator(
+        TokenValidationConfig(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            alg_allowlist=["RS256"],
+            clock_skew_seconds=2,
+        )
+    )
+
+    claims = validator.validate(token=token, jwks=jwks, now=now)
+    assert claims["sub"] == "alice-sub"
+
+
+def test_validate_jwt_rejects_expiry_at_clock_skew_boundary(signing_material):
+    now = int(time.time())
+    private_key_pem, jwks = signing_material
+    token = _make_token(private_key_pem, _build_claims(now, exp=now - 2))
+    validator = TokenValidator(
+        TokenValidationConfig(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            alg_allowlist=["RS256"],
+            clock_skew_seconds=2,
+        )
+    )
+
+    with pytest.raises(TokenValidationError, match="expired"):
+        validator.validate(token=token, jwks=jwks, now=now)
+
+
 def test_validate_jwt_rejects_future_nbf(signing_material):
     now = int(time.time())
     private_key_pem, jwks = signing_material
@@ -120,12 +173,46 @@ def test_validate_jwt_rejects_future_nbf(signing_material):
         _validator().validate(token=token, jwks=jwks, now=now)
 
 
+def test_validate_jwt_allows_nbf_within_clock_skew(signing_material):
+    now = int(time.time())
+    private_key_pem, jwks = signing_material
+    token = _make_token(private_key_pem, _build_claims(now, nbf=now + 2))
+    validator = TokenValidator(
+        TokenValidationConfig(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            alg_allowlist=["RS256"],
+            clock_skew_seconds=2,
+        )
+    )
+
+    claims = validator.validate(token=token, jwks=jwks, now=now)
+    assert claims["sub"] == "alice-sub"
+
+
 def test_validate_jwt_rejects_future_iat(signing_material):
     now = int(time.time())
     private_key_pem, jwks = signing_material
     token = _make_token(private_key_pem, _build_claims(now, iat=now + 10))
     with pytest.raises(TokenValidationError, match="issued at"):
         _validator().validate(token=token, jwks=jwks, now=now)
+
+
+def test_validate_jwt_allows_iat_within_clock_skew(signing_material):
+    now = int(time.time())
+    private_key_pem, jwks = signing_material
+    token = _make_token(private_key_pem, _build_claims(now, iat=now + 2))
+    validator = TokenValidator(
+        TokenValidationConfig(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            alg_allowlist=["RS256"],
+            clock_skew_seconds=2,
+        )
+    )
+
+    claims = validator.validate(token=token, jwks=jwks, now=now)
+    assert claims["sub"] == "alice-sub"
 
 
 def test_validate_jwt_rejects_disallowed_algorithm(signing_material):

@@ -53,14 +53,16 @@ def generate_cert(
     x509_subject = x509_name(subject.name, subject.org, subject.role)
     x509_issuer = x509_name(issuer.name, issuer.org, issuer.role)
 
+    now = datetime.datetime.now(datetime.UTC)
+
     builder = (
         x509.CertificateBuilder()
         .subject_name(x509_subject)
         .issuer_name(x509_issuer)
         .public_key(subject_pub_key)
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.utcnow())
-        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=valid_days))
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=valid_days))
         .add_extension(
             x509.SubjectKeyIdentifier.from_public_key(subject_pub_key),
             critical=False,

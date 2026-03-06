@@ -65,6 +65,14 @@ def test_build_admin_token_login_kwargs_builds_components_from_inline_jwks():
     assert kwargs["token_jwks"] == {"keys": [{"kid": "test-kid"}]}
 
 
+def test_build_admin_token_login_kwargs_enforces_minimum_required_claim_floor():
+    conf = _make_server_conf({"required_claims": ["iss", "aud"]})
+
+    kwargs = build_admin_token_login_kwargs(server_conf=conf, workspace_dir="/tmp")
+
+    assert kwargs["token_validator"].config.required_claims == ("iss", "aud", "exp", "iat")
+
+
 def test_build_admin_token_login_kwargs_loads_jwks_from_workspace_relative_file(tmp_path):
     jwks = {"keys": [{"kid": "from-file"}]}
     jwks_file = tmp_path / "jwks.json"
