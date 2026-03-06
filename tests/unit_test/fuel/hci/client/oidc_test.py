@@ -13,11 +13,15 @@
 # limitations under the License.
 
 import json
+import socket
+import threading
 import time
+from urllib.request import urlopen
 
 import jwt
 import pytest
 
+from nvflare.fuel.hci.client import oidc as oidc_mod
 from nvflare.fuel.hci.client.oidc import OIDCTokenManager
 
 
@@ -30,6 +34,12 @@ def _make_manager():
         "oidc_refresh_skew_seconds": 30,
     }
     return OIDCTokenManager(config=cfg)
+
+
+def _free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 def test_default_scopes_do_not_request_offline_access():
@@ -189,3 +199,109 @@ def test_resolve_endpoints_rejects_remote_http_endpoints(monkeypatch):
 
     with pytest.raises(ValueError, match="must use https unless the host is loopback"):
         manager._resolve_endpoints()
+
+
+def test_authorize_code_with_browser_rejects_state_mismatch(monkeypatch):
+    callback_port = _free_port()
+    manager = OIDCTokenManager(
+        config={
+            "oidc_issuer": "http://127.0.0.1:38080/realms/nvflare",
+            "oidc_client_id": "nvflare-admin",
+            "oidc_authorization_endpoint": "http://127.0.0.1:38080/auth",
+            "oidc_token_endpoint": "http://127.0.0.1:38080/token",
+            "oidc_callback_port": callback_port,
+            "oidc_open_browser": False,
+            "oidc_auth_timeout_seconds": 2,
+        }
+    )
+
+    def _send_callback():
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                urlopen(f"http://127.0.0.1:{callback_port}/callback?state=wrong-state&code=test-code", timeout=0.2)
+                return
+            except Exception:
+                time.sleep(0.05)
+        raise RuntimeError("callback server did not become ready")
+
+    sender = threading.Thread(target=_send_callback, daemon=True)
+    sender.start()
+
+    with pytest.raises(RuntimeError, match="state_mismatch"):
+        manager._authorize_code_with_browser()
+
+    sender.join(timeout=1.0)
+
+
+def test_authorize_code_with_browser_rejects_missing_code(monkeypatch):
+    callback_port = _free_port()
+    manager = OIDCTokenManager(
+        config={
+            "oidc_issuer": "http://127.0.0.1:38080/realms/nvflare",
+            "oidc_client_id": "nvflare-admin",
+            "oidc_authorization_endpoint": "http://127.0.0.1:38080/auth",
+            "oidc_token_endpoint": "http://127.0.0.1:38080/token",
+            "oidc_callback_port": callback_port,
+            "oidc_open_browser": False,
+            "oidc_auth_timeout_seconds": 2,
+        }
+    )
+    monkeypatch.setattr(oidc_mod.secrets, "token_bytes", lambda n: b"a" * n if n == 32 else b"b" * n)
+    expected_state = oidc_mod._b64url_encode(b"b" * 16)
+
+    def _send_callback():
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                urlopen(f"http://127.0.0.1:{callback_port}/callback?state={expected_state}", timeout=0.2)
+                return
+            except Exception:
+                time.sleep(0.05)
+        raise RuntimeError("callback server did not become ready")
+
+    sender = threading.Thread(target=_send_callback, daemon=True)
+    sender.start()
+
+    with pytest.raises(RuntimeError, match="missing_code"):
+        manager._authorize_code_with_browser()
+
+    sender.join(timeout=1.0)
+
+
+def test_post_form_rejects_non_object_json(monkeypatch):
+    manager = _make_manager()
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"[]"
+
+    monkeypatch.setattr(oidc_mod, "urlopen", lambda req, timeout: _Resp())
+
+    with pytest.raises(ValueError, match="JSON object"):
+        manager._post_form("http://127.0.0.1:38080/token", {"grant_type": "refresh_token"})
+
+
+def test_post_form_raises_endpoint_error(monkeypatch):
+    manager = _make_manager()
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"error": "invalid_grant", "error_description": "expired"}).encode("utf-8")
+
+    monkeypatch.setattr(oidc_mod, "urlopen", lambda req, timeout: _Resp())
+
+    with pytest.raises(RuntimeError, match="invalid_grant"):
+        manager._post_form("http://127.0.0.1:38080/token", {"grant_type": "refresh_token"})
