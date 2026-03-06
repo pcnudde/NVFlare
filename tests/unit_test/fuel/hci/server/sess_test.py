@@ -87,3 +87,24 @@ def test_recreate_session_rejects_expired_decoded_session(monkeypatch):
     with pytest.raises(ValueError, match="session token expired"):
         mgr.recreate_session(token="token", origin_fqcn="admin@site", id_asserter=None)
     mgr.shutdown()
+
+
+def test_get_session_uses_id_asserter_getter_when_configured(monkeypatch):
+    mgr = SessionManager(cell=None, idle_timeout=20, monitor_interval=3600)
+    expected_id_asserter = object()
+    captured = {}
+    session = _new_session()
+    mgr.sessions[session.sess_id] = session
+    mgr.set_id_asserter_getter(lambda: expected_id_asserter)
+
+    def _decode_token(token, id_asserter=None):
+        captured["id_asserter"] = id_asserter
+        return session
+
+    monkeypatch.setattr("nvflare.fuel.hci.server.sess.Session.decode_token", _decode_token)
+
+    stored = mgr.get_session("token")
+
+    assert stored is session
+    assert captured["id_asserter"] is expected_id_asserter
+    mgr.shutdown()

@@ -21,11 +21,11 @@ Resolved in the current uncommitted tree:
 Partially addressed:
 
 - #3 Non-HTTP(S) and remote plain-HTTP OIDC fetches are now rejected on the client side; stricter HTTPS/private-address policy is still open if we want it.
+- #5 Production `SessionManager` now verifies session-token signatures on decode when the server id-asserter is configured; the remaining gap is mainly around bare fallback/test paths.
 - #9 Refresh-token fallback now logs a warning, but it still does not classify token-revoked vs transient-provider/network failure.
 
 Still open:
 
-- #5 Session token decoded without signature verification
 - #6 Temporal validation semantics unclear
 - OIDC callback/network error-path coverage gaps
 

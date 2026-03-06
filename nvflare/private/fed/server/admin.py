@@ -191,6 +191,7 @@ class FedAdminServer(AdminServer):
                 ConnProps.DOWNLOAD_JOB_URL: download_job_url,
             },
         )
+        sess_mgr.set_id_asserter_getter(self.get_id_asserter)
 
         self.clients = {}  # token => _Client
         self.timeout = timeout

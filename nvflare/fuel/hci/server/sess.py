@@ -154,10 +154,20 @@ class SessionManager(CommandModule):
         self.idle_timeout = idle_timeout
         self.monitor_interval = monitor_interval
         self.session_ttl = session_ttl
+        self.id_asserter_getter = None
         self.asked_to_stop = False
         self.monitor = threading.Thread(target=self.monitor_sessions)
         self.monitor.daemon = True
         self.monitor.start()
+
+    def set_id_asserter_getter(self, getter):
+        self.id_asserter_getter = getter
+
+    def _decode_session_token(self, token: str):
+        id_asserter = None
+        if self.id_asserter_getter:
+            id_asserter = self.id_asserter_getter()
+        return Session.decode_token(token, id_asserter)
 
     def monitor_sessions(self):
         """Runs loop in a thread to end sessions that time out."""
@@ -235,7 +245,7 @@ class SessionManager(CommandModule):
 
     def get_session(self, token: str):
         try:
-            sess = Session.decode_token(token)
+            sess = self._decode_session_token(token)
         except:
             return None
 
@@ -255,7 +265,7 @@ class SessionManager(CommandModule):
 
     def end_session_by_token(self, token, reason=None):
         try:
-            sess = Session.decode_token(token)
+            sess = self._decode_session_token(token)
         except:
             return
         self.end_session_by_id(sess.sess_id, reason)
