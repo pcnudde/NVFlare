@@ -19,6 +19,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from nvflare.fuel.hci.server.token_auth import ClaimMapper, TokenValidator
+from nvflare.private.defs import CellChannel, CellChannelTopic
 from nvflare.private.fed.app.utils import build_admin_token_login_kwargs, create_admin_server
 
 
@@ -185,3 +186,39 @@ def test_create_admin_server_uses_resource_override_for_admin_connection_securit
     _, cell_kwargs = cell_ctor.call_args
     assert cell_kwargs["credentials"]["connection_security"] == "tls"
     assert fed_admin_server.call_args.kwargs["cell"] == cell_instance
+
+
+def test_create_admin_server_registers_challenge_handler_on_separate_admin_cell(tmp_path):
+    fl_server = Mock()
+    fl_server.cell = object()
+    fl_server.engine = object()
+    fl_server.cmd_modules = []
+    args = Namespace(workspace=str(tmp_path))
+    conf = {
+        "service": {"target": "server:8002", "scheme": "http"},
+        "admin_port": 8003,
+        "connection_security": "mtls",
+        "ssl_root_cert": "rootCA.pem",
+        "ssl_cert": "server.crt",
+        "ssl_private_key": "server.key",
+    }
+
+    with patch("nvflare.private.fed.app.utils.Cell") as cell_ctor:
+        cell_instance = Mock()
+        cell_ctor.return_value = cell_instance
+        with patch("nvflare.private.fed.app.utils.FedAdminServer"):
+            create_admin_server(fl_server=fl_server, server_conf=conf, args=args)
+
+    challenge_calls = []
+    for call in cell_instance.register_request_cb.call_args_list:
+        channel = call.kwargs.get("channel")
+        topic = call.kwargs.get("topic")
+        cb = call.kwargs.get("cb")
+        if len(call.args) >= 3:
+            channel = call.args[0]
+            topic = call.args[1]
+            cb = call.args[2]
+        if channel == CellChannel.SERVER_MAIN and topic == CellChannelTopic.Challenge:
+            challenge_calls.append(cb)
+
+    assert challenge_calls == [fl_server.client_challenge]

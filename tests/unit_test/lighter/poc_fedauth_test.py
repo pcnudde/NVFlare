@@ -14,9 +14,14 @@
 
 import json
 from argparse import Namespace
+from zipfile import ZipFile
+
+import pytest
 
 from nvflare.apis.workspace import Workspace
+from nvflare.fuel.common.excepts import ConfigError
 from nvflare.fuel.hci.client.config import secure_load_admin_config
+from nvflare.fuel.hci.tools.admin import prepare_workspace
 from nvflare.lighter.constants import ProvFileName
 from nvflare.lighter.utils import Identity, generate_cert, generate_keys, serialize_cert, serialize_pri_key, verify_folder_signature
 from nvflare.tool.poc.poc_commands import apply_fedauth_to_poc_startup_kit
@@ -301,3 +306,177 @@ def test_apply_fedauth_creates_signed_admin_workspace_when_project_has_no_admin(
     assert config["client_cert"] == ""
     local_cfg = _read_json(admin_dir / "local" / "resources.json")
     assert "auth_mode" not in local_cfg["admin"]
+
+    invite_zip = prod_dir / ProvFileName.INVITE_ZIP
+    assert invite_zip.exists()
+    with ZipFile(invite_zip, "r") as zf:
+        names = set(zf.namelist())
+    assert "startup/fed_admin.json" in names
+    assert "startup/fl_admin.sh" in names
+    assert "startup/rootCA.pem" in names
+    assert "startup/signature.json" in names
+    assert "local/resources.json" in names
+    assert "local/signature.json" not in names
+    assert any(name.startswith("transfer") for name in names)
+
+
+def test_prepare_workspace_imports_invite_into_workspace_layout(tmp_path):
+    prod_dir = tmp_path / "example_project" / "prod_00"
+    server_local = prod_dir / "server" / "local"
+    server_local.mkdir(parents=True, exist_ok=True)
+    _write_json(server_local / "resources.json", {"servers": [{}], "format_version": 1})
+    _prepare_server_material(prod_dir)
+
+    args = Namespace(
+        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
+        fedauth_audience="nvflare-admin",
+        fedauth_jwks_uri="http://127.0.0.1:38080/realms/nvflare/protocol/openid-connect/certs",
+        fedauth_discovery_url=None,
+        fedauth_alg_allowlist=["RS256"],
+        fedauth_required_claims=["iss", "aud", "exp", "iat"],
+        fedauth_user_name_claims=["preferred_username", "email"],
+        fedauth_user_org_claim="org",
+        fedauth_user_role_claim="nvf_role",
+        fedauth_role_mappings=["lead=project_admin"],
+        fedauth_admin_mode="oidc",
+        fedauth_admin_token_file="/tmp/nvflare_alice.token",
+        fedauth_oidc_client_id="nvflare-admin",
+        fedauth_oidc_scopes="openid profile email",
+        fedauth_oidc_callback_host="127.0.0.1",
+        fedauth_oidc_callback_port=39123,
+        fedauth_oidc_callback_path="/callback",
+        fedauth_oidc_refresh_skew_seconds=60,
+        fedauth_oidc_open_browser=True,
+        fedauth_oidc_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
+    )
+
+    apply_fedauth_to_poc_startup_kit(
+        prod_dir=str(prod_dir),
+        server_name="server",
+        admin_name="admin@nvidia.com",
+        fedauth_args=args,
+    )
+
+    imported_workspace = tmp_path / "imported_admin"
+    workspace_dir = prepare_workspace(
+        workspace=str(imported_workspace),
+        invite_file=str(prod_dir / ProvFileName.INVITE_ZIP),
+        fed_admin=ProvFileName.FED_ADMIN_JSON,
+    )
+
+    assert workspace_dir == str(imported_workspace.resolve())
+    assert (imported_workspace / "startup" / "fed_admin.json").exists()
+    assert (imported_workspace / "startup" / "fl_admin.sh").exists()
+    assert (imported_workspace / "local" / "resources.json").exists()
+    assert (imported_workspace / "transfer").is_dir()
+
+    config = secure_load_admin_config(Workspace(root_dir=str(imported_workspace))).get_admin_config()
+    assert config["auth_mode"] == "oidc"
+    assert config["server_identity"] == "server.admin"
+    assert config["client_key"] == ""
+    assert config["client_cert"] == ""
+
+
+def test_prepare_workspace_defaults_to_local_folder_next_to_invite(tmp_path):
+    prod_dir = tmp_path / "example_project" / "prod_00"
+    server_local = prod_dir / "server" / "local"
+    server_local.mkdir(parents=True, exist_ok=True)
+    _write_json(server_local / "resources.json", {"servers": [{}], "format_version": 1})
+    _prepare_server_material(prod_dir)
+
+    args = Namespace(
+        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
+        fedauth_audience="nvflare-admin",
+        fedauth_jwks_uri="http://127.0.0.1:38080/realms/nvflare/protocol/openid-connect/certs",
+        fedauth_discovery_url=None,
+        fedauth_alg_allowlist=["RS256"],
+        fedauth_required_claims=["iss", "aud", "exp", "iat"],
+        fedauth_user_name_claims=["preferred_username", "email"],
+        fedauth_user_org_claim="org",
+        fedauth_user_role_claim="nvf_role",
+        fedauth_role_mappings=["lead=project_admin"],
+        fedauth_admin_mode="oidc",
+        fedauth_admin_token_file="/tmp/nvflare_alice.token",
+        fedauth_oidc_client_id="nvflare-admin",
+        fedauth_oidc_scopes="openid profile email",
+        fedauth_oidc_callback_host="127.0.0.1",
+        fedauth_oidc_callback_port=39123,
+        fedauth_oidc_callback_path="/callback",
+        fedauth_oidc_refresh_skew_seconds=60,
+        fedauth_oidc_open_browser=True,
+        fedauth_oidc_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
+    )
+
+    apply_fedauth_to_poc_startup_kit(
+        prod_dir=str(prod_dir),
+        server_name="server",
+        admin_name="admin@nvidia.com",
+        fedauth_args=args,
+    )
+
+    invite_zip = prod_dir / ProvFileName.INVITE_ZIP
+    workspace_dir = prepare_workspace(invite_file=str(invite_zip), fed_admin=ProvFileName.FED_ADMIN_JSON)
+
+    expected_dir = prod_dir / "invite"
+    assert workspace_dir == str(expected_dir.resolve())
+    assert (expected_dir / "startup" / "fed_admin.json").exists()
+    assert (expected_dir / "local" / "resources.json").exists()
+
+
+def test_prepare_workspace_refuses_to_reuse_existing_imported_workspace(tmp_path):
+    prod_dir = tmp_path / "example_project" / "prod_00"
+    server_local = prod_dir / "server" / "local"
+    server_local.mkdir(parents=True, exist_ok=True)
+    _write_json(server_local / "resources.json", {"servers": [{}], "format_version": 1})
+    _prepare_server_material(prod_dir)
+
+    args = Namespace(
+        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
+        fedauth_audience="nvflare-admin",
+        fedauth_jwks_uri="http://127.0.0.1:38080/realms/nvflare/protocol/openid-connect/certs",
+        fedauth_discovery_url=None,
+        fedauth_alg_allowlist=["RS256"],
+        fedauth_required_claims=["iss", "aud", "exp", "iat"],
+        fedauth_user_name_claims=["preferred_username", "email"],
+        fedauth_user_org_claim="org",
+        fedauth_user_role_claim="nvf_role",
+        fedauth_role_mappings=["lead=project_admin"],
+        fedauth_admin_mode="oidc",
+        fedauth_admin_token_file="/tmp/nvflare_alice.token",
+        fedauth_oidc_client_id="nvflare-admin",
+        fedauth_oidc_scopes="openid profile email",
+        fedauth_oidc_callback_host="127.0.0.1",
+        fedauth_oidc_callback_port=39123,
+        fedauth_oidc_callback_path="/callback",
+        fedauth_oidc_refresh_skew_seconds=60,
+        fedauth_oidc_open_browser=True,
+        fedauth_oidc_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
+    )
+
+    apply_fedauth_to_poc_startup_kit(
+        prod_dir=str(prod_dir),
+        server_name="server",
+        admin_name="admin@nvidia.com",
+        fedauth_args=args,
+    )
+
+    invite_zip = prod_dir / ProvFileName.INVITE_ZIP
+    workspace_dir = prepare_workspace(invite_file=str(invite_zip), fed_admin=ProvFileName.FED_ADMIN_JSON)
+    assert workspace_dir == str((prod_dir / "invite").resolve())
+
+    with pytest.raises(ConfigError, match="already exists"):
+        prepare_workspace(invite_file=str(invite_zip), fed_admin=ProvFileName.FED_ADMIN_JSON)
+
+
+def test_prepare_workspace_rejects_non_workspace_directory_for_invite_import(tmp_path):
+    bad_dir = tmp_path / "bad_workspace"
+    bad_dir.mkdir()
+    _write_text(bad_dir / "unexpected.txt", "not a workspace")
+
+    with pytest.raises(ConfigError):
+        prepare_workspace(workspace=str(bad_dir), invite_file=str(tmp_path / ProvFileName.INVITE_ZIP))
+
+
+def test_prepare_workspace_reports_missing_invite_as_config_error(tmp_path):
+    with pytest.raises(ConfigError, match="failed to import invite"):
+        prepare_workspace(workspace=str(tmp_path / "imported_admin"), invite_file=str(tmp_path / ProvFileName.INVITE_ZIP))

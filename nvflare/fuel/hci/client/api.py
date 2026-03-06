@@ -24,10 +24,9 @@ from pathlib import Path
 from typing import List, Optional
 
 import nvflare.fuel.f3.streaming.file_downloader as downloader
-from nvflare.apis.fl_constant import ConnectionSecurity, FLContextKey, ProcessType, ReservedKey, ReturnCode
+from nvflare.apis.fl_constant import ConnectionSecurity, FLContextKey, ProcessType, ReturnCode
 from nvflare.apis.fl_context import FLContext, FLContextManager
 from nvflare.apis.shareable import Shareable
-from nvflare.apis.signal import Signal
 from nvflare.apis.streaming import ConsumerFactory, ObjectProducer, StreamableEngine, StreamContext
 from nvflare.apis.utils.decomposers import flare_decomposers
 from nvflare.app_common.streamers.file_streamer import FileStreamer
@@ -55,13 +54,12 @@ from nvflare.fuel.hci.proto import (
 )
 from nvflare.fuel.hci.reg import CommandEntry, CommandModule, CommandRegister
 from nvflare.fuel.hci.table import Table
-from nvflare.fuel.sec.authn import set_add_auth_headers_filters
 from nvflare.fuel.utils.admin_name_utils import new_admin_client_name
 from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.private.aux_runner import AuxMsgTarget, AuxRunner
 from nvflare.private.defs import ClientType
-from nvflare.private.fed.authenticator import Authenticator, validate_auth_headers
-from nvflare.private.fed.utils.identity_utils import IdentityAsserter, TokenVerifier, get_cn_from_cert, load_cert_file
+from nvflare.private.fed.authenticator import Authenticator
+from nvflare.private.fed.utils.identity_utils import IdentityAsserter, get_cn_from_cert, load_cert_file
 from nvflare.private.stream_runner import HeaderKey, ObjectStreamer
 from nvflare.security.logging import secure_format_exception, secure_log_traceback
 
@@ -86,6 +84,13 @@ AUTO_LOGIN_INTERVAL = 1.5
 _AUTH_MODE_CERT = "cert"
 _AUTH_MODE_TOKEN = "token"
 _AUTH_MODE_OIDC = "oidc"
+_REDACTED_CREDENTIAL_KEYS = {
+    DriverParams.CA_CERT.value,
+    DriverParams.SERVER_CERT.value,
+    DriverParams.SERVER_KEY.value,
+    DriverParams.CLIENT_CERT.value,
+    DriverParams.CLIENT_KEY.value,
+}
 
 
 class FileWaiter(threading.Event):
@@ -376,6 +381,16 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
     def new_context(self):
         return self.fl_ctx_mgr.new_context()
 
+    @staticmethod
+    def _sanitize_credentials_for_debug(credentials: dict) -> dict:
+        sanitized = {}
+        for key, value in credentials.items():
+            if key in _REDACTED_CREDENTIAL_KEYS and value:
+                sanitized[key] = "<configured>"
+            else:
+                sanitized[key] = value
+        return sanitized
+
     def connect(self, timeout=None):
         if timeout is not None:
             # validate provided timeout value
@@ -407,7 +422,10 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
 
         flare_decomposers.register()
 
-        self.debug(f"Creating cell: {my_fqcn=} {root_url=} {secure_conn=} {credentials=}")
+        self.debug(
+            f"Creating cell: {my_fqcn=} {root_url=} {secure_conn=} "
+            f"credentials={self._sanitize_credentials_for_debug(credentials)}"
+        )
 
         self.cell = Cell(
             fqcn=my_fqcn,
@@ -424,17 +442,49 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
             cb=self._handle_session_expired,
         )
 
-        NetAgent(self.cell)
-        self.cell.start()
+        try:
+            NetAgent(self.cell)
+            self.cell.start()
+            self._verify_server_identity(timeout)
 
-        self.aux_runner = AuxRunner(self)
-        self.object_streamer = ObjectStreamer(self.aux_runner)
+            self.aux_runner = AuxRunner(self)
+            self.object_streamer = ObjectStreamer(self.aux_runner)
 
-        self.cell.register_request_cb(
-            channel=CellChannel.AUX_COMMUNICATION,
-            topic="*",
-            cb=self._handle_aux_message,
+            self.cell.register_request_cb(
+                channel=CellChannel.AUX_COMMUNICATION,
+                topic="*",
+                cb=self._handle_aux_message,
+            )
+        except Exception:
+            if self.cell:
+                try:
+                    self.cell.stop()
+                except Exception:
+                    pass
+            self.cell = None
+            self.aux_runner = None
+            self.object_streamer = None
+            raise
+
+    def _verify_server_identity(self, timeout: float):
+        expected_sp_identity = FQCN.split(self.server_identity)[0]
+        authenticator = Authenticator(
+            cell=self.cell,
+            project_name=self.project_name,
+            client_name=self.user_name,
+            client_type=ClientType.ADMIN,
+            expected_sp_identity=expected_sp_identity,
+            secure_mode=True,
+            root_cert_file=self.ca_cert,
+            private_key_file=self.client_key or "",
+            cert_file=self.client_cert or "",
+            msg_timeout=self.authenticate_msg_timeout,
+            retry_interval=1.0,
+            timeout=timeout,
+            challenge_target=self.server_identity,
         )
+        authenticator.verify_server_identity()
+        self.debug(f"Verified server identity for {self.server_identity} with cert identity {expected_sp_identity}")
 
     def _handle_aux_message(self, request: CellMessage) -> CellMessage:
         assert isinstance(request, CellMessage), "request must be CellMessage but got {}".format(type(request))

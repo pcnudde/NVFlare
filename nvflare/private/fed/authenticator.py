@@ -70,6 +70,7 @@ class Authenticator:
         msg_timeout: float,
         retry_interval: float,
         timeout=None,
+        challenge_target: str = FQCN.ROOT_SERVER,
     ):
         """Authenticator is to be used to register a client to the Server.
 
@@ -92,6 +93,7 @@ class Authenticator:
         self.client_name = client_name
         self.client_type = client_type
         self.expected_sp_identity = expected_sp_identity
+        self.challenge_target = challenge_target
         self.root_cert_file = root_cert_file
         self.private_key_file = private_key_file
         self.cert_file = cert_file
@@ -99,6 +101,7 @@ class Authenticator:
         self.retry_interval = retry_interval
         self.secure_mode = secure_mode
         self.timeout = timeout
+        self.challenge_target = challenge_target
         self.logger = get_obj_logger(self)
 
     def _challenge_server(self):
@@ -107,7 +110,7 @@ class Authenticator:
         headers = {IdentityChallengeKey.COMMON_NAME: self.client_name, IdentityChallengeKey.NONCE: my_nonce}
         challenge = new_cell_message(headers, None)
         result = self.cell.send_request(
-            target=FQCN.ROOT_SERVER,
+            target=self.challenge_target,
             channel=CellChannel.SERVER_MAIN,
             topic=CellChannelTopic.Challenge,
             request=challenge,
@@ -148,6 +151,26 @@ class Authenticator:
 
         self.logger.info(f"verified server identity '{self.expected_sp_identity}'")
         return server_nonce, TokenVerifier(server_cert)
+
+    def verify_server_identity(self, abort_signal: Signal = None):
+        abort_signal = abort_signal or Signal()
+        start_time = time.time()
+        while True:
+            server_nonce, token_verifier = self._challenge_server()
+
+            if abort_signal.triggered:
+                return None, None
+
+            if server_nonce is None:
+                self.logger.info(f"re-challenge after {self.retry_interval} seconds")
+
+                if self.timeout and time.time() - start_time > self.timeout:
+                    raise FLCommunicationError(f"cannot connect to server for {self.timeout} seconds")
+
+                time.sleep(self.retry_interval)
+                continue
+
+            return server_nonce, token_verifier
 
     def authenticate(self, shared_fl_ctx: FLContext, abort_signal: Signal):
         """Register the client with the FLARE Server.
@@ -195,23 +218,9 @@ class Authenticator:
         token_verifier = None
         if self.secure_mode:
             # explicitly authenticate with the Server
-            start_time = time.time()
-            while True:
-                server_nonce, token_verifier = self._challenge_server()
-
-                if abort_signal.triggered:
-                    return None, None, None, None
-
-                if server_nonce is None:
-                    # retry
-                    self.logger.info(f"re-challenge after {self.retry_interval} seconds")
-
-                    if self.timeout and time.time() - start_time > self.timeout:
-                        raise FLCommunicationError(f"cannot connect to server for {self.timeout} seconds")
-
-                    time.sleep(self.retry_interval)
-                else:
-                    break
+            server_nonce, token_verifier = self.verify_server_identity(abort_signal)
+            if abort_signal.triggered:
+                return None, None, None, None
 
             id_asserter = IdentityAsserter(private_key_file=self.private_key_file, cert_file=self.cert_file)
             cn_signature = id_asserter.sign_common_name(nonce=server_nonce)

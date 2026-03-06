@@ -56,6 +56,7 @@ This does all required startup-kit work:
 - provisions production startup kits
 - applies fedauth resource settings
 - generates a signed host-side admin console profile even though `project.yml` has no human participant
+- packages that admin bootstrap workspace as `workspace/fedauth_prod_demo/prod_00/invite.zip`
 - rewrites the signed host-side admin startup config to use `127.0.0.1:8003`
 - copies `hello-numpy-sag` into the admin `transfer/` folder
 
@@ -70,6 +71,16 @@ Output:
 ```text
 demo_fedauth/workspace/fedauth_prod_demo/prod_00
 ```
+
+Optional invite import flow:
+
+```bash
+cd demo_fedauth/workspace/fedauth_prod_demo/prod_00
+python -m nvflare.fuel.hci.tools.admin -i invite.zip
+```
+
+This unpacks the invite into `./invite/` next to the zip and then runs from that normal admin workspace layout.
+If `./invite/` already exists, remove it first or import into a different workspace path.
 
 ### 2. Start the stack
 
@@ -90,7 +101,6 @@ podman compose logs -f server
 In a new terminal:
 
 ```bash
-cd /Users/pcnudde/.codex/worktrees/ad00/NVFlare
 cd demo_fedauth/workspace/fedauth_prod_demo/prod_00/admin@nvidia.com/startup
 ./fl_admin.sh
 ```
@@ -116,45 +126,15 @@ Repeat `list_jobs` until job is `FINISHED:*`.
 ### 4. Stop the stack
 
 ```bash
-cd /Users/pcnudde/.codex/worktrees/ad00/NVFlare/demo_fedauth
+cd demo_fedauth
 podman compose down
 ```
 
 ## Presenting The Slides
 
-Use Marp for presentation and Mermaid source files for the diagrams.
-
-Recommended:
-
-1. VS Code with the `Marp for VS Code` extension
-2. Marp CLI for presenting
-
-Before presenting, render the Mermaid diagrams:
-
 ```bash
-cd demo_fedauth/presentation
-npm ci
-npm run render-diagrams
+cd demo_fedauth/presentation && npm ci && npm run render-diagrams && marp -p fedauth_demo_slides.md
 ```
-
-Then present the deck:
-
-```bash
-cd demo_fedauth/presentation
-marp -p fedauth_demo_slides.md
-```
-
-If you prefer VS Code:
-
-1. open `demo_fedauth/presentation/fedauth_demo_slides.md`
-2. enable Marp preview
-3. start presentation mode from the Marp extension
-
-Notes:
-
-- the deck references rendered SVGs, not raw Mermaid blocks
-- the Mermaid source of truth lives under `demo_fedauth/presentation/diagrams/`
-- rendered `.svg` files are intentionally ignored by git
 
 ## Notes
 

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+
 from nvflare.fuel.f3.drivers.driver_params import DriverParams
 from nvflare.fuel.hci.client.api import AdminAPI, APIStatus, ResultKey
 from nvflare.fuel.hci.client.api_spec import AdminConfigKey
@@ -224,6 +226,7 @@ def test_connect_tls_mode_does_not_require_client_cert(monkeypatch, tmp_path):
     ca_cert = tmp_path / "rootCA.pem"
     ca_cert.write_text("dummy-ca")
     created = {}
+    auth_call = {}
 
     class _Cell:
         def __init__(self, **kwargs):
@@ -240,6 +243,15 @@ def test_connect_tls_mode_does_not_require_client_cert(monkeypatch, tmp_path):
     monkeypatch.setattr("nvflare.fuel.hci.client.api.AuxRunner", lambda api: object())
     monkeypatch.setattr("nvflare.fuel.hci.client.api.ObjectStreamer", lambda runner: object())
     monkeypatch.setattr("nvflare.fuel.hci.client.api.flare_decomposers.register", lambda: None)
+
+    class _Authenticator:
+        def __init__(self, **kwargs):
+            auth_call.update(kwargs)
+
+        def verify_server_identity(self):
+            auth_call["verified"] = True
+
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.Authenticator", _Authenticator)
 
     admin_config = {
         AdminConfigKey.PROJECT_NAME: "example",
@@ -258,6 +270,170 @@ def test_connect_tls_mode_does_not_require_client_cert(monkeypatch, tmp_path):
     assert created["credentials"][DriverParams.CONNECTION_SECURITY.value] == "tls"
     assert DriverParams.CLIENT_CERT.value not in created["credentials"]
     assert DriverParams.CLIENT_KEY.value not in created["credentials"]
+    assert auth_call["expected_sp_identity"] == "server"
+    assert auth_call["challenge_target"] == "server"
+    assert auth_call["root_cert_file"] == str(ca_cert)
+    assert auth_call["secure_mode"] is True
+    assert auth_call["verified"] is True
+
+
+def test_connect_debug_output_redacts_credential_paths(monkeypatch, tmp_path):
+    ca_cert = tmp_path / "rootCA.pem"
+    ca_cert.write_text("dummy-ca")
+    client_cert = tmp_path / "client.crt"
+    client_cert.write_text("dummy-cert")
+    client_key = tmp_path / "client.key"
+    client_key.write_text("dummy-key")
+    printed = []
+
+    class _Cell:
+        def __init__(self, **kwargs):
+            pass
+
+        def register_request_cb(self, channel, topic, cb):
+            pass
+
+        def start(self):
+            pass
+
+    class _Authenticator:
+        def __init__(self, **kwargs):
+            pass
+
+        def verify_server_identity(self):
+            pass
+
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.Cell", _Cell)
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.NetAgent", lambda cell: None)
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.AuxRunner", lambda api: object())
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.ObjectStreamer", lambda runner: object())
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.flare_decomposers.register", lambda: None)
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.Authenticator", _Authenticator)
+    monkeypatch.setattr("builtins.print", lambda *args, **kwargs: printed.append(" ".join(str(a) for a in args)))
+
+    admin_config = {
+        AdminConfigKey.PROJECT_NAME: "example",
+        AdminConfigKey.SERVER_IDENTITY: "server",
+        AdminConfigKey.CA_CERT: str(ca_cert),
+        AdminConfigKey.CLIENT_CERT: str(client_cert),
+        AdminConfigKey.CLIENT_KEY: str(client_key),
+        AdminConfigKey.CONNECTION_SECURITY: "mtls",
+        AdminConfigKey.AUTH_MODE: "cert",
+        AdminConfigKey.HOST: "127.0.0.1",
+        AdminConfigKey.PORT: 8003,
+    }
+    api = AdminAPI(user_name="alice", admin_config=admin_config, cmd_modules=[], debug=True)
+
+    api.connect()
+
+    joined = "\n".join(printed)
+    assert str(ca_cert) not in joined
+    assert str(client_cert) not in joined
+    assert str(client_key) not in joined
+    assert "<configured>" in joined
+
+
+def test_connect_verifies_server_identity_with_configured_timeout(monkeypatch, tmp_path):
+    ca_cert = tmp_path / "rootCA.pem"
+    ca_cert.write_text("dummy-ca")
+    auth_call = {}
+
+    class _Cell:
+        def __init__(self, **kwargs):
+            pass
+
+        def register_request_cb(self, channel, topic, cb):
+            pass
+
+        def start(self):
+            pass
+
+    class _Authenticator:
+        def __init__(self, **kwargs):
+            auth_call.update(kwargs)
+
+        def verify_server_identity(self):
+            auth_call["verified"] = True
+
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.Cell", _Cell)
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.NetAgent", lambda cell: None)
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.AuxRunner", lambda api: object())
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.ObjectStreamer", lambda runner: object())
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.flare_decomposers.register", lambda: None)
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.Authenticator", _Authenticator)
+
+    admin_config = {
+        AdminConfigKey.PROJECT_NAME: "example",
+        AdminConfigKey.SERVER_IDENTITY: "server.admin",
+        AdminConfigKey.CA_CERT: str(ca_cert),
+        AdminConfigKey.CONNECTION_SECURITY: "tls",
+        AdminConfigKey.AUTH_MODE: "oidc",
+        AdminConfigKey.OIDC_ISSUER: "http://issuer.example/realms/nvflare",
+        AdminConfigKey.OIDC_CLIENT_ID: "nvflare-admin",
+        AdminConfigKey.HOST: "127.0.0.1",
+        AdminConfigKey.PORT: 8003,
+    }
+    api = AdminAPI(user_name="alice", admin_config=admin_config, cmd_modules=[])
+
+    api.connect(timeout=12.5)
+
+    assert auth_call["expected_sp_identity"] == "server"
+    assert auth_call["challenge_target"] == "server.admin"
+    assert auth_call["timeout"] == 12.5
+    assert auth_call["client_type"] == "admin"
+    assert auth_call["private_key_file"] == ""
+    assert auth_call["cert_file"] == ""
+    assert auth_call["verified"] is True
+
+
+def test_connect_cleans_up_cell_when_server_identity_verification_fails(monkeypatch, tmp_path):
+    ca_cert = tmp_path / "rootCA.pem"
+    ca_cert.write_text("dummy-ca")
+    cell_state = {"stopped": False}
+
+    class _Cell:
+        def __init__(self, **kwargs):
+            pass
+
+        def register_request_cb(self, channel, topic, cb):
+            pass
+
+        def start(self):
+            pass
+
+        def stop(self):
+            cell_state["stopped"] = True
+
+    class _Authenticator:
+        def __init__(self, **kwargs):
+            pass
+
+        def verify_server_identity(self):
+            raise RuntimeError("bad server identity")
+
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.Cell", _Cell)
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.NetAgent", lambda cell: None)
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.AuxRunner", lambda api: object())
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.ObjectStreamer", lambda runner: object())
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.flare_decomposers.register", lambda: None)
+    monkeypatch.setattr("nvflare.fuel.hci.client.api.Authenticator", _Authenticator)
+
+    admin_config = {
+        AdminConfigKey.PROJECT_NAME: "example",
+        AdminConfigKey.SERVER_IDENTITY: "server.admin",
+        AdminConfigKey.CA_CERT: str(ca_cert),
+        AdminConfigKey.CONNECTION_SECURITY: "tls",
+        AdminConfigKey.AUTH_MODE: "token",
+        AdminConfigKey.HOST: "127.0.0.1",
+        AdminConfigKey.PORT: 8003,
+    }
+    api = AdminAPI(user_name="alice", admin_config=admin_config, cmd_modules=[])
+
+    with pytest.raises(RuntimeError, match="bad server identity"):
+        api.connect()
+
+    assert cell_state["stopped"] is True
+    assert api.cell is None
 
 
 def test_stream_objects_uses_explicit_server_identity(monkeypatch):

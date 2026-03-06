@@ -2,6 +2,19 @@
 
 This document captures the current review status of the fedauth branch so follow-up cleanup can stay focused and minimize additional code.
 
+For the deeper follow-up review, see:
+
+- `demo_fedauth/fedauth_review_detailed.md`
+
+## Resolved In Current Working Tree
+
+These review items were valid at the start of the cleanup pass, and are now addressed in the current uncommitted tree:
+
+- `AdminAPI.connect()` again verifies the configured `server_identity` before login for all admin auth modes.
+- invite import no longer silently reuses an existing extracted workspace; reruns must remove the old directory or choose a new one.
+- admin-port identity verification now challenges the admin cell target while validating against the root server cert identity, so `server.admin` works in the secure token-auth flow again.
+- `invite.zip` no longer carries `local/signature.json`; local defaults are treated as mutable local state instead of implied signed bootstrap.
+
 ## Scope
 
 Reviewed range:

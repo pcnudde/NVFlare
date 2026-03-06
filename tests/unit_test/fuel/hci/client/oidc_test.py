@@ -101,10 +101,12 @@ def test_get_access_token_falls_back_to_browser_when_refresh_fails(monkeypatch):
     manager._access_token = _unsigned_jwt(now + 5)
     manager._access_token_expiry = float(now + 5)
     manager._refresh_token = "r0"
+    warnings = []
 
     monkeypatch.setattr(
         manager, "_refresh_with_refresh_token", lambda refresh_token: (_ for _ in ()).throw(RuntimeError("bad"))
     )
+    monkeypatch.setattr(manager.logger, "warning", lambda msg: warnings.append(msg))
     monkeypatch.setattr(
         manager,
         "_authorize_code_with_browser",
@@ -117,6 +119,8 @@ def test_get_access_token_falls_back_to_browser_when_refresh_fails(monkeypatch):
     token = manager.get_access_token()
     assert token
     assert manager._refresh_token == "r3"
+    assert warnings
+    assert "OIDC refresh failed" in warnings[0]
 
 
 def test_update_tokens_uses_jwt_exp_when_expires_in_missing():
@@ -132,7 +136,48 @@ def test_update_tokens_uses_jwt_exp_when_expires_in_missing():
 def test_parse_endpoints_from_discovery(monkeypatch):
     manager = OIDCTokenManager(
         config={
-            "oidc_issuer": "http://issuer.example",
+            "oidc_issuer": "https://issuer.example",
+            "oidc_client_id": "nvflare-admin",
+        }
+    )
+    metadata = {
+        "authorization_endpoint": "https://issuer.example/auth",
+        "token_endpoint": "https://issuer.example/token",
+    }
+    monkeypatch.setattr(manager, "_fetch_json", lambda url: json.loads(json.dumps(metadata)))
+    endpoints = manager._resolve_endpoints()
+    assert endpoints["authorization_endpoint"] == metadata["authorization_endpoint"]
+    assert endpoints["token_endpoint"] == metadata["token_endpoint"]
+
+
+def test_callback_host_must_be_loopback():
+    with pytest.raises(ValueError, match="loopback"):
+        OIDCTokenManager(
+            config={
+                "oidc_issuer": "http://127.0.0.1:38080/realms/nvflare",
+                "oidc_client_id": "nvflare-admin",
+                "oidc_callback_host": "0.0.0.0",
+            }
+        )
+
+
+def test_resolve_endpoints_rejects_non_http_schemes():
+    manager = OIDCTokenManager(
+        config={
+            "oidc_issuer": "http://127.0.0.1:38080/realms/nvflare",
+            "oidc_client_id": "nvflare-admin",
+            "oidc_discovery_url": "file:///tmp/oidc.json",
+        }
+    )
+
+    with pytest.raises(ValueError, match="http or https"):
+        manager._resolve_endpoints()
+
+
+def test_resolve_endpoints_rejects_remote_http_endpoints(monkeypatch):
+    manager = OIDCTokenManager(
+        config={
+            "oidc_issuer": "https://issuer.example",
             "oidc_client_id": "nvflare-admin",
         }
     )
@@ -141,6 +186,6 @@ def test_parse_endpoints_from_discovery(monkeypatch):
         "token_endpoint": "http://issuer.example/token",
     }
     monkeypatch.setattr(manager, "_fetch_json", lambda url: json.loads(json.dumps(metadata)))
-    endpoints = manager._resolve_endpoints()
-    assert endpoints["authorization_endpoint"] == metadata["authorization_endpoint"]
-    assert endpoints["token_endpoint"] == metadata["token_endpoint"]
+
+    with pytest.raises(ValueError, match="must use https unless the host is loopback"):
+        manager._resolve_endpoints()

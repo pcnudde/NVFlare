@@ -186,6 +186,7 @@ class ProvFileName:
     README_TXT = "readme.txt"
     FED_ADMIN_JSON = "fed_admin.json"
     FL_ADMIN_SH = "fl_admin.sh"
+    INVITE_ZIP = "invite.zip"
     SYSTEM_INFO_IPYNB = "system_info.ipynb"
     SIGNATURE_JSON = "signature.json"
     COMPOSE_YAML = "compose.yaml"

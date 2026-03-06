@@ -19,6 +19,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, OrderedDict, Tuple
@@ -28,6 +29,7 @@ from pyhocon import ConfigFactory as CF
 
 from nvflare.cli_exception import CLIException
 from nvflare.cli_unknown_cmd_exception import CLIUnknownCmdException
+from nvflare.fuel.utils.zip_utils import zip_directory_to_file
 from nvflare.fuel.utils.config import ConfigFormat
 from nvflare.fuel.utils.gpu_utils import get_host_gpu_ids
 from nvflare.lighter.constants import ProvisionMode, ProvFileName
@@ -634,7 +636,44 @@ def _sign_fedauth_admin_profile(prod_dir: str, admin_name: str):
     admin_dir = os.path.join(prod_dir, admin_name)
     root_pri_key = _load_project_root_signing_key(prod_dir)
     sign_folders(os.path.join(admin_dir, "startup"), root_pri_key, signature_file=ProvFileName.SIGNATURE_JSON)
-    sign_folders(os.path.join(admin_dir, "local"), root_pri_key, signature_file=ProvFileName.SIGNATURE_JSON)
+    local_signature = os.path.join(admin_dir, "local", ProvFileName.SIGNATURE_JSON)
+    if os.path.isfile(local_signature):
+        os.remove(local_signature)
+
+
+def _create_fedauth_admin_invite(prod_dir: str, admin_name: str) -> str:
+    admin_dir = os.path.join(prod_dir, admin_name)
+    if not os.path.isdir(admin_dir):
+        raise CLIException(f"missing admin workspace to package invite from: {admin_dir}")
+
+    invite_path = os.path.join(prod_dir, ProvFileName.INVITE_ZIP)
+    with tempfile.TemporaryDirectory() as td:
+        startup_dir = os.path.join(admin_dir, "startup")
+        if not os.path.isdir(startup_dir):
+            raise CLIException(f"missing admin workspace directory: {startup_dir}")
+        shutil.copytree(startup_dir, os.path.join(td, "startup"))
+
+        local_src = os.path.join(admin_dir, "local")
+        local_dst = os.path.join(td, "local")
+        if not os.path.isdir(local_src):
+            raise CLIException(f"missing admin workspace directory: {local_src}")
+        shutil.copytree(local_src, local_dst)
+        local_signature = os.path.join(local_dst, ProvFileName.SIGNATURE_JSON)
+        if os.path.isfile(local_signature):
+            os.remove(local_signature)
+
+        if not os.listdir(local_dst):
+            os.rmdir(local_dst)
+
+        transfer_src = os.path.join(admin_dir, SC.TRANSFER)
+        transfer_dst = os.path.join(td, SC.TRANSFER)
+        if os.path.isdir(transfer_src):
+            shutil.copytree(transfer_src, transfer_dst)
+        else:
+            os.makedirs(transfer_dst, exist_ok=True)
+
+        zip_directory_to_file(td, "", invite_path)
+    return invite_path
 
 
 _LOCAL_ADMIN_OVERRIDE_KEYS = {
@@ -794,6 +833,7 @@ def apply_fedauth_to_poc_startup_kit(prod_dir: str, server_name: str, admin_name
     admin_payload["admin"] = admin_section
     _write_json_file(admin_resources, admin_payload)
     _sign_fedauth_admin_profile(prod_dir=prod_dir, admin_name=admin_name)
+    _create_fedauth_admin_invite(prod_dir=prod_dir, admin_name=admin_name)
 
 
 def get_or_create_hidden_nvflare_config_path() -> str:

@@ -37,6 +37,7 @@ from nvflare.fuel.hci.server.token_auth import (
 )
 from nvflare.fuel.sec.security_content_service import SecurityContentService
 from nvflare.fuel.utils.config_service import ConfigService
+from nvflare.private.defs import CellChannel, CellChannelTopic
 from nvflare.private.fed.runner import Runner
 from nvflare.private.fed.server.admin import FedAdminServer
 from nvflare.private.fed.server.fed_server import FederatedServer
@@ -425,6 +426,11 @@ def create_admin_server(fl_server: FederatedServer, server_conf=None, args=None)
             credentials=credentials,
             create_internal_listener=False,
             parent_url=None,
+        )
+        command_cell.register_request_cb(
+            channel=CellChannel.SERVER_MAIN,
+            topic=CellChannelTopic.Challenge,
+            cb=fl_server.client_challenge,
         )
         command_cell.start()
         mpm.add_cleanup_cb(command_cell.stop)

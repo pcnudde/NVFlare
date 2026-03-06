@@ -14,6 +14,7 @@
 
 import base64
 import hashlib
+import ipaddress
 import json
 import secrets
 import threading
@@ -25,6 +26,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from nvflare.fuel.hci.client.api_spec import AdminConfigKey
+from nvflare.fuel.utils.log_utils import get_obj_logger
 
 
 def _get_required_non_empty_str(config: Mapping[str, Any], key: str) -> str:
@@ -38,10 +40,38 @@ def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
+def _is_loopback_host(host: str) -> bool:
+    host = (host or "").strip()
+    if not host:
+        return False
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_oidc_url(url: str, purpose: str) -> str:
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"{purpose} must use http or https: {url}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"{purpose} must include a hostname: {url}")
+    if scheme == "http" and not _is_loopback_host(host):
+        raise ValueError(f"{purpose} must use https unless the host is loopback: {url}")
+    return url.strip()
+
+
 class OIDCTokenManager:
     """Token lifecycle manager for OIDC authorization-code (PKCE) + refresh-token flows."""
 
     def __init__(self, config: Mapping[str, Any]):
+        self.logger = get_obj_logger(self)
         self.issuer = _get_required_non_empty_str(config, AdminConfigKey.OIDC_ISSUER)
         self.client_id = _get_required_non_empty_str(config, AdminConfigKey.OIDC_CLIENT_ID)
 
@@ -55,6 +85,8 @@ class OIDCTokenManager:
         self.token_endpoint = config.get(AdminConfigKey.OIDC_TOKEN_ENDPOINT)
 
         self.callback_host = str(config.get(AdminConfigKey.OIDC_CALLBACK_HOST, "127.0.0.1")).strip() or "127.0.0.1"
+        if not _is_loopback_host(self.callback_host):
+            raise ValueError("oidc_callback_host must be a loopback host")
         callback_port = config.get(AdminConfigKey.OIDC_CALLBACK_PORT, 39123)
         self.callback_port = int(callback_port) if callback_port is not None else 39123
         if self.callback_port <= 0:
@@ -96,9 +128,8 @@ class OIDCTokenManager:
                     token_response = self._refresh_with_refresh_token(self._refresh_token)
                     self._update_tokens(token_response)
                     return self._access_token
-                except Exception:
-                    # fallback to interactive browser flow
-                    pass
+                except Exception as e:
+                    self.logger.warning(f"OIDC refresh failed: {e}; falling back to browser login")
 
             if not allow_browser:
                 raise RuntimeError("no valid access token and browser flow is disabled")
@@ -120,14 +151,17 @@ class OIDCTokenManager:
 
         if self.authorization_endpoint and self.token_endpoint:
             self._resolved_endpoints = {
-                "authorization_endpoint": str(self.authorization_endpoint).strip(),
-                "token_endpoint": str(self.token_endpoint).strip(),
+                "authorization_endpoint": _validate_oidc_url(
+                    str(self.authorization_endpoint).strip(), "oidc authorization endpoint"
+                ),
+                "token_endpoint": _validate_oidc_url(str(self.token_endpoint).strip(), "oidc token endpoint"),
             }
             return dict(self._resolved_endpoints)
 
         discovery_url = self.discovery_url
         if not discovery_url:
             discovery_url = f"{self.issuer.rstrip('/')}/.well-known/openid-configuration"
+        discovery_url = _validate_oidc_url(discovery_url, "oidc discovery URL")
 
         metadata = self._fetch_json(discovery_url)
         auth_endpoint = metadata.get("authorization_endpoint")
@@ -138,12 +172,13 @@ class OIDCTokenManager:
             raise ValueError(f"oidc discovery metadata from '{discovery_url}' missing token_endpoint")
 
         self._resolved_endpoints = {
-            "authorization_endpoint": auth_endpoint.strip(),
-            "token_endpoint": token_endpoint.strip(),
+            "authorization_endpoint": _validate_oidc_url(auth_endpoint.strip(), "oidc authorization endpoint"),
+            "token_endpoint": _validate_oidc_url(token_endpoint.strip(), "oidc token endpoint"),
         }
         return dict(self._resolved_endpoints)
 
     def _fetch_json(self, url: str) -> Dict[str, Any]:
+        url = _validate_oidc_url(url, "oidc fetch URL")
         with urlopen(url, timeout=self.auth_timeout_seconds) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         if not isinstance(payload, dict):
@@ -151,6 +186,7 @@ class OIDCTokenManager:
         return payload
 
     def _post_form(self, url: str, form_data: Dict[str, Any]) -> Dict[str, Any]:
+        url = _validate_oidc_url(url, "oidc token endpoint")
         body = urlencode(form_data).encode("utf-8")
         req = Request(url=url, data=body, method="POST")
         req.add_header("content-type", "application/x-www-form-urlencoded")
