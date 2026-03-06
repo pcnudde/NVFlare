@@ -1,0 +1,173 @@
+# FedAuth Review Summary
+
+This document captures the current review status of the fedauth branch so follow-up cleanup can stay focused and minimize additional code.
+
+## Scope
+
+Reviewed range:
+
+- `1e975646a581b662c22a7673d453dc429fa44328..HEAD`
+
+Reviewed areas:
+
+- token/OIDC login flow
+- server-side token validation and claim mapping
+- admin port / `server.admin` cell changes
+- server-side submission attestation path
+- POC and `demo_fedauth` provisioning/demo flow
+
+Review inputs:
+
+- direct code review by Codex
+- joined Claude review notes kept locally under `.codex/.local_review/...`
+
+## Main Findings
+
+### 1. Critical: cert-mode admin transport auth appears regressed
+
+Files:
+
+- `nvflare/fuel/hci/client/api.py`
+
+Relevant lines:
+
+- current `connect()` path: `379-439`
+- stale imports: `58`, `63`
+
+What changed:
+
+- `AdminAPI.connect()` now creates and starts the cell, but no longer runs the older `Authenticator` handshake or installs auth-header filters.
+- The imports for:
+  - `Authenticator`
+  - `validate_auth_headers`
+  - `set_add_auth_headers_filters`
+  are still present, but unused.
+
+Why this matters:
+
+- token/OIDC mode may still function because login moved to session auth
+- existing cert-mode admin flows appear to have lost cell-level auth behavior
+- this is the most serious compatibility/security concern in the branch
+
+Minimum-change fix strategy:
+
+1. confirm whether cert-mode admin login is still a supported path
+2. if yes, restore the old cell-level auth path for cert-mode only
+3. keep token/OIDC path separate instead of trying to unify both immediately
+4. add a regression test for legacy cert-mode admin login
+
+### 2. Medium: child-cell readiness is too optimistic
+
+File:
+
+- `nvflare/fuel/f3/cellnet/core_cell.py`
+
+Relevant lines:
+
+- `577-585`
+
+What changed:
+
+- `is_ready()` returns `True` for child cells whenever `ext_listeners` exist
+
+Why this matters:
+
+- a listener existing does not prove the child can route to its parent or root
+- this matches the failure mode seen during admin-port bring-up: listener present, but `target_unreachable` at runtime
+
+Minimum-change fix strategy:
+
+1. tighten readiness for child cells so it reflects routability, not just listener creation
+2. add a focused test around admin child-cell readiness semantics
+
+### 3. Medium: temporal token validation semantics are permissive and unclear
+
+File:
+
+- `nvflare/fuel/hci/server/token_auth.py`
+
+Relevant lines:
+
+- `132-144`
+
+Current behavior:
+
+- `exp` accepted until `exp + skew`
+- `nbf` and `iat` also use skew in a lenient direction
+
+Why this matters:
+
+- this effectively creates a post-expiry grace period
+- that may be acceptable, but it is not clearly documented as policy
+- without explicit intent, this is easy for another reviewer to read as a bug
+
+Minimum-change fix strategy:
+
+1. decide whether `clock_skew_seconds` means:
+   - clock drift tolerance, or
+   - explicit grace period
+2. document that choice in code and design docs
+3. add boundary tests for `exp`, `nbf`, and `iat`
+
+## Items Reviewed But Not Raised As Main Findings
+
+These areas changed substantially, but did not currently justify top-level findings:
+
+- server-side submission attestation design for Option A
+- Keycloak-backed OIDC browser flow and PKCE token manager
+- generated signed admin console profile path
+- `demo_fedauth` operational flow after README and Marp cleanup
+
+These still need cleanup, but they are not currently the main blockers.
+
+## Open Questions
+
+1. Is cert-mode admin connectivity still part of the supported compatibility matrix?
+2. What exact semantics should `clock_skew_seconds` have?
+3. Is Option A server-side attestation the intended long-term trust model, or only the current implementation phase before Option C?
+4. Should readiness for `server.admin` mean:
+   - listener bound, or
+   - command-routable to the FL server engine?
+
+## Prioritized Cleanup Tasks
+
+### High Priority
+
+1. Resolve cert-mode admin auth regression in `AdminAPI.connect()`.
+2. Add or restore regression coverage for legacy cert-mode admin login.
+3. Tighten child-cell readiness semantics and test them.
+4. Clarify and test token temporal validation policy.
+
+### Medium Priority
+
+5. Add a required containerized smoke test for `demo_fedauth`:
+   - Keycloak up
+   - server + 2 clients up
+   - OIDC login
+   - `check_status`
+   - `submit_job`
+   - completion check
+6. Improve reprovision safety in `demo_fedauth/prepare_startup_kits.sh`.
+7. Rename the generated admin console profile away from `admin@nvidia.com` to a neutral console-profile name.
+8. Keep `demo_fedauth/README.md` and the slide deck aligned as commands or topology change.
+
+## Cleanup Strategy To Minimize New Code
+
+The goal for the next round should be to reduce divergence, not add abstraction.
+
+Recommended approach:
+
+1. prefer restoring proven legacy behavior over inventing a new common auth path
+2. isolate token/OIDC logic to the paths that truly need it
+3. add tests before broad refactors
+4. remove stale code and imports quickly once behavior is settled
+5. avoid new provisioning layers unless they remove existing duplication
+
+## Handoff Notes
+
+Local joined-review artifacts exist here:
+
+- `.codex/.local_review/20260305-155739-codex-fedauth-keycloak-design-review/joint_review.md`
+- `.codex/.local_review/20260305-155739-codex-fedauth-keycloak-design-review/round-1-claude.md`
+
+These are useful for reviewer context, but they are not tracked repo artifacts.
