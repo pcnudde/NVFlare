@@ -277,6 +277,26 @@ def test_connect_tls_mode_does_not_require_client_cert(monkeypatch, tmp_path):
     assert auth_call["verified"] is True
 
 
+def test_oidc_mode_allows_empty_local_user_name(tmp_path):
+    ca_cert = tmp_path / "rootCA.pem"
+    ca_cert.write_text("dummy-ca")
+    admin_config = {
+        AdminConfigKey.PROJECT_NAME: "example",
+        AdminConfigKey.SERVER_IDENTITY: "server",
+        AdminConfigKey.CA_CERT: str(ca_cert),
+        AdminConfigKey.CONNECTION_SECURITY: "tls",
+        AdminConfigKey.AUTH_MODE: "oidc",
+        AdminConfigKey.HOST: "127.0.0.1",
+        AdminConfigKey.PORT: 8003,
+        AdminConfigKey.OIDC_ISSUER: "http://127.0.0.1:38080/realms/nvflare",
+        AdminConfigKey.OIDC_CLIENT_ID: "nvflare-admin",
+    }
+
+    api = AdminAPI(user_name="", admin_config=admin_config, cmd_modules=[])
+
+    assert api.user_name == ""
+
+
 def test_connect_debug_output_redacts_credential_paths(monkeypatch, tmp_path):
     ca_cert = tmp_path / "rootCA.pem"
     ca_cert.write_text("dummy-ca")

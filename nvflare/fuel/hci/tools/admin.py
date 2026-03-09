@@ -35,6 +35,12 @@ def _get_default_invite_workspace(invite_file: str) -> str:
     return os.path.join(os.path.dirname(invite_path), invite_name)
 
 
+def _normalize_imported_workspace(workspace_dir: str):
+    fl_admin_path = os.path.join(workspace_dir, WorkspaceConstants.STARTUP_FOLDER_NAME, "fl_admin.sh")
+    if os.path.isfile(fl_admin_path):
+        os.chmod(fl_admin_path, 0o755)
+
+
 def prepare_workspace(workspace: str = "", invite_file: str = "", fed_admin: str = WorkspaceConstants.ADMIN_STARTUP_CONFIG):
     workspace_dir = os.path.abspath(workspace) if workspace else ""
     if not invite_file:
@@ -63,6 +69,7 @@ def prepare_workspace(workspace: str = "", invite_file: str = "", fed_admin: str
     startup_config = os.path.join(workspace_dir, WorkspaceConstants.STARTUP_FOLDER_NAME, fed_admin)
     if not os.path.isfile(startup_config):
         raise ConfigError(f"invite {invite_file} does not contain startup/{fed_admin}")
+    _normalize_imported_workspace(workspace_dir)
     return workspace_dir
 
 
@@ -90,6 +97,10 @@ def main():
 
     try:
         workspace_dir = prepare_workspace(workspace=args.workspace, invite_file=args.invite_file, fed_admin=args.fed_admin)
+        if args.invite_file:
+            print(f"Invite imported to: {workspace_dir}")
+            print(f"Next step: run {os.path.join(workspace_dir, WorkspaceConstants.STARTUP_FOLDER_NAME, 'fl_admin.sh')}")
+            return
         os.chdir(workspace_dir)
         workspace = Workspace(root_dir=workspace_dir)
         conf = secure_load_admin_config(workspace)

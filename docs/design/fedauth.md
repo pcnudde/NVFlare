@@ -2,7 +2,7 @@
 
 Status: Draft  
 Audience: NVFlare platform maintainers, security architects, and deployment owners  
-Last updated: 2026-03-05
+Last updated: 2026-03-09
 
 ## 1. Purpose
 
@@ -56,6 +56,7 @@ Current Option A implementation status:
 
 - fedauth provisioning can synthesize and sign a lightweight admin console profile from a site-only `project.yml`
 - the resulting console workspace still has an admin directory name (for example `admin@nvidia.com/`), but that directory is no longer backed by a human participant entry in project provisioning
+- the current user-facing bootstrap artifact is an exported `invite.zip` that is imported into a local admin workspace before running `fl_admin.sh`
 
 ### 4.3 Standards-first federation pattern (recommended)
 

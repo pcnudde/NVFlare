@@ -105,7 +105,8 @@ class AdminClient(cmd.Cmd, EventHandler):
                 modules.append(m)
 
         uid_source = admin_config.get(AdminConfigKey.UID_SOURCE, UidSource.USER_INPUT)
-        if uid_source != UidSource.CERT:
+        auth_mode = str(admin_config.get(AdminConfigKey.AUTH_MODE, "cert")).strip().lower()
+        if uid_source != UidSource.CERT and auth_mode == "cert":
             self.user_name = self._user_input("User Name: ")
 
         event_handlers = [self]

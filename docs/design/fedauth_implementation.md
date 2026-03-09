@@ -2,7 +2,7 @@
 
 Status: Draft  
 Audience: NVFlare platform maintainers and implementers  
-Last updated: 2026-03-05
+Last updated: 2026-03-09
 
 This document contains implementation-level details for federated human authentication.
 Design intent and requirements are defined in [fedauth.md](/Users/pcnudde/.codex/worktrees/ad00/NVFlare/docs/design/fedauth.md).
@@ -20,7 +20,14 @@ The target model is:
 
 - Sites remain on provisioned PKI/mTLS.
 - Humans authenticate with enterprise SSO (OIDC/SAML), using short-lived tokens.
-- Human startup kits disappear; login becomes URL-driven (and API-friendly).
+- Target end-state: human startup kits disappear and login becomes URL-driven (and API-friendly).
+
+Current branch status:
+
+- token/OIDC admin login no longer requires human client certificates or signing keys
+- token/OIDC admin CLI no longer prompts for a local user name before browser login
+- a site-only `project.yml` can provision a signed bootstrap workspace and export a user-facing `invite.zip`
+- the current user flow is still workspace-based: import `invite.zip`, then launch `fl_admin.sh`
 
 ## 2. Current State (As Implemented)
 
@@ -40,17 +47,24 @@ Code touch points:
 
 ### 2.2 Human login flow
 
-There are two auth layers for admin users today:
+There are now two human login paths in the branch:
 
-1. Cell-level endpoint authentication (mutual cert challenge + register):
-   - `nvflare/fuel/hci/client/api.py` (`Authenticator(... secure_mode=True ...)`)
-   - `nvflare/private/fed/authenticator.py`
-2. HCI command session login (`_cert_login user`):
+1. Cert compatibility path:
+   - explicit server-identity verification during connect
+   - HCI command session login via `_cert_login user`
    - client sends cert + signature
    - server verifies cert CN/signature
-   - server creates session token carrying user name/org/role
-   - `nvflare/fuel/hci/server/login.py`
-   - `nvflare/fuel/hci/server/sess.py`
+2. Token-first path:
+   - explicit server-identity verification during connect
+   - no human client cert/key requirement in `token` or `oidc` modes
+   - HCI command session login via `_token_login`
+   - server validates JWT/JWKS and maps claims into user/org/role
+
+Code touch points:
+
+- connect/bootstrap: `nvflare/fuel/hci/client/api.py`, `nvflare/private/fed/authenticator.py`
+- server login: `nvflare/fuel/hci/server/login.py`
+- session handling: `nvflare/fuel/hci/server/sess.py`
 
 ### 2.3 Authorization data flow
 
@@ -68,9 +82,16 @@ Code touch points:
 
 ### 2.4 Provisioning and startup-kit assumptions
 
-- Admin package explicitly includes `client.crt`, `client.key`, `rootCA.pem`, `fl_admin.sh`.
-- `fed_admin.json` contains cert key paths and `uid_source`.
-- Most CLI/API documentation and helpers assume admin startup kit exists.
+Legacy admin packages explicitly included `client.crt`, `client.key`, `rootCA.pem`, and `fl_admin.sh`.
+
+Current token-first bootstrap behavior:
+
+- the generated bootstrap workspace still uses the familiar `startup/`, `local/`, and `transfer/` layout
+- signed `startup/fed_admin.json` contains token/OIDC bootstrap and trust settings
+- token-first bootstrap workspaces use empty `client_cert` / `client_key` fields
+- a user-facing `invite.zip` can be exported and imported into a separate local workspace before launching `fl_admin.sh`
+
+Most CLI/API documentation and helpers still assume an admin workspace exists, even when that workspace is now bootstrap-only and not backed by a human cert identity.
 
 Code/docs touch points:
 
@@ -79,20 +100,22 @@ Code/docs touch points:
 - Session bootstrap from startup kit: `nvflare/fuel/flare_api/flare_api.py`
 - CLI/API helpers expecting `fed_admin.json`: `nvflare/tool/job/job_cli.py`, `nvflare/tool/api_utils.py`
 
-### 2.5 Current blockers to removing human certs
+### 2.5 Current remaining gaps after token-first implementation
 
-The current implementation still depends on admin cert material in two critical places:
+The main cert/key blockers from the early branch are now resolved:
 
 1. Admin transport/bootstrap:
-   - `AdminAPI.connect()` still requires `client.crt` and `client.key` and uses the cert-based authenticator even when human login is token/OIDC based.
+   - `AdminAPI.connect()` no longer requires human `client.crt` / `client.key` in `token` or `oidc` modes.
+   - token/OIDC admin connections use server-authenticated TLS, explicit server-identity verification, and `_token_login`.
 2. Job submission integrity:
-   - `submit_job` currently signs the uploaded job folder with the admin private key before upload.
-   - Deployed job verification expects cert-based folder signatures.
+   - `submit_job` no longer depends on a human private key in the token/OIDC path.
+   - the current branch uses the Option A server-attestation path instead of human local signing.
 
-Result:
+Current remaining gaps are now mostly about UX and cleanup rather than security blockers:
 
-- the current token/OIDC work is a transitional dual-stack implementation
-- it is not yet a true "no human keys, no human participants in `project.yml`" design
+- the bootstrap artifact is still an imported workspace (`invite.zip` -> local `invite/` folder), not the final config-less login UX
+- the generated internal bootstrap workspace still lives under a legacy admin-style path such as `admin@nvidia.com/`
+- the demo flow still uses `fl_admin.sh` after invite import, rather than a slimmer first-class `nvflare login` UX
 
 ## 3. Why This Is Not a Simple Login-Screen Change
 
@@ -252,24 +275,21 @@ Implementation preference:
 
 ### 5.1 HCI client changes (Console + FLARE API)
 
-Current coupling:
+Current branch behavior:
 
-- `AdminAPI.connect()` always performs cert-based `Authenticator` flow.
-- `AdminAPI._user_login()` always executes `_cert_login`.
+- explicit human auth mode is supported in client config:
+  - `auth_mode: cert | token | oidc`
+- `AdminAPI.connect()` still performs explicit server-identity verification, but `token` and `oidc` modes do not require human `client.crt` or `client.key`
+- `AdminAPI._user_login()` uses `_token_login` for `token` and `oidc`
+- browser OIDC flow with PKCE loopback callback is implemented for `auth_mode=oidc`
+- token/OIDC mode no longer prompts for a local CLI user name before login
+- `submit_job` no longer signs locally with a human private key in the token/OIDC path
 
-Required changes:
+Remaining work:
 
-1. Add explicit human auth mode in client config:
-   - `auth_mode: cert | token | oidc`
-2. For `auth_mode=token|oidc`:
-   - skip cert-based transport bootstrap
-   - do not require human `client.crt` or `client.key`
-   - connect with server-authenticated TLS only
-   - acquire JWT via configured SSO flow (interactive and non-interactive modes)
-   - call new server command (for example `_token_login`)
-   - receive server-issued session/channel auth material after login if required by the HCI transport
-3. `submit_job` no longer signs locally with a human private key.
-4. Preserve existing command/session handling once login succeeds.
+1. keep shrinking the bootstrap UX so imported workspace/profile handling is simpler
+2. add a cleaner first-class import/login CLI path so the user does not need to think in terms of legacy admin workspaces
+3. preserve existing command/session handling once login succeeds
 
 Design note:
 
@@ -277,29 +297,23 @@ Design note:
 
 ### 5.2 HCI server login/session changes
 
-Current coupling:
+Current branch behavior:
 
-- Login module only supports `_cert_login`.
-- User/org/role inferred from certificate subject.
-- Session token payload uses those values directly.
+- Login module supports both `_cert_login` and `_token_login`.
+- Cert mode still infers user/org/role from certificate subject.
+- Token mode validates JWT/JWKS and maps claims into NVFlare identity attributes.
+- Session construction still sets:
+  - `ConnProps.USER_NAME`
+  - `ConnProps.USER_ORG`
+  - `ConnProps.USER_ROLE`
+- `auth_source` is recorded in session/audit context.
+- production session-token decode verifies signatures when the server id-asserter is configured.
 
-Required changes:
+Remaining work:
 
-1. Add token login command (for example `_token_login`):
-   - validate JWT/JWKS
-   - map claims to NVFlare identity attributes
-2. Support pre-login admin connections without client certificates.
-3. Session construction still sets:
-   - `ConnProps.USER_NAME`
-   - `ConnProps.USER_ORG`
-   - `ConnProps.USER_ROLE`
-4. Keep existing `SessionManager` mechanics (idle timeout, session recreation) but tighten token/session TTL alignment.
-5. Ensure token-first human operation does not require human entries in `project.yml`.
-
-Recommended:
-
-- Keep `_cert_login` for migration period and emergency fallback.
-- Record `auth_source` in session (`cert` or `sso`) for audit and policy.
+1. keep tightening token/session TTL alignment and refresh/re-auth policy
+2. keep `_cert_login` for migration period and emergency fallback
+3. ensure token-first human operation remains independent of human entries in `project.yml`
 
 ### 5.3 Role and org resolution strategy
 
@@ -344,6 +358,14 @@ Current implementation status:
 - Option A now supports token-first provisioning from a site-only `project.yml`.
 - The fedauth prepare path synthesizes a signed admin console profile after site provisioning.
 - Core token/OIDC admin settings are written into signed `startup/fed_admin.json` so the console profile does not depend on unsigned local-resource overrides for auth bootstrap.
+- The current user-facing bootstrap artifact is an exported `invite.zip`.
+- `python -m nvflare.fuel.hci.tools.admin -i invite.zip` is now import-only; it unpacks into a local `invite/` workspace and exits.
+- The imported workspace remains the launch point for `fl_admin.sh`.
+- The invite is bootstrap-only; demo jobs are staged separately into the imported workspace transfer directory.
+
+Current UX caveat:
+
+- the branch is no longer cert-coupled for token/OIDC, but it is still using a bootstrap workspace model rather than the final config-less login UX
 
 ### 5.5 Job submission integrity and provenance model
 
@@ -513,6 +535,9 @@ Browser mode behavior:
 - Refresh token is kept in-memory and used for automatic access-token refresh.
 - `offline_access` is optional and should only be requested when the IdP/client is explicitly configured to allow offline tokens.
 - If server marks session inactive due token expiry, next command triggers auto re-login.
+- callback host is restricted to loopback
+- non-HTTP(S) OIDC URLs are rejected, and plain HTTP is only allowed for loopback hosts
+- token validation enforces a minimum required-claims floor of `iss`, `aud`, `exp`, and `iat` even if config under-specifies `required_claims`
 
 Role mapping should be deterministic and explicit. Example:
 
@@ -584,6 +609,7 @@ Do not rely on plugins for:
 - Session hardening:
   - short server session TTL relative to token TTL
   - explicit refresh/re-auth policy
+  - session-token decode path verifies signatures in production when the server id-asserter is configured
 - Submission attestation:
   - canonical digest generation on accepted job contents
   - signed attestation verified by server and clients before execution
@@ -1018,34 +1044,39 @@ Failure policy:
 
 ## 12. Recommended Next Step
 
-Build the next spike around the real steady-state target, not the transitional dual-stack shape:
+Build the next cleanup round around the current token-first branch state, not the already-closed early blockers:
 
-- remove human client-cert dependence from token/OIDC admin connections
-- introduce server-signed submission attestation for job integrity/provenance
-- validate token-first operation with no human participants in `project.yml`
+- tighten child-cell readiness/routability semantics for the admin-port path
+- simplify bootstrap UX beyond the current imported-workspace model
+- keep the secure token-auth example and invite/demo flow green while cleanup lands
+- continue documenting Option A as the implemented trust model while keeping Option C available as the future stronger-provenance path
 
-Back this with a reference broker test environment (Keycloak baseline, two upstream org IdPs) and make the attestation and tamper-detection tests required in CI.
+Back this with the existing reference-provider validation (Keycloak baseline) and keep the secure token-auth example required in CI.
 
 ## 13. Implementation TODO Backlog
 
 - Completed in current branch:
   - `nvflare poc prepare --enable_fedauth` now auto-wires:
     - server `admin_auth.token_login`
-    - admin `local/resources.json` for `auth_mode=oidc` or `auth_mode=token`
+    - signed admin bootstrap config in `startup/fed_admin.json`
   - admin browser OIDC flow implemented (`auth_mode=oidc`) with PKCE loopback callback.
   - token refresh lifecycle implemented:
     - refresh token reuse for new access token
     - automatic re-login on inactive server session.
-  - current branch remains transitional:
-    - token/OIDC human login works
-    - human cert material is still required for admin transport bootstrap and local job signing
+  - token/OIDC human login works without human client certs or local human job-signing keys.
+  - token/OIDC admin CLI no longer prompts for a local user name before login.
+  - token-first provisioning works from a site-only `project.yml`.
+  - signed bootstrap workspace can be exported as `invite.zip` and imported separately from launch.
+  - admin connect path restores explicit server-identity verification.
+  - production session-token decode verifies signatures when the server id-asserter is configured.
+  - token validation now enforces a minimum required-claims floor and has clock-skew boundary tests.
+  - secure token-auth example covers login, admin commands, job submission, and completion.
 
 - Remaining backlog:
-  - remove human cert/key requirement from `AdminAPI.connect()` in `token` and `oidc` modes.
-  - introduce token-first admin transport over server-authenticated TLS.
-  - replace client-side `sign_folders` on job submit with server-issued submission attestation.
-  - add runtime verification for server-issued job attestation on both server and client deploy paths.
-  - move token-first human role mapping out of `project.yml`; keep break-glass cert admins as a separate optional path.
-  - add a short alias/profile flag for common local Keycloak defaults to reduce CLI flag length in demos.
+  - tighten child-cell readiness semantics for admin-port routability.
+  - simplify the invite/bootstrap UX further so users do not need to reason about imported workspaces.
+  - rename the generated internal console workspace away from `admin@nvidia.com`.
+  - decide whether refresh fallback logging should classify revocation vs transient failures more explicitly.
   - add optional persistent refresh-token storage strategy (secure keychain/file) for long-running CLI sessions.
-  - add CI integration test that exercises browserless OIDC mock callback path for refresh/re-login behavior.
+  - add a first-class import/login command shape that can eventually replace `fl_admin.sh` for token-first users.
+  - keep a periodic compatibility pass against at least one non-Keycloak provider.

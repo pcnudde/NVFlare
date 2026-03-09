@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 WORKSPACE="$SCRIPT_DIR/workspace"
+DIST_DIR="$SCRIPT_DIR/distribution"
 PROJECT_FILE="$SCRIPT_DIR/project.yml"
 PROJECT_NAME="fedauth_prod_demo"
 PROD_DIR="$WORKSPACE/$PROJECT_NAME/prod_00"
@@ -29,6 +30,7 @@ fi
 
 echo "[1/3] Provisioning production startup kits into $WORKSPACE"
 rm -rf "$WORKSPACE"
+rm -rf "$DIST_DIR"
 "$REPO_DIR/.venv/bin/nvflare" provision -p "$PROJECT_FILE" -w "$WORKSPACE"
 
 if [ ! -d "$PROD_DIR" ]; then
@@ -53,7 +55,11 @@ import os
 import sys
 from argparse import Namespace
 
-from nvflare.tool.poc.poc_commands import apply_fedauth_to_poc_startup_kit, _sign_fedauth_admin_profile
+from nvflare.tool.poc.poc_commands import (
+    _create_fedauth_admin_invite,
+    _sign_fedauth_admin_profile,
+    apply_fedauth_to_poc_startup_kit,
+)
 
 prod_dir = sys.argv[1]
 issuer = sys.argv[2]
@@ -105,6 +111,7 @@ with open(admin_startup_file, "w") as f:
     json.dump(admin_startup, f, indent=2)
 
 _sign_fedauth_admin_profile(prod_dir=prod_dir, admin_name="admin@nvidia.com")
+_create_fedauth_admin_invite(prod_dir=prod_dir, admin_name="admin@nvidia.com")
 
 print(f"Configured fedauth resources under: {prod_dir}")
 PY
@@ -115,7 +122,11 @@ mkdir -p "$ADMIN_TRANSFER_DIR"
 rm -rf "$ADMIN_TRANSFER_DIR/hello-numpy-sag"
 cp -R "$REPO_DIR/tests/integration_test/data/jobs/hello-numpy-sag" "$ADMIN_TRANSFER_DIR/hello-numpy-sag"
 
+mkdir -p "$DIST_DIR"
+cp "$PROD_DIR/invite.zip" "$DIST_DIR/invite.zip"
+
 echo
 
 echo "Startup kits prepared: $PROD_DIR"
+echo "User invite exported: $DIST_DIR/invite.zip"
 echo "Next: cd $SCRIPT_DIR && podman compose up --build -d keycloak server site-1 site-2"

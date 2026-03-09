@@ -330,7 +330,7 @@ class AdminAPI(AdminAPISpec, StreamableEngine):
             cert = load_cert_file(self.client_cert)
             self.user_name = get_cn_from_cert(cert)
 
-        if not self.user_name:
+        if not self.user_name and self.auth_mode == _AUTH_MODE_CERT:
             raise Exception("user_name is required.")
 
         if debug:

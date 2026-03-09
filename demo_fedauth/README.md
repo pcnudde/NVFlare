@@ -35,28 +35,35 @@ This README is the canonical operator guide for the `demo_fedauth/` demo.
 - `.venv` available in repo root and already activated in your shell
 - demo Python deps installed into this `.venv`
 
-From repo root:
+All commands below assume your current directory is `demo_fedauth/`.
+
+One-time dependency install:
 
 ```bash
-uv pip install --python .venv/bin/python -r demo_fedauth/requirements.txt
+uv pip install --python ../.venv/bin/python -r requirements.txt
 ```
 
 ## Quick Start
 
-### 1. Prepare startup kits
-
-From repo root:
+If you want a clean starting point before the demo:
 
 ```bash
-./demo_fedauth/prepare_startup_kits.sh
+./clean_demo.sh
+```
+
+### 1. Prepare startup kits
+
+```bash
+./prepare_startup_kits.sh
 ```
 
 This does all required startup-kit work:
 
 - provisions production startup kits
 - applies fedauth resource settings
-- generates a signed host-side admin console profile even though `project.yml` has no human participant
-- packages that admin bootstrap workspace as `workspace/fedauth_prod_demo/prod_00/invite.zip`
+- generates an internal signed host-side admin console profile even though `project.yml` has no human participant
+- packages that bootstrap workspace as a user-facing invite
+- exports the user-facing invite as `distribution/invite.zip`
 - rewrites the signed host-side admin startup config to use `127.0.0.1:8003`
 - copies `hello-numpy-sag` into the admin `transfer/` folder
 
@@ -69,24 +76,43 @@ Important:
 Output:
 
 ```text
-demo_fedauth/workspace/fedauth_prod_demo/prod_00
+workspace/fedauth_prod_demo/prod_00
+distribution/invite.zip
 ```
 
 Optional invite import flow:
 
 ```bash
-cd demo_fedauth/workspace/fedauth_prod_demo/prod_00
+mkdir -p user_demo
+cp distribution/invite.zip user_demo/
+cd user_demo
 python -m nvflare.fuel.hci.tools.admin -i invite.zip
+cd ..
 ```
 
-This unpacks the invite into `./invite/` next to the zip and then runs from that normal admin workspace layout.
+This simulates what the invited user does in a separate local folder, not from the provisioned `workspace/`.
+It only unpacks the invite into `./invite/` next to the zip.
 If `./invite/` already exists, remove it first or import into a different workspace path.
-
-### 2. Start the stack
+The invite is bootstrap-only and does not carry demo jobs. Stage the demo job into the imported workspace:
 
 ```bash
-cd demo_fedauth
-podman compose up --build -d keycloak server site-1 site-2
+cp -R ../tests/integration_test/data/jobs/hello-numpy-sag user_demo/invite/transfer/
+```
+
+Do not launch `fl_admin.sh` yet. Launch only after the stack is up in step 3.
+
+### 2. Build the demo image
+
+Do this once, or whenever the NVFlare code or `Dockerfile` changes:
+
+```bash
+podman compose build server
+```
+
+### 3. Start the stack
+
+```bash
+podman compose up -d keycloak server site-1 site-2
 ```
 
 Useful checks:
@@ -96,21 +122,22 @@ podman compose ps
 podman compose logs -f server
 ```
 
-### 3. Login from the host admin CLI
+### 4. Login from the host admin CLI
 
 In a new terminal:
 
 ```bash
-cd demo_fedauth/workspace/fedauth_prod_demo/prod_00/admin@nvidia.com/startup
+cd user_demo/invite/startup
 ./fl_admin.sh
 ```
 
-The CLI opens the browser-based OIDC flow.
+This requires the stack from step 2 to already be up.
+The CLI then opens the browser-based OIDC flow.
 
 Use:
 
-- username: `alice`
-- password: `alicepass`
+- Keycloak username: `alice`
+- Keycloak password: `alicepass`
 
 Then in `fl_admin`, run:
 
@@ -123,22 +150,24 @@ list_jobs
 
 Repeat `list_jobs` until job is `FINISHED:*`.
 
-### 4. Stop the stack
+### 5. Stop the stack
 
 ```bash
-cd demo_fedauth
 podman compose down
 ```
 
 ## Presenting The Slides
 
 ```bash
-cd demo_fedauth/presentation && npm ci && npm run render-diagrams && marp -p fedauth_demo_slides.md
+cd presentation && npm ci && npm run render-diagrams && marp -p fedauth_demo_slides.md
 ```
 
 ## Notes
 
 - Issuer is set to `http://localhost:38080/realms/nvflare` so host-side admin browser flow works.
 - Server/clients fetch JWKS via `http://host.docker.internal:38080/...` (reachable inside Podman containers).
+- `workspace/fedauth_prod_demo/prod_00/admin@nvidia.com/` is an internal generated bootstrap workspace used to produce the invite bundle. It is not the user-facing artifact.
+- The user-facing artifact for the demo is `distribution/invite.zip`.
+- The invite is bootstrap-only. Demo jobs are copied separately into `user_demo/invite/transfer/`.
 - Admin startup config is rewritten and re-signed to connect to `127.0.0.1:8003` for host-side CLI.
 - Demo job `hello-numpy-sag` is copied into admin `transfer/` by `prepare_startup_kits.sh`.
