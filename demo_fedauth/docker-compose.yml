@@ -25,7 +25,12 @@ services:
     depends_on:
       - keycloak
     working_dir: /workspace/server
-    command: ["/bin/bash", "-lc", "./startup/sub_start.sh"]
+    command:
+      [
+        "/bin/bash",
+        "-lc",
+        "rm -f ./pid.fl ./shutdown.fl ./restart.fl ./daemon_pid.fl && ./startup/sub_start.sh",
+      ]
     ports:
       - "8002:8002"
       - "8003:8003"
@@ -38,7 +43,12 @@ services:
     depends_on:
       - server
     working_dir: /workspace/site-1
-    command: ["/bin/bash", "-lc", "./startup/sub_start.sh"]
+    command:
+      [
+        "/bin/bash",
+        "-lc",
+        "rm -f ./pid.fl ./shutdown.fl ./restart.fl ./daemon_pid.fl && ./startup/sub_start.sh",
+      ]
     volumes:
       - ./workspace/fedauth_prod_demo/prod_00/site-1:/workspace/site-1
 
@@ -48,6 +58,11 @@ services:
     depends_on:
       - server
     working_dir: /workspace/site-2
-    command: ["/bin/bash", "-lc", "./startup/sub_start.sh"]
+    command:
+      [
+        "/bin/bash",
+        "-lc",
+        "rm -f ./pid.fl ./shutdown.fl ./restart.fl ./daemon_pid.fl && ./startup/sub_start.sh",
+      ]
     volumes:
       - ./workspace/fedauth_prod_demo/prod_00/site-2:/workspace/site-2

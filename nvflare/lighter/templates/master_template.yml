@@ -644,13 +644,17 @@ sub_start_sh: |
 
   if [[ -f "$DIR/../daemon_pid.fl" ]]; then
     dpid=`cat $DIR/../daemon_pid.fl`
-    kill -0 ${dpid} 2> /dev/null 1>&2
-    if [[ $? -eq 0 ]]; then
-      echo "There seems to be one instance, pid=$dpid, running."
-      echo "If you are sure it's not the case, please kill process $dpid and then remove daemon_pid.fl in $DIR/.."
-      exit
+    if [[ "$dpid" == "$BASHPID" ]]; then
+      rm -f $DIR/../daemon_pid.fl
+    else
+      kill -0 ${dpid} 2> /dev/null 1>&2
+      if [[ $? -eq 0 ]]; then
+        echo "There seems to be one instance, pid=$dpid, running."
+        echo "If you are sure it's not the case, please kill process $dpid and then remove daemon_pid.fl in $DIR/.."
+        exit
+      fi
+      rm -f $DIR/../daemon_pid.fl
     fi
-    rm -f $DIR/../daemon_pid.fl
   fi
 
   echo $BASHPID > $DIR/../daemon_pid.fl
