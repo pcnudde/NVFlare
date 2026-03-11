@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import traceback
-from typing import Any, Callable, List, Mapping, Optional
+from typing import Any, Callable, List, Mapping, Optional, Union
+
+import jwt
 
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
 from nvflare.fuel.f3.message import Message as CellMessage
@@ -36,8 +38,8 @@ class LoginModule(CommandModule, CommandFilter):
         sess_mgr: SessionManager,
         token_validator: Optional[TokenValidator] = None,
         claim_mapper: Optional[ClaimMapper] = None,
-        token_jwks: Optional[Mapping[str, Any]] = None,
-        jwks_fetcher: Optional[Callable[[], Mapping[str, Any]]] = None,
+        token_jwks: Optional[Union[Mapping[str, Any], jwt.PyJWKClient]] = None,
+        jwks_fetcher: Optional[Callable[[], Union[Mapping[str, Any], jwt.PyJWKClient]]] = None,
     ):
         """Login module.
 
@@ -193,10 +195,10 @@ class LoginModule(CommandModule, CommandFilter):
     def _token_login_enabled(self) -> bool:
         return self.token_validator is not None and self.claim_mapper is not None
 
-    def _get_jwks(self) -> Mapping[str, Any]:
+    def _get_jwks(self) -> Union[Mapping[str, Any], jwt.PyJWKClient]:
         jwks = self.jwks_fetcher() if self.jwks_fetcher else self.token_jwks
-        if not isinstance(jwks, Mapping):
-            raise ValueError("token login jwks must be a mapping")
+        if not isinstance(jwks, (Mapping, jwt.PyJWKClient)):
+            raise ValueError("token login jwks must be a mapping or PyJWKClient")
         return jwks
 
     @staticmethod

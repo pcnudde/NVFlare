@@ -89,24 +89,22 @@ def test_build_admin_token_login_kwargs_builds_cached_jwks_fetcher(monkeypatch):
     conf = _make_server_conf({"jwks_uri": "https://id.example.com/protocol/openid-connect/certs"})
     del conf["admin_auth"]["token_login"]["jwks"]
 
-    calls = {"count": 0}
-    fetched_jwks = {"keys": [{"kid": "remote"}]}
-
-    def _fake_fetch(url, timeout):
-        calls["count"] += 1
-        assert url == "https://id.example.com/protocol/openid-connect/certs"
-        assert timeout == 5.0
-        return fetched_jwks
-
-    monkeypatch.setattr("nvflare.private.fed.app.utils._fetch_json_from_url", _fake_fetch)
+    client = object()
+    pyjwk_client = Mock(return_value=client)
+    monkeypatch.setattr("nvflare.private.fed.app.utils.jwt.PyJWKClient", pyjwk_client)
 
     kwargs = build_admin_token_login_kwargs(server_conf=conf, workspace_dir="/tmp")
     assert "jwks_fetcher" in kwargs
     assert "token_jwks" not in kwargs
 
-    assert kwargs["jwks_fetcher"]() == fetched_jwks
-    assert kwargs["jwks_fetcher"]() == fetched_jwks
-    assert calls["count"] == 1
+    assert kwargs["jwks_fetcher"]() is client
+    assert kwargs["jwks_fetcher"]() is client
+    pyjwk_client.assert_called_once_with(
+        "https://id.example.com/protocol/openid-connect/certs",
+        cache_jwk_set=True,
+        lifespan=300,
+        timeout=5.0,
+    )
 
 
 def test_build_admin_token_login_kwargs_jwks_fetcher_respects_zero_cache_ttl(monkeypatch):
@@ -118,19 +116,18 @@ def test_build_admin_token_login_kwargs_jwks_fetcher_respects_zero_cache_ttl(mon
     )
     del conf["admin_auth"]["token_login"]["jwks"]
 
-    calls = {"count": 0}
-
-    def _fake_fetch(url, timeout):
-        calls["count"] += 1
-        return {"keys": [{"kid": f"remote-{calls['count']}"}]}
-
-    monkeypatch.setattr("nvflare.private.fed.app.utils._fetch_json_from_url", _fake_fetch)
+    client = object()
+    pyjwk_client = Mock(return_value=client)
+    monkeypatch.setattr("nvflare.private.fed.app.utils.jwt.PyJWKClient", pyjwk_client)
 
     kwargs = build_admin_token_login_kwargs(server_conf=conf, workspace_dir="/tmp")
-    first = kwargs["jwks_fetcher"]()
-    second = kwargs["jwks_fetcher"]()
-    assert first != second
-    assert calls["count"] == 2
+    assert kwargs["jwks_fetcher"]() is client
+    pyjwk_client.assert_called_once_with(
+        "https://id.example.com/protocol/openid-connect/certs",
+        cache_jwk_set=False,
+        lifespan=300,
+        timeout=5.0,
+    )
 
 
 def test_build_admin_token_login_kwargs_rejects_multiple_jwks_sources():

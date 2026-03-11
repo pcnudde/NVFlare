@@ -21,6 +21,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 from urllib.request import urlopen
 
 import psutil
+import jwt
 
 from nvflare.apis.fl_constant import ConnectionSecurity, FLContextKey, SystemConfigs, WorkspaceConstants
 from nvflare.apis.fl_context import FLContext
@@ -121,6 +122,17 @@ def _get_optional_string_mapping(config: Mapping[str, Any], key: str, full_name:
     return result
 
 
+def _collect_validated_kwargs(
+    config: Mapping[str, Any], full_name: str, key_specs: Sequence[tuple[str, Any]]
+) -> Dict[str, Any]:
+    result = {}
+    for key, validator in key_specs:
+        value = validator(config, key, f"{full_name}.{key}")
+        if value is not None:
+            result[key] = value
+    return result
+
+
 def _load_jwks_from_file(path: str, workspace_dir: Optional[str]) -> Dict[str, Any]:
     if not os.path.isabs(path) and workspace_dir:
         path = os.path.join(workspace_dir, path)
@@ -155,13 +167,7 @@ def _build_jwks_fetcher_from_remote(token_login: Mapping[str, Any], issuer: str)
     if request_timeout is None:
         request_timeout = 5.0
 
-    state = {"jwks": None, "last_fetch_time": 0.0, "jwks_uri": jwks_uri}
-    state_lock = threading.Lock()
-
-    def _discover_jwks_uri() -> str:
-        if state["jwks_uri"]:
-            return state["jwks_uri"]
-
+    if not jwks_uri:
         openid_config_url = discovery_url
         if not openid_config_url:
             openid_config_url = f"{issuer.rstrip('/')}/.well-known/openid-configuration"
@@ -170,31 +176,17 @@ def _build_jwks_fetcher_from_remote(token_login: Mapping[str, Any], issuer: str)
         discovered_uri = metadata.get("jwks_uri")
         if not isinstance(discovered_uri, str) or not discovered_uri.strip():
             raise ValueError(f"openid metadata from '{openid_config_url}' missing non-empty jwks_uri")
-        state["jwks_uri"] = discovered_uri.strip()
-        return state["jwks_uri"]
+        jwks_uri = discovered_uri.strip()
 
-    def _refresh_jwks() -> Mapping[str, Any]:
-        resolved_uri = _discover_jwks_uri()
-        jwks = _fetch_json_from_url(resolved_uri, timeout=request_timeout)
-        keys = jwks.get("keys")
-        if not isinstance(keys, list):
-            raise ValueError("fetched JWKS must contain a 'keys' list")
-        state["jwks"] = jwks
-        state["last_fetch_time"] = time.time()
-        return jwks
+    jwks_client = jwt.PyJWKClient(
+        jwks_uri,
+        cache_jwk_set=cache_ttl > 0,
+        lifespan=cache_ttl if cache_ttl > 0 else 300,
+        timeout=request_timeout,
+    )
 
-    def _fetcher() -> Mapping[str, Any]:
-        now = time.time()
-        cached_jwks = state["jwks"]
-        if cached_jwks is not None and cache_ttl > 0 and now - state["last_fetch_time"] < cache_ttl:
-            return cached_jwks
-
-        with state_lock:
-            now = time.time()
-            cached_jwks = state["jwks"]
-            if cached_jwks is not None and cache_ttl > 0 and now - state["last_fetch_time"] < cache_ttl:
-                return cached_jwks
-            return _refresh_jwks()
+    def _fetcher():
+        return jwks_client
 
     return _fetcher
 
@@ -226,70 +218,38 @@ def build_admin_token_login_kwargs(
     issuer = _get_required_non_empty_string(token_login, "issuer", "server.admin_auth.token_login.issuer")
     audience = _get_required_audience(token_login, "audience", "server.admin_auth.token_login.audience")
 
-    validation_config_kwargs = {"issuer": issuer, "audience": audience}
-    alg_allowlist = _get_optional_string_sequence(
-        token_login, "alg_allowlist", "server.admin_auth.token_login.alg_allowlist"
-    )
-    if alg_allowlist is not None:
-        validation_config_kwargs["alg_allowlist"] = alg_allowlist
-    clock_skew_seconds = _get_optional_non_negative_int(
-        token_login, "clock_skew_seconds", "server.admin_auth.token_login.clock_skew_seconds"
-    )
-    if clock_skew_seconds is not None:
-        validation_config_kwargs["clock_skew_seconds"] = clock_skew_seconds
-    required_claims = _get_optional_string_sequence(
-        token_login, "required_claims", "server.admin_auth.token_login.required_claims"
-    )
-    if required_claims is not None:
-        validation_config_kwargs["required_claims"] = required_claims
+    validation_config_kwargs = {
+        "issuer": issuer,
+        "audience": audience,
+        **_collect_validated_kwargs(
+            token_login,
+            "server.admin_auth.token_login",
+            (
+                ("alg_allowlist", _get_optional_string_sequence),
+                ("clock_skew_seconds", _get_optional_non_negative_int),
+                ("required_claims", _get_optional_string_sequence),
+            ),
+        ),
+    }
     token_validator = TokenValidator(TokenValidationConfig(**validation_config_kwargs))
 
     claim_mappings = token_login.get("claim_mappings", {})
     if not isinstance(claim_mappings, Mapping):
         raise ValueError("server.admin_auth.token_login.claim_mappings must be a mapping")
 
-    claim_mapping_kwargs = {}
-    user_name_claims = _get_optional_string_sequence(
-        claim_mappings, "user_name_claims", "server.admin_auth.token_login.claim_mappings.user_name_claims"
+    claim_mapping_kwargs = _collect_validated_kwargs(
+        claim_mappings,
+        "server.admin_auth.token_login.claim_mappings",
+        (
+            ("user_name_claims", _get_optional_string_sequence),
+            ("user_org_claim", _get_optional_non_empty_string),
+            ("user_role_claim", _get_optional_non_empty_string),
+            ("groups_claim", _get_optional_non_empty_string),
+            ("role_mappings", _get_optional_string_mapping),
+            ("group_role_mappings", _get_optional_string_mapping),
+            ("allowed_roles", _get_optional_string_sequence),
+        ),
     )
-    if user_name_claims is not None:
-        claim_mapping_kwargs["user_name_claims"] = user_name_claims
-
-    user_org_claim = _get_optional_non_empty_string(
-        claim_mappings, "user_org_claim", "server.admin_auth.token_login.claim_mappings.user_org_claim"
-    )
-    if user_org_claim is not None:
-        claim_mapping_kwargs["user_org_claim"] = user_org_claim
-
-    user_role_claim = _get_optional_non_empty_string(
-        claim_mappings, "user_role_claim", "server.admin_auth.token_login.claim_mappings.user_role_claim"
-    )
-    if user_role_claim is not None:
-        claim_mapping_kwargs["user_role_claim"] = user_role_claim
-
-    groups_claim = _get_optional_non_empty_string(
-        claim_mappings, "groups_claim", "server.admin_auth.token_login.claim_mappings.groups_claim"
-    )
-    if groups_claim is not None:
-        claim_mapping_kwargs["groups_claim"] = groups_claim
-
-    role_mappings = _get_optional_string_mapping(
-        claim_mappings, "role_mappings", "server.admin_auth.token_login.claim_mappings.role_mappings"
-    )
-    if role_mappings is not None:
-        claim_mapping_kwargs["role_mappings"] = role_mappings
-
-    group_role_mappings = _get_optional_string_mapping(
-        claim_mappings, "group_role_mappings", "server.admin_auth.token_login.claim_mappings.group_role_mappings"
-    )
-    if group_role_mappings is not None:
-        claim_mapping_kwargs["group_role_mappings"] = group_role_mappings
-
-    allowed_roles = _get_optional_string_sequence(
-        claim_mappings, "allowed_roles", "server.admin_auth.token_login.claim_mappings.allowed_roles"
-    )
-    if allowed_roles is not None:
-        claim_mapping_kwargs["allowed_roles"] = allowed_roles
     claim_mapper = ClaimMapper(ClaimMappingConfig(**claim_mapping_kwargs))
 
     has_inline_jwks = "jwks" in token_login

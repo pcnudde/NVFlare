@@ -13,7 +13,9 @@
 # limitations under the License.
 import threading
 import time
-from typing import Any, Callable, List, Mapping, Optional
+from typing import Any, Callable, List, Mapping, Optional, Union
+
+import jwt
 
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_constant import ServerCommandKey
@@ -107,8 +109,8 @@ class FedAdminServer(AdminServer):
         own_command_cell: bool = False,
         token_validator: Optional[TokenValidator] = None,
         claim_mapper: Optional[ClaimMapper] = None,
-        token_jwks: Optional[Mapping[str, Any]] = None,
-        jwks_fetcher: Optional[Callable[[], Mapping[str, Any]]] = None,
+        token_jwks: Optional[Union[Mapping[str, Any], jwt.PyJWKClient]] = None,
+        jwks_fetcher: Optional[Callable[[], Union[Mapping[str, Any], jwt.PyJWKClient]]] = None,
     ):
         """The FedAdminServer is the framework for developing admin commands.
 

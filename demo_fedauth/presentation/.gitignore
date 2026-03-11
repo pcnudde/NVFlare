@@ -1,4 +1,5 @@
 node_modules/
+package-lock.json
 fedauth_demo_slides.html
 fedauth_demo_slides.pdf
 diagrams/*.svg

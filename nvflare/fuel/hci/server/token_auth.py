@@ -76,7 +76,7 @@ class TokenValidator:
             raise TypeError(f"config must be TokenValidationConfig but got {type(config)}")
         self.config = config
 
-    def validate(self, token: str, jwks: Mapping[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    def validate(self, token: str, jwks: Union[Mapping[str, Any], jwt.PyJWKClient], now: Optional[float] = None) -> Dict[str, Any]:
         if not isinstance(token, str) or not token:
             raise TokenValidationError("token must be non-empty string")
 
@@ -95,12 +95,18 @@ class TokenValidator:
         if not kid:
             raise TokenValidationError("token header missing kid")
 
-        signing_key = self._resolve_key(jwks=jwks, kid=kid, alg=alg)
+        signing_key = self._resolve_key(token=token, jwks=jwks, kid=kid, alg=alg)
         claims = self._decode_with_static_claim_checks(token=token, key=signing_key, alg=alg)
         self._validate_temporal_claims(claims=claims, now=now)
         return claims
 
-    def _resolve_key(self, jwks: Mapping[str, Any], kid: str, alg: str):
+    def _resolve_key(self, token: str, jwks: Union[Mapping[str, Any], jwt.PyJWKClient], kid: str, alg: str):
+        if isinstance(jwks, jwt.PyJWKClient):
+            try:
+                return jwks.get_signing_key_from_jwt(token).key
+            except Exception as e:
+                raise TokenValidationError(f"unable to resolve signing key for kid '{kid}': {e}") from e
+
         keys = jwks.get("keys") if isinstance(jwks, Mapping) else None
         if not isinstance(keys, list):
             raise TokenValidationError("jwks must contain a 'keys' list")

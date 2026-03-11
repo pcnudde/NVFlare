@@ -159,7 +159,7 @@ podman compose down
 ## Presenting The Slides
 
 ```bash
-cd presentation && npm ci && npm run render-diagrams && marp -p fedauth_demo_slides.md
+cd presentation && npm install && npm run render-diagrams && marp -p fedauth_demo_slides.md
 ```
 
 ## Notes
