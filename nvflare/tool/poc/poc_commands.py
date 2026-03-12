@@ -16,7 +16,6 @@ import json
 import os
 import random
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -204,22 +203,6 @@ def gen_project_config_file(workspace: str) -> str:
     return project_file
 
 
-def verify_host(host_name: str) -> bool:
-    try:
-        host_name = socket.gethostbyname(host_name)
-        return True
-    except:
-        return False
-
-
-def verify_hosts(project_config: OrderedDict):
-    hosts: List[str] = get_project_hosts(project_config)
-    for h in hosts:
-        if not verify_host(h):
-            print(f"host name: '{h}' is not defined, considering modify /etc/hosts to add localhost alias")
-            exit(0)
-
-
 def get_project_hosts(project_config) -> List[str]:
     participants: List[dict] = project_config["participants"]
     return [p["name"] for p in participants if p["type"] == "client" or p["type"] == "server"]
@@ -345,17 +328,6 @@ def update_static_file_builder(docker_image: str, project_config: OrderedDict):
     for b in project_config.get("builders"):
         if b.get("path") == "nvflare.lighter.impl.static_file.StaticFileBuilder":
             b["args"]["docker_image"] = docker_image
-
-    return project_config
-
-
-def add_docker_builder(use_docker: bool, project_config: OrderedDict):
-    if use_docker:
-        docker_builder = {
-            "path": "nvflare.lighter.impl.docker.DockerBuilder",
-            "args": {"base_image": "python:3.8", "requirements_file": "requirements.txt"},
-        }
-        project_config["builders"].append(docker_builder)
 
     return project_config
 
@@ -776,36 +748,17 @@ def _create_fedauth_admin_invite(prod_dir: str, admin_name: str) -> str:
     return invite_path
 
 
-_LOCAL_ADMIN_OVERRIDE_KEYS = {
-    "auth_mode",
-    "token",
-    "token_file",
-    "token_env_var",
-    "project_name",
-    "username",
-    "server_identity",
-    "scheme",
-    "host",
-    "port",
-    "connection_security",
-    "uid_source",
-    "client_key",
-    "client_cert",
-    "ca_cert",
-    "oidc_issuer",
-    "oidc_client_id",
-    "oidc_scopes",
-    "oidc_audience",
-    "oidc_discovery_url",
-    "oidc_authorization_endpoint",
-    "oidc_token_endpoint",
-    "oidc_callback_host",
-    "oidc_callback_port",
-    "oidc_callback_path",
-    "oidc_auth_timeout_seconds",
-    "oidc_refresh_skew_seconds",
-    "oidc_open_browser",
+_LOCAL_ADMIN_RESOURCE_KEYS = {
+    "idle_timeout",
+    "login_timeout",
+    "with_debug",
+    "authenticate_msg_timeout",
+    "prompt",
 }
+
+
+def _filter_local_admin_resources(admin_section: dict) -> dict:
+    return {k: v for k, v in admin_section.items() if k in _LOCAL_ADMIN_RESOURCE_KEYS}
 
 
 def apply_fedauth_to_poc_startup_kit(prod_dir: str, server_name: str, admin_name: str, fedauth_args):
@@ -855,8 +808,7 @@ def apply_fedauth_to_poc_startup_kit(prod_dir: str, server_name: str, admin_name
     admin_section = admin_payload.get("admin")
     if not isinstance(admin_section, dict):
         admin_section = {}
-    for key in _LOCAL_ADMIN_OVERRIDE_KEYS:
-        admin_section.pop(key, None)
+    admin_section = _filter_local_admin_resources(admin_section)
     startup_admin_section.update(config.admin_startup_updates())
     admin_startup_payload["admin"] = startup_admin_section
     _write_json_file(admin_startup_config, admin_startup_payload)
@@ -1173,8 +1125,6 @@ def _build_commands(
 
 
 def prepare_env(service_name, gpu_ids: Optional[List[int]], service_config: Dict):
-    import os
-
     my_env = None
     if gpu_ids:
         my_env = os.environ.copy()
@@ -1247,8 +1197,6 @@ def is_poc_running(poc_workspace, service_config, project_config):
 
 
 def _clean_poc(poc_workspace: str):
-    import shutil
-
     if os.path.isdir(poc_workspace):
         project_config, service_config = setup_service_config(poc_workspace)
         if project_config is not None:

@@ -77,6 +77,31 @@ def _prepare_server_material(prod_dir):
     )
 
 
+def _make_fedauth_args(**overrides):
+    data = {
+        "fedauth_issuer": "http://127.0.0.1:38080/realms/nvflare",
+        "fedauth_audience": "nvflare-admin",
+        "fedauth_jwks_uri": "http://127.0.0.1:38080/realms/nvflare/protocol/openid-connect/certs",
+        "fedauth_discovery_url": None,
+        "fedauth_alg_allowlist": ["RS256"],
+        "fedauth_required_claims": ["iss", "aud", "exp", "iat"],
+        "fedauth_user_name_claims": ["preferred_username", "email"],
+        "fedauth_user_org_claim": "org",
+        "fedauth_user_role_claim": "nvf_role",
+        "fedauth_role_mappings": ["lead=project_admin"],
+        "fedauth_oidc_client_id": "nvflare-admin",
+        "fedauth_oidc_scopes": "openid profile email offline_access",
+        "fedauth_oidc_callback_host": "127.0.0.1",
+        "fedauth_oidc_callback_port": 39123,
+        "fedauth_oidc_callback_path": "/callback",
+        "fedauth_oidc_refresh_skew_seconds": 60,
+        "fedauth_oidc_open_browser": True,
+        "fedauth_oidc_discovery_url": "http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
+    }
+    data.update(overrides)
+    return Namespace(**data)
+
+
 def test_apply_fedauth_writes_server_and_admin_resources(tmp_path):
     prod_dir = tmp_path / "example_project" / "prod_00"
     server_local = prod_dir / "server" / "local"
@@ -87,26 +112,7 @@ def test_apply_fedauth_writes_server_and_admin_resources(tmp_path):
     _write_json(server_local / "resources.json", {"servers": [{}], "format_version": 1})
     _prepare_server_material(prod_dir)
 
-    args = Namespace(
-        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
-        fedauth_audience="nvflare-admin",
-        fedauth_jwks_uri="http://127.0.0.1:38080/realms/nvflare/protocol/openid-connect/certs",
-        fedauth_discovery_url=None,
-        fedauth_alg_allowlist=["RS256"],
-        fedauth_required_claims=["iss", "aud", "exp", "iat"],
-        fedauth_user_name_claims=["preferred_username", "email"],
-        fedauth_user_org_claim="org",
-        fedauth_user_role_claim="nvf_role",
-        fedauth_role_mappings=["lead=project_admin"],
-        fedauth_oidc_client_id="nvflare-admin",
-        fedauth_oidc_scopes="openid profile email offline_access",
-        fedauth_oidc_callback_host="127.0.0.1",
-        fedauth_oidc_callback_port=39123,
-        fedauth_oidc_callback_path="/callback",
-        fedauth_oidc_refresh_skew_seconds=60,
-        fedauth_oidc_open_browser=True,
-        fedauth_oidc_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
-    )
+    args = _make_fedauth_args()
 
     apply_fedauth_to_poc_startup_kit(
         prod_dir=str(prod_dir),
@@ -153,25 +159,10 @@ def test_apply_fedauth_falls_back_to_default_resource_files(tmp_path):
     _write_json(admin_local / "resources.json.default", {"format_version": 1, "admin": {"idle_timeout": 300}})
     _prepare_server_material(prod_dir)
 
-    args = Namespace(
-        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
-        fedauth_audience="nvflare-admin",
+    args = _make_fedauth_args(
         fedauth_jwks_uri=None,
         fedauth_discovery_url=None,
-        fedauth_alg_allowlist=["RS256"],
-        fedauth_required_claims=["iss", "aud", "exp", "iat"],
         fedauth_user_name_claims=["preferred_username"],
-        fedauth_user_org_claim="org",
-        fedauth_user_role_claim="nvf_role",
-        fedauth_role_mappings=["lead=project_admin"],
-        fedauth_oidc_client_id="nvflare-admin",
-        fedauth_oidc_scopes="openid profile email offline_access",
-        fedauth_oidc_callback_host="127.0.0.1",
-        fedauth_oidc_callback_port=39123,
-        fedauth_oidc_callback_path="/callback",
-        fedauth_oidc_refresh_skew_seconds=60,
-        fedauth_oidc_open_browser=True,
-        fedauth_oidc_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
     )
 
     apply_fedauth_to_poc_startup_kit(
@@ -195,26 +186,7 @@ def test_apply_fedauth_creates_signed_admin_workspace_when_project_has_no_admin(
     _write_json(server_local / "resources.json", {"servers": [{}], "format_version": 1})
     _prepare_server_material(prod_dir)
 
-    args = Namespace(
-        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
-        fedauth_audience="nvflare-admin",
-        fedauth_jwks_uri="http://127.0.0.1:38080/realms/nvflare/protocol/openid-connect/certs",
-        fedauth_discovery_url=None,
-        fedauth_alg_allowlist=["RS256"],
-        fedauth_required_claims=["iss", "aud", "exp", "iat"],
-        fedauth_user_name_claims=["preferred_username", "email"],
-        fedauth_user_org_claim="org",
-        fedauth_user_role_claim="nvf_role",
-        fedauth_role_mappings=["lead=project_admin"],
-        fedauth_oidc_client_id="nvflare-admin",
-        fedauth_oidc_scopes="openid profile email offline_access",
-        fedauth_oidc_callback_host="127.0.0.1",
-        fedauth_oidc_callback_port=39123,
-        fedauth_oidc_callback_path="/callback",
-        fedauth_oidc_refresh_skew_seconds=60,
-        fedauth_oidc_open_browser=True,
-        fedauth_oidc_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
-    )
+    args = _make_fedauth_args()
 
     apply_fedauth_to_poc_startup_kit(
         prod_dir=str(prod_dir),
@@ -264,26 +236,7 @@ def test_prepare_workspace_imports_invite_into_workspace_layout(tmp_path):
     _write_json(server_local / "resources.json", {"servers": [{}], "format_version": 1})
     _prepare_server_material(prod_dir)
 
-    args = Namespace(
-        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
-        fedauth_audience="nvflare-admin",
-        fedauth_jwks_uri="http://127.0.0.1:38080/realms/nvflare/protocol/openid-connect/certs",
-        fedauth_discovery_url=None,
-        fedauth_alg_allowlist=["RS256"],
-        fedauth_required_claims=["iss", "aud", "exp", "iat"],
-        fedauth_user_name_claims=["preferred_username", "email"],
-        fedauth_user_org_claim="org",
-        fedauth_user_role_claim="nvf_role",
-        fedauth_role_mappings=["lead=project_admin"],
-        fedauth_oidc_client_id="nvflare-admin",
-        fedauth_oidc_scopes="openid profile email",
-        fedauth_oidc_callback_host="127.0.0.1",
-        fedauth_oidc_callback_port=39123,
-        fedauth_oidc_callback_path="/callback",
-        fedauth_oidc_refresh_skew_seconds=60,
-        fedauth_oidc_open_browser=True,
-        fedauth_oidc_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
-    )
+    args = _make_fedauth_args(fedauth_oidc_scopes="openid profile email")
 
     apply_fedauth_to_poc_startup_kit(
         prod_dir=str(prod_dir),
@@ -319,26 +272,7 @@ def test_prepare_workspace_defaults_to_local_folder_next_to_invite(tmp_path):
     _write_json(server_local / "resources.json", {"servers": [{}], "format_version": 1})
     _prepare_server_material(prod_dir)
 
-    args = Namespace(
-        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
-        fedauth_audience="nvflare-admin",
-        fedauth_jwks_uri="http://127.0.0.1:38080/realms/nvflare/protocol/openid-connect/certs",
-        fedauth_discovery_url=None,
-        fedauth_alg_allowlist=["RS256"],
-        fedauth_required_claims=["iss", "aud", "exp", "iat"],
-        fedauth_user_name_claims=["preferred_username", "email"],
-        fedauth_user_org_claim="org",
-        fedauth_user_role_claim="nvf_role",
-        fedauth_role_mappings=["lead=project_admin"],
-        fedauth_oidc_client_id="nvflare-admin",
-        fedauth_oidc_scopes="openid profile email",
-        fedauth_oidc_callback_host="127.0.0.1",
-        fedauth_oidc_callback_port=39123,
-        fedauth_oidc_callback_path="/callback",
-        fedauth_oidc_refresh_skew_seconds=60,
-        fedauth_oidc_open_browser=True,
-        fedauth_oidc_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
-    )
+    args = _make_fedauth_args(fedauth_oidc_scopes="openid profile email")
 
     apply_fedauth_to_poc_startup_kit(
         prod_dir=str(prod_dir),
@@ -363,26 +297,7 @@ def test_prepare_workspace_refuses_to_reuse_existing_imported_workspace(tmp_path
     _write_json(server_local / "resources.json", {"servers": [{}], "format_version": 1})
     _prepare_server_material(prod_dir)
 
-    args = Namespace(
-        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
-        fedauth_audience="nvflare-admin",
-        fedauth_jwks_uri="http://127.0.0.1:38080/realms/nvflare/protocol/openid-connect/certs",
-        fedauth_discovery_url=None,
-        fedauth_alg_allowlist=["RS256"],
-        fedauth_required_claims=["iss", "aud", "exp", "iat"],
-        fedauth_user_name_claims=["preferred_username", "email"],
-        fedauth_user_org_claim="org",
-        fedauth_user_role_claim="nvf_role",
-        fedauth_role_mappings=["lead=project_admin"],
-        fedauth_oidc_client_id="nvflare-admin",
-        fedauth_oidc_scopes="openid profile email",
-        fedauth_oidc_callback_host="127.0.0.1",
-        fedauth_oidc_callback_port=39123,
-        fedauth_oidc_callback_path="/callback",
-        fedauth_oidc_refresh_skew_seconds=60,
-        fedauth_oidc_open_browser=True,
-        fedauth_oidc_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
-    )
+    args = _make_fedauth_args(fedauth_oidc_scopes="openid profile email")
 
     apply_fedauth_to_poc_startup_kit(
         prod_dir=str(prod_dir),
