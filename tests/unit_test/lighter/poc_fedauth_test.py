@@ -98,8 +98,6 @@ def test_apply_fedauth_writes_server_and_admin_resources(tmp_path):
         fedauth_user_org_claim="org",
         fedauth_user_role_claim="nvf_role",
         fedauth_role_mappings=["lead=project_admin"],
-        fedauth_admin_mode="oidc",
-        fedauth_admin_token_file="/tmp/nvflare_alice.token",
         fedauth_oidc_client_id="nvflare-admin",
         fedauth_oidc_scopes="openid profile email offline_access",
         fedauth_oidc_callback_host="127.0.0.1",
@@ -144,63 +142,6 @@ def test_apply_fedauth_writes_server_and_admin_resources(tmp_path):
     assert config["client_cert"] == ""
 
 
-def test_apply_fedauth_admin_token_mode(tmp_path):
-    prod_dir = tmp_path / "example_project" / "prod_00"
-    server_local = prod_dir / "server" / "local"
-    admin_local = prod_dir / "admin@nvidia.com" / "local"
-    server_local.mkdir(parents=True, exist_ok=True)
-    admin_local.mkdir(parents=True, exist_ok=True)
-
-    _write_json(server_local / "resources.json", {"servers": [{}], "format_version": 1})
-    _write_json(admin_local / "resources.json", {"format_version": 1, "admin": {"idle_timeout": 120}})
-    _prepare_server_material(prod_dir)
-
-    args = Namespace(
-        fedauth_issuer="http://127.0.0.1:38080/realms/nvflare",
-        fedauth_audience="nvflare-admin",
-        fedauth_jwks_uri=None,
-        fedauth_discovery_url="http://127.0.0.1:38080/realms/nvflare/.well-known/openid-configuration",
-        fedauth_alg_allowlist=["RS256"],
-        fedauth_required_claims=["iss", "aud", "exp", "iat"],
-        fedauth_user_name_claims=["preferred_username"],
-        fedauth_user_org_claim="org",
-        fedauth_user_role_claim="nvf_role",
-        fedauth_role_mappings=[],
-        fedauth_admin_mode="token",
-        fedauth_admin_token_file="/tmp/nvflare_alice.token",
-        fedauth_oidc_client_id="nvflare-admin",
-        fedauth_oidc_scopes="openid profile email offline_access",
-        fedauth_oidc_callback_host="127.0.0.1",
-        fedauth_oidc_callback_port=39123,
-        fedauth_oidc_callback_path="/callback",
-        fedauth_oidc_refresh_skew_seconds=60,
-        fedauth_oidc_open_browser=True,
-        fedauth_oidc_discovery_url=None,
-    )
-
-    apply_fedauth_to_poc_startup_kit(
-        prod_dir=str(prod_dir),
-        server_name="server",
-        admin_name="admin@nvidia.com",
-        fedauth_args=args,
-    )
-
-    admin_cfg = _read_json(admin_local / "resources.json")
-    admin_section = admin_cfg["admin"]
-    assert admin_section["idle_timeout"] == 120
-    assert "auth_mode" not in admin_section
-    assert "token_file" not in admin_section
-
-    config = secure_load_admin_config(Workspace(root_dir=str(prod_dir / "admin@nvidia.com"))).get_admin_config()
-    assert config["auth_mode"] == "token"
-    assert config["token_file"] == "/tmp/nvflare_alice.token"
-    assert config["connection_security"] == "tls"
-    assert config["server_identity"] == "server.admin"
-    assert config["uid_source"] == "user_input"
-    assert config["client_key"] == ""
-    assert config["client_cert"] == ""
-
-
 def test_apply_fedauth_falls_back_to_default_resource_files(tmp_path):
     prod_dir = tmp_path / "example_project" / "prod_00"
     server_local = prod_dir / "server" / "local"
@@ -223,8 +164,6 @@ def test_apply_fedauth_falls_back_to_default_resource_files(tmp_path):
         fedauth_user_org_claim="org",
         fedauth_user_role_claim="nvf_role",
         fedauth_role_mappings=["lead=project_admin"],
-        fedauth_admin_mode="oidc",
-        fedauth_admin_token_file="/tmp/nvflare_alice.token",
         fedauth_oidc_client_id="nvflare-admin",
         fedauth_oidc_scopes="openid profile email offline_access",
         fedauth_oidc_callback_host="127.0.0.1",
@@ -267,8 +206,6 @@ def test_apply_fedauth_creates_signed_admin_workspace_when_project_has_no_admin(
         fedauth_user_org_claim="org",
         fedauth_user_role_claim="nvf_role",
         fedauth_role_mappings=["lead=project_admin"],
-        fedauth_admin_mode="oidc",
-        fedauth_admin_token_file="/tmp/nvflare_alice.token",
         fedauth_oidc_client_id="nvflare-admin",
         fedauth_oidc_scopes="openid profile email offline_access",
         fedauth_oidc_callback_host="127.0.0.1",
@@ -338,8 +275,6 @@ def test_prepare_workspace_imports_invite_into_workspace_layout(tmp_path):
         fedauth_user_org_claim="org",
         fedauth_user_role_claim="nvf_role",
         fedauth_role_mappings=["lead=project_admin"],
-        fedauth_admin_mode="oidc",
-        fedauth_admin_token_file="/tmp/nvflare_alice.token",
         fedauth_oidc_client_id="nvflare-admin",
         fedauth_oidc_scopes="openid profile email",
         fedauth_oidc_callback_host="127.0.0.1",
@@ -395,8 +330,6 @@ def test_prepare_workspace_defaults_to_local_folder_next_to_invite(tmp_path):
         fedauth_user_org_claim="org",
         fedauth_user_role_claim="nvf_role",
         fedauth_role_mappings=["lead=project_admin"],
-        fedauth_admin_mode="oidc",
-        fedauth_admin_token_file="/tmp/nvflare_alice.token",
         fedauth_oidc_client_id="nvflare-admin",
         fedauth_oidc_scopes="openid profile email",
         fedauth_oidc_callback_host="127.0.0.1",
@@ -441,8 +374,6 @@ def test_prepare_workspace_refuses_to_reuse_existing_imported_workspace(tmp_path
         fedauth_user_org_claim="org",
         fedauth_user_role_claim="nvf_role",
         fedauth_role_mappings=["lead=project_admin"],
-        fedauth_admin_mode="oidc",
-        fedauth_admin_token_file="/tmp/nvflare_alice.token",
         fedauth_oidc_client_id="nvflare-admin",
         fedauth_oidc_scopes="openid profile email",
         fedauth_oidc_callback_host="127.0.0.1",

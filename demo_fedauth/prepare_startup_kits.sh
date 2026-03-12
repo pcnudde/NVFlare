@@ -78,8 +78,6 @@ args = Namespace(
     fedauth_user_org_claim="org",
     fedauth_user_role_claim="nvf_role",
     fedauth_role_mappings=["lead=project_admin"],
-    fedauth_admin_mode="oidc",
-    fedauth_admin_token_file="/tmp/nvflare_alice.token",
     fedauth_oidc_client_id=audience,
     fedauth_oidc_scopes="openid profile email",
     fedauth_oidc_discovery_url=discovery_url,

@@ -545,7 +545,6 @@ class FedAuthAdminBootstrapConfig:
     role_mappings: Dict[str, str]
     jwks_uri: Optional[str]
     discovery_url: Optional[str]
-    admin_mode: str
     oidc_client_id: str
     oidc_scopes: str
     oidc_discovery_url: Optional[str]
@@ -554,7 +553,6 @@ class FedAuthAdminBootstrapConfig:
     oidc_callback_path: str
     oidc_refresh_skew_seconds: int
     oidc_open_browser: bool
-    admin_token_file: str
 
     @classmethod
     def from_args(cls, fedauth_args):
@@ -579,7 +577,6 @@ class FedAuthAdminBootstrapConfig:
             ),
             jwks_uri=str(getattr(fedauth_args, "fedauth_jwks_uri", "")).strip() or None,
             discovery_url=str(getattr(fedauth_args, "fedauth_discovery_url", "")).strip() or None,
-            admin_mode=str(getattr(fedauth_args, "fedauth_admin_mode", "oidc")).strip().lower(),
             oidc_client_id=str(
                 getattr(fedauth_args, "fedauth_oidc_client_id", getattr(fedauth_args, "fedauth_audience", audience))
             ).strip(),
@@ -590,7 +587,6 @@ class FedAuthAdminBootstrapConfig:
             oidc_callback_path=str(getattr(fedauth_args, "fedauth_oidc_callback_path", "/callback")),
             oidc_refresh_skew_seconds=int(getattr(fedauth_args, "fedauth_oidc_refresh_skew_seconds", 60)),
             oidc_open_browser=bool(getattr(fedauth_args, "fedauth_oidc_open_browser", True)),
-            admin_token_file=str(getattr(fedauth_args, "fedauth_admin_token_file", "/tmp/nvflare_admin.token")),
         )
 
     def token_login_config(self) -> dict:
@@ -620,31 +616,20 @@ class FedAuthAdminBootstrapConfig:
             "uid_source": "user_input",
             "client_key": "",
             "client_cert": "",
+            "auth_mode": "oidc",
+            "oidc_issuer": self.issuer,
+            "oidc_client_id": self.oidc_client_id,
+            "oidc_scopes": self.oidc_scopes,
+            "oidc_audience": self.audience,
+            "oidc_callback_host": self.oidc_callback_host,
+            "oidc_callback_port": self.oidc_callback_port,
+            "oidc_callback_path": self.oidc_callback_path,
+            "oidc_refresh_skew_seconds": self.oidc_refresh_skew_seconds,
+            "oidc_open_browser": self.oidc_open_browser,
         }
-        if self.admin_mode == "oidc":
-            startup_updates.update(
-                {
-                    "auth_mode": "oidc",
-                    "oidc_issuer": self.issuer,
-                    "oidc_client_id": self.oidc_client_id,
-                    "oidc_scopes": self.oidc_scopes,
-                    "oidc_audience": self.audience,
-                    "oidc_callback_host": self.oidc_callback_host,
-                    "oidc_callback_port": self.oidc_callback_port,
-                    "oidc_callback_path": self.oidc_callback_path,
-                    "oidc_refresh_skew_seconds": self.oidc_refresh_skew_seconds,
-                    "oidc_open_browser": self.oidc_open_browser,
-                }
-            )
-            if self.oidc_discovery_url:
-                startup_updates["oidc_discovery_url"] = self.oidc_discovery_url
-            return startup_updates
-
-        if self.admin_mode == "token":
-            startup_updates.update({"auth_mode": "token", "token_file": self.admin_token_file})
-            return startup_updates
-
-        raise CLIException(f"invalid fedauth_admin_mode '{self.admin_mode}': expected 'oidc' or 'token'")
+        if self.oidc_discovery_url:
+            startup_updates["oidc_discovery_url"] = self.oidc_discovery_url
+        return startup_updates
 
 
 def _read_server_startup_config(prod_dir: str, server_name: str) -> dict:
@@ -1457,22 +1442,10 @@ def define_prepare_parser(poc_parser, cmd: Optional[str] = None, help_str: Optio
         help="claim-role mappings in SOURCE=TARGET format",
     )
     prepare_parser.add_argument(
-        "--fedauth_admin_mode",
-        choices=["oidc", "token"],
-        default="oidc",
-        help="admin auth mode to configure in startup kit",
-    )
-    prepare_parser.add_argument(
-        "--fedauth_admin_token_file",
-        type=str,
-        default="/tmp/nvflare_admin.token",
-        help="token file path used when --fedauth_admin_mode token",
-    )
-    prepare_parser.add_argument(
         "--fedauth_oidc_client_id",
         type=str,
         default="nvflare-admin",
-        help="OIDC client ID used by admin CLI when --fedauth_admin_mode oidc",
+        help="OIDC client ID used by admin CLI browser login",
     )
     prepare_parser.add_argument(
         "--fedauth_oidc_scopes",

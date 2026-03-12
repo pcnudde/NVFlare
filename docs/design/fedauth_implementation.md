@@ -278,7 +278,7 @@ Implementation preference:
 Current branch behavior:
 
 - explicit human auth mode is supported in client config:
-  - `auth_mode: cert | token | oidc`
+  - `auth_mode: cert | oidc`
 - `AdminAPI.connect()` still performs explicit server-identity verification, but `token` and `oidc` modes do not require human `client.crt` or `client.key`
 - `AdminAPI._user_login()` uses `_token_login` for `token` and `oidc`
 - browser OIDC flow with PKCE loopback callback is implemented for `auth_mode=oidc`
@@ -498,18 +498,9 @@ Current server wiring uses the server config key `admin_auth.token_login` and ac
 }
 ```
 
-Client-side admin auth modes are configured via admin config.
+Client-side admin bootstrap is configured via admin config and uses browser OIDC for human login.
 
-Token file/env mode:
-
-```json
-{
-  "auth_mode": "token",
-  "token_env_var": "NVFLARE_ADMIN_BEARER_TOKEN"
-}
-```
-
-Supported token sources are: `token` (inline), `token_file`, and `token_env_var` (in that precedence order).
+Direct bearer-token injection remains available in low-level programmatic tests and APIs, but it is no longer part of the generated human bootstrap path.
 
 Browser OIDC mode (authorization code + PKCE):
 

@@ -87,8 +87,6 @@ def _make_fedauth_args():
         fedauth_user_org_claim="org",
         fedauth_user_role_claim="nvf_role",
         fedauth_role_mappings=["project_admin=project_admin"],
-        fedauth_admin_mode="token",
-        fedauth_admin_token_file="/tmp/nvflare-token-auth-admin.token",
         fedauth_oidc_client_id=AUDIENCE,
         fedauth_oidc_scopes="openid profile email offline_access",
         fedauth_oidc_callback_host="127.0.0.1",
