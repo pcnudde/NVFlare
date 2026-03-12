@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, OrderedDict, Tuple
 
@@ -532,6 +533,120 @@ def _parse_role_mappings(role_mapping_items: List[str]) -> Dict[str, str]:
     return mappings
 
 
+@dataclass(frozen=True)
+class FedAuthAdminBootstrapConfig:
+    issuer: str
+    audience: str
+    alg_allowlist: List[str]
+    required_claims: List[str]
+    user_name_claims: List[str]
+    user_org_claim: str
+    user_role_claim: str
+    role_mappings: Dict[str, str]
+    jwks_uri: Optional[str]
+    discovery_url: Optional[str]
+    admin_mode: str
+    oidc_client_id: str
+    oidc_scopes: str
+    oidc_discovery_url: Optional[str]
+    oidc_callback_host: str
+    oidc_callback_port: int
+    oidc_callback_path: str
+    oidc_refresh_skew_seconds: int
+    oidc_open_browser: bool
+    admin_token_file: str
+
+    @classmethod
+    def from_args(cls, fedauth_args):
+        issuer = str(getattr(fedauth_args, "fedauth_issuer", "")).strip()
+        if not issuer:
+            raise CLIException("--enable_fedauth requires --fedauth_issuer")
+
+        audience = str(getattr(fedauth_args, "fedauth_audience", "nvflare-admin")).strip()
+        if not audience:
+            raise CLIException("fedauth_audience must be non-empty")
+
+        return cls(
+            issuer=issuer,
+            audience=audience,
+            alg_allowlist=list(getattr(fedauth_args, "fedauth_alg_allowlist", ["RS256"])),
+            required_claims=list(getattr(fedauth_args, "fedauth_required_claims", ["iss", "aud", "exp", "iat"])),
+            user_name_claims=list(getattr(fedauth_args, "fedauth_user_name_claims", ["preferred_username", "email"])),
+            user_org_claim=str(getattr(fedauth_args, "fedauth_user_org_claim", "org")).strip() or "org",
+            user_role_claim=str(getattr(fedauth_args, "fedauth_user_role_claim", "nvf_role")).strip() or "nvf_role",
+            role_mappings=_parse_role_mappings(
+                list(getattr(fedauth_args, "fedauth_role_mappings", ["lead=project_admin"]))
+            ),
+            jwks_uri=str(getattr(fedauth_args, "fedauth_jwks_uri", "")).strip() or None,
+            discovery_url=str(getattr(fedauth_args, "fedauth_discovery_url", "")).strip() or None,
+            admin_mode=str(getattr(fedauth_args, "fedauth_admin_mode", "oidc")).strip().lower(),
+            oidc_client_id=str(
+                getattr(fedauth_args, "fedauth_oidc_client_id", getattr(fedauth_args, "fedauth_audience", audience))
+            ).strip(),
+            oidc_scopes=str(getattr(fedauth_args, "fedauth_oidc_scopes", "openid profile email")).strip(),
+            oidc_discovery_url=str(getattr(fedauth_args, "fedauth_oidc_discovery_url", "")).strip() or None,
+            oidc_callback_host=str(getattr(fedauth_args, "fedauth_oidc_callback_host", "127.0.0.1")),
+            oidc_callback_port=int(getattr(fedauth_args, "fedauth_oidc_callback_port", 39123)),
+            oidc_callback_path=str(getattr(fedauth_args, "fedauth_oidc_callback_path", "/callback")),
+            oidc_refresh_skew_seconds=int(getattr(fedauth_args, "fedauth_oidc_refresh_skew_seconds", 60)),
+            oidc_open_browser=bool(getattr(fedauth_args, "fedauth_oidc_open_browser", True)),
+            admin_token_file=str(getattr(fedauth_args, "fedauth_admin_token_file", "/tmp/nvflare_admin.token")),
+        )
+
+    def token_login_config(self) -> dict:
+        token_login = {
+            "enabled": True,
+            "issuer": self.issuer,
+            "audience": self.audience,
+            "alg_allowlist": self.alg_allowlist,
+            "required_claims": self.required_claims,
+            "claim_mappings": {
+                "user_name_claims": self.user_name_claims,
+                "user_org_claim": self.user_org_claim,
+                "user_role_claim": self.user_role_claim,
+                "role_mappings": self.role_mappings,
+            },
+        }
+        if self.jwks_uri:
+            token_login["jwks_uri"] = self.jwks_uri
+        else:
+            token_login["discovery_url"] = self.discovery_url or f"{self.issuer.rstrip('/')}/.well-known/openid-configuration"
+        return token_login
+
+    def admin_startup_updates(self) -> dict:
+        startup_updates = {
+            "connection_security": "tls",
+            "server_identity": "server.admin",
+            "uid_source": "user_input",
+            "client_key": "",
+            "client_cert": "",
+        }
+        if self.admin_mode == "oidc":
+            startup_updates.update(
+                {
+                    "auth_mode": "oidc",
+                    "oidc_issuer": self.issuer,
+                    "oidc_client_id": self.oidc_client_id,
+                    "oidc_scopes": self.oidc_scopes,
+                    "oidc_audience": self.audience,
+                    "oidc_callback_host": self.oidc_callback_host,
+                    "oidc_callback_port": self.oidc_callback_port,
+                    "oidc_callback_path": self.oidc_callback_path,
+                    "oidc_refresh_skew_seconds": self.oidc_refresh_skew_seconds,
+                    "oidc_open_browser": self.oidc_open_browser,
+                }
+            )
+            if self.oidc_discovery_url:
+                startup_updates["oidc_discovery_url"] = self.oidc_discovery_url
+            return startup_updates
+
+        if self.admin_mode == "token":
+            startup_updates.update({"auth_mode": "token", "token_file": self.admin_token_file})
+            return startup_updates
+
+        raise CLIException(f"invalid fedauth_admin_mode '{self.admin_mode}': expected 'oidc' or 'token'")
+
+
 def _read_server_startup_config(prod_dir: str, server_name: str) -> dict:
     server_startup_path = os.path.join(prod_dir, server_name, "startup", ProvFileName.FED_SERVER_JSON)
     if not os.path.isfile(server_startup_path):
@@ -709,43 +824,7 @@ _LOCAL_ADMIN_OVERRIDE_KEYS = {
 
 
 def apply_fedauth_to_poc_startup_kit(prod_dir: str, server_name: str, admin_name: str, fedauth_args):
-    issuer = str(getattr(fedauth_args, "fedauth_issuer", "")).strip()
-    if not issuer:
-        raise CLIException("--enable_fedauth requires --fedauth_issuer")
-
-    audience = getattr(fedauth_args, "fedauth_audience", "nvflare-admin")
-    if not isinstance(audience, str) or not audience.strip():
-        raise CLIException("fedauth_audience must be non-empty")
-    audience = audience.strip()
-
-    alg_allowlist = list(getattr(fedauth_args, "fedauth_alg_allowlist", ["RS256"]))
-    required_claims = list(getattr(fedauth_args, "fedauth_required_claims", ["iss", "aud", "exp", "iat"]))
-    user_name_claims = list(getattr(fedauth_args, "fedauth_user_name_claims", ["preferred_username", "email"]))
-    user_org_claim = str(getattr(fedauth_args, "fedauth_user_org_claim", "org")).strip() or "org"
-    user_role_claim = str(getattr(fedauth_args, "fedauth_user_role_claim", "nvf_role")).strip() or "nvf_role"
-    role_mappings = _parse_role_mappings(list(getattr(fedauth_args, "fedauth_role_mappings", ["lead=project_admin"])))
-
-    token_login = {
-        "enabled": True,
-        "issuer": issuer,
-        "audience": audience,
-        "alg_allowlist": alg_allowlist,
-        "required_claims": required_claims,
-        "claim_mappings": {
-            "user_name_claims": user_name_claims,
-            "user_org_claim": user_org_claim,
-            "user_role_claim": user_role_claim,
-            "role_mappings": role_mappings,
-        },
-    }
-    jwks_uri = getattr(fedauth_args, "fedauth_jwks_uri", None)
-    discovery_url = getattr(fedauth_args, "fedauth_discovery_url", None)
-    if isinstance(jwks_uri, str) and jwks_uri.strip():
-        token_login["jwks_uri"] = jwks_uri.strip()
-    elif isinstance(discovery_url, str) and discovery_url.strip():
-        token_login["discovery_url"] = discovery_url.strip()
-    else:
-        token_login["discovery_url"] = f"{issuer.rstrip('/')}/.well-known/openid-configuration"
+    config = FedAuthAdminBootstrapConfig.from_args(fedauth_args)
 
     server_local_dir = os.path.join(prod_dir, server_name, "local")
     server_resources = os.path.join(server_local_dir, "resources.json")
@@ -765,7 +844,7 @@ def apply_fedauth_to_poc_startup_kit(prod_dir: str, server_name: str, admin_name
     admin_auth = server_entry.get("admin_auth")
     if not isinstance(admin_auth, dict):
         admin_auth = {}
-    admin_auth["token_login"] = token_login
+    admin_auth["token_login"] = config.token_login_config()
     server_entry["admin_auth"] = admin_auth
     server_entry["admin_connection_security"] = "tls"
     server_entry["admin_interface_identity"] = "server.admin"
@@ -793,40 +872,7 @@ def apply_fedauth_to_poc_startup_kit(prod_dir: str, server_name: str, admin_name
         admin_section = {}
     for key in _LOCAL_ADMIN_OVERRIDE_KEYS:
         admin_section.pop(key, None)
-
-    startup_updates = {
-        "connection_security": "tls",
-        "server_identity": "server.admin",
-        "uid_source": "user_input",
-        "client_key": "",
-        "client_cert": "",
-    }
-    admin_mode = str(getattr(fedauth_args, "fedauth_admin_mode", "oidc")).strip().lower()
-    if admin_mode == "oidc":
-        startup_updates["auth_mode"] = "oidc"
-        startup_updates["oidc_issuer"] = issuer
-        startup_updates["oidc_client_id"] = str(
-            getattr(fedauth_args, "fedauth_oidc_client_id", getattr(fedauth_args, "fedauth_audience", audience))
-        ).strip()
-        startup_updates["oidc_scopes"] = str(
-            getattr(fedauth_args, "fedauth_oidc_scopes", "openid profile email")
-        ).strip()
-        startup_updates["oidc_audience"] = audience
-        oidc_discovery_url = getattr(fedauth_args, "fedauth_oidc_discovery_url", None)
-        if isinstance(oidc_discovery_url, str) and oidc_discovery_url.strip():
-            startup_updates["oidc_discovery_url"] = oidc_discovery_url.strip()
-        startup_updates["oidc_callback_host"] = str(getattr(fedauth_args, "fedauth_oidc_callback_host", "127.0.0.1"))
-        startup_updates["oidc_callback_port"] = int(getattr(fedauth_args, "fedauth_oidc_callback_port", 39123))
-        startup_updates["oidc_callback_path"] = str(getattr(fedauth_args, "fedauth_oidc_callback_path", "/callback"))
-        startup_updates["oidc_refresh_skew_seconds"] = int(getattr(fedauth_args, "fedauth_oidc_refresh_skew_seconds", 60))
-        startup_updates["oidc_open_browser"] = bool(getattr(fedauth_args, "fedauth_oidc_open_browser", True))
-    elif admin_mode == "token":
-        startup_updates["auth_mode"] = "token"
-        startup_updates["token_file"] = str(getattr(fedauth_args, "fedauth_admin_token_file", "/tmp/nvflare_admin.token"))
-    else:
-        raise CLIException(f"invalid fedauth_admin_mode '{admin_mode}': expected 'oidc' or 'token'")
-
-    startup_admin_section.update(startup_updates)
+    startup_admin_section.update(config.admin_startup_updates())
     admin_startup_payload["admin"] = startup_admin_section
     _write_json_file(admin_startup_config, admin_startup_payload)
 

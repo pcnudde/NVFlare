@@ -317,13 +317,11 @@ class OIDCTokenManager:
     @staticmethod
     def _extract_exp_from_jwt(token: str) -> Optional[float]:
         parts = token.split(".")
-        if len(parts) < 2:
+        if len(parts) != 3:
             return None
-        payload_b64 = parts[1]
-        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
         try:
-            payload_bytes = base64.urlsafe_b64decode(padded.encode("ascii"))
-            payload = json.loads(payload_bytes.decode("utf-8"))
+            payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8"))
         except Exception:
             return None
         exp = payload.get("exp")
