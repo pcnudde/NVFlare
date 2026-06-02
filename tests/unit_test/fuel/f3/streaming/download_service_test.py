@@ -518,6 +518,57 @@ class TestDownloadService:
         assert reply.get_header(MessageHeaderKey.RETURN_CODE) == ReturnCode.OK
         assert reply.payload == {"status": ProduceRC.EOF}
 
+    def test_finalize_transaction_if_finished_tombstones_refs(self):
+        """Explicit finalization should match monitor cleanup for completed transactions."""
+        from nvflare.fuel.f3.streaming.download_service import _Transaction
+
+        service = _make_isolated_download_service()
+        done_calls = []
+        tx = _Transaction(
+            timeout=10.0,
+            num_receivers=1,
+            transaction_done_cb=lambda tid, status, objs: done_calls.append((tid, status, objs)),
+            cb_kwargs={},
+        )
+        obj = MockDownloadable([b"chunk1"])
+        ref = tx.add_object(obj)
+
+        with service._tx_lock:
+            service._tx_table[tx.tid] = tx
+            service._ref_table[ref.rid] = ref
+            ref.obj_downloaded(to_receiver="receiver1", status=DownloadStatus.SUCCESS)
+
+        assert service.finalize_transaction_if_finished(tx.tid) is True
+        assert obj.transaction_done_calls == [(tx.tid, TransactionDoneStatus.FINISHED)]
+        assert done_calls == [(tx.tid, TransactionDoneStatus.FINISHED, [[b"chunk1"]])]
+        assert tx.tid not in service._tx_table
+        assert ref.rid not in service._ref_table
+        assert ref.rid in service._finished_refs
+
+        reply = service._handle_download(_make_download_request(ref.rid, "receiver1"))
+
+        assert reply.get_header(MessageHeaderKey.RETURN_CODE) == ReturnCode.OK
+        assert reply.payload == {"status": ProduceRC.EOF}
+
+    def test_finalize_transaction_if_finished_leaves_pending_transaction(self):
+        """Explicit finalization must not delete transactions that are still pending."""
+        from nvflare.fuel.f3.streaming.download_service import _Transaction
+
+        service = _make_isolated_download_service()
+        tx = _Transaction(timeout=10.0, num_receivers=2)
+        obj = MockDownloadable([b"chunk1"])
+        ref = tx.add_object(obj)
+
+        with service._tx_lock:
+            service._tx_table[tx.tid] = tx
+            service._ref_table[ref.rid] = ref
+            ref.obj_downloaded(to_receiver="receiver1", status=DownloadStatus.SUCCESS)
+
+        assert service.finalize_transaction_if_finished(tx.tid) is False
+        assert obj.transaction_done_calls == []
+        assert tx.tid in service._tx_table
+        assert ref.rid in service._ref_table
+
     def test_large_fanout_retries_after_finished_cleanup_return_eof(self):
         """Simulate a saturated large-model fanout where EOF replies are delayed.
 

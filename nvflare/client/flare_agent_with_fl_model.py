@@ -58,7 +58,8 @@ class FlareAgentWithFLModel(FlareAgent):
     def shareable_to_task_data(self, shareable: Shareable) -> FLModel:
         if self.from_nvflare_converter is not None:
             task_name = shareable.get_header(FLContextKey.TASK_NAME, "")
-            # get_task() calls shareable_to_task_data before current_task is assigned.
+            # Keep the current_task fallback for legacy or synthetic callers that do
+            # not carry the task name in the Shareable headers.
             if not task_name and self.current_task:
                 task_name = self.current_task.task_name
             shareable = self.from_nvflare_converter.process(task_name, shareable, self._converter_ctx)

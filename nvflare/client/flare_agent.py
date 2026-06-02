@@ -23,14 +23,19 @@ from typing import Any, Optional
 from nvflare.apis.dxo import DXO, MetaKey, from_shareable
 from nvflare.apis.fl_constant import FLContextKey
 from nvflare.apis.fl_constant import ReturnCode as RC
-from nvflare.apis.shareable import Shareable
+from nvflare.apis.shareable import ReservedHeaderKey, Shareable
 from nvflare.apis.utils.decomposers import flare_decomposers
 from nvflare.app_common.app_constant import AppConstants
 from nvflare.app_common.decomposers import common_decomposers
-from nvflare.fuel.f3.streaming.download_service import TransactionDoneStatus
+from nvflare.fuel.f3.streaming.download_service import DownloadService, TransactionDoneStatus
 from nvflare.fuel.utils.constants import PipeChannelName
 from nvflare.fuel.utils.fobs import FOBSContextKey
-from nvflare.fuel.utils.fobs.decomposers.via_downloader import clear_download_initiated, was_download_initiated
+from nvflare.fuel.utils.fobs.decomposers.via_downloader import (
+    clear_download_initiated,
+    clear_download_transactions,
+    get_download_transactions,
+    was_download_initiated,
+)
 from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.fuel.utils.pipe.cell_pipe import CellPipe
 from nvflare.fuel.utils.pipe.pipe import Message, Mode, Pipe
@@ -84,6 +89,7 @@ class FlareAgent:
         close_metric_pipe: bool = True,
         decomposer_module: str = None,
         download_complete_timeout: float = 1800.0,
+        streaming_idle_timeout: float = 600.0,
         launch_once: bool = False,
     ):
         """Constructor of Flare Agent.
@@ -114,6 +120,7 @@ class FlareAgent:
                 server to finish downloading tensors from this subprocess's DownloadService.
                 Only active when pipe is a CellPipe with pass_through_on_send=True.
                 Defaults to 1800.0.
+            streaming_idle_timeout (float): inactivity timeout for streamed DownloadService transactions.
         """
         if pipe is None and metric_pipe is None:
             raise RuntimeError(
@@ -158,6 +165,7 @@ class FlareAgent:
         self._close_pipe = close_pipe
         self._close_metric_pipe = close_metric_pipe
         self._download_complete_timeout = download_complete_timeout
+        self._streaming_idle_timeout = streaming_idle_timeout
         self._launch_once = launch_once
 
     def start(self):
@@ -205,6 +213,48 @@ class FlareAgent:
             self.pipe_handler.stop(self._close_pipe)
         if self.metric_pipe_handler:
             self.metric_pipe_handler.stop(self._close_metric_pipe)
+
+    def _has_lazy_refs(self, obj) -> bool:
+        from nvflare.fuel.utils.fobs.decomposers.via_downloader import LazyDownloadRef
+
+        if isinstance(obj, LazyDownloadRef):
+            return True
+        if isinstance(obj, dict):
+            return any(self._has_lazy_refs(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return any(self._has_lazy_refs(v) for v in obj)
+        return False
+
+    def _resolve_lazy_refs(self, shareable: Shareable) -> Shareable:
+        """Materialize LazyDownloadRef objects before task data reaches user code."""
+
+        if not isinstance(self.pipe, CellPipe):
+            raise RuntimeError("cannot resolve lazy download refs without a CellPipe")
+        cell = getattr(self.pipe, "cell", None)
+        if cell is None:
+            raise RuntimeError("cannot resolve lazy download refs because CellPipe has no cell")
+
+        import nvflare.fuel.utils.fobs as fobs
+
+        encoded = fobs.dumps(shareable)
+        decode_ctx = cell.get_fobs_context(props={FOBSContextKey.PASS_THROUGH: False})
+        return fobs.loads(encoded, fobs_ctx=decode_ctx)
+
+    def _submit_task_receive_failure(self, current_task: _TaskContext, rc: str, reason: str) -> bool:
+        """Report a task receive/materialization failure after the task message has been ACKed."""
+
+        if not self.pipe_handler:
+            return False
+
+        failure = Shareable()
+        failure.set_return_code(rc)
+        failure.set_header(ReservedHeaderKey.ERROR, reason)
+        reply = Message.new_reply(topic=current_task.task_name, req_msg_id=current_task.msg_id, data=failure)
+        try:
+            return self.pipe_handler.send_to_peer(reply, self.submit_result_timeout)
+        except Exception as ex:
+            self.logger.warning(f"failed to submit task receive failure for {current_task.task_id}: {ex}")
+            return False
 
     def shareable_to_task_data(self, shareable: Shareable) -> Any:
         """Convert the Shareable object received from the TaskExchanger to an app-friendly format.
@@ -275,16 +325,24 @@ class FlareAgent:
                     raise RuntimeError("bad request data")
 
                 shareable = req.data
-                task_data = self.shareable_to_task_data(shareable)
                 task_id = shareable.get_header(FLContextKey.TASK_ID)
                 task_name = shareable.get_header(FLContextKey.TASK_NAME)
-
                 tc = _TaskContext(
                     task_id=task_id,
                     task_name=task_name,
                     msg_id=req.msg_id,
                 )
                 self.current_task = tc
+                try:
+                    if self._has_lazy_refs(shareable):
+                        shareable = self._resolve_lazy_refs(shareable)
+                    task_data = self.shareable_to_task_data(shareable)
+                except Exception as ex:
+                    reason = f"failed to materialize task data: {ex}"
+                    self.logger.error(reason)
+                    self._submit_task_receive_failure(tc, RC.EXECUTION_EXCEPTION, reason)
+                    self.current_task = None
+                    raise
                 return Task(task_name=tc.task_name, task_id=tc.task_id, data=task_data)
             time.sleep(0.5)
 
@@ -352,38 +410,140 @@ class FlareAgent:
         result.set_return_code(rc)
         return result
 
+    def _get_download_wait_abandon_reason(self):
+        if self.asked_to_stop:
+            return "agent is stopping"
+        if self.pipe_handler and self.pipe_handler.asked_to_stop:
+            return "task pipe handler is stopping"
+        if getattr(self.pipe, "closed", False):
+            return "task pipe is closed"
+        return None
+
+    def _delete_download_transactions(self, transactions):
+        for transaction in transactions:
+            try:
+                DownloadService.delete_transaction(transaction.tx_id)
+            except Exception as ex:
+                self.logger.warning(f"[subprocess] failed deleting download transaction {transaction.tx_id}: {ex}")
+
+    def _process_download_statuses(
+        self, pending_tx_ids, transactions_by_id, download_statuses, download_status_lock
+    ) -> bool:
+        with download_status_lock:
+            completed = {
+                tx_id: download_statuses[tx_id] for tx_id in list(pending_tx_ids) if tx_id in download_statuses
+            }
+
+        failed_statuses = {}
+        for tx_id, status in completed.items():
+            pending_tx_ids.discard(tx_id)
+            if status != TransactionDoneStatus.FINISHED:
+                failed_statuses[tx_id] = status
+        if failed_statuses:
+            failed_summary = ", ".join(f"{tx_id}:{status}" for tx_id, status in sorted(failed_statuses.items()))
+            self.logger.warning(f"[subprocess] download transaction failure(s): {failed_summary}")
+            remaining = [transactions_by_id[pending_tx_id] for pending_tx_id in pending_tx_ids]
+            self._delete_download_transactions(remaining)
+            return False
+
+        return True
+
+    def _finalize_finished_download_transactions(self, pending_tx_ids):
+        for tx_id in list(pending_tx_ids):
+            try:
+                DownloadService.finalize_transaction_if_finished(tx_id)
+            except Exception as ex:
+                self.logger.warning(f"[subprocess] failed checking download transaction {tx_id}: {ex}")
+
+    def _wait_for_download_transactions(
+        self, download_done, download_statuses, download_status_lock, transactions
+    ) -> bool:
+        pending_tx_ids = {transaction.tx_id for transaction in transactions}
+        transactions_by_id = {transaction.tx_id: transaction for transaction in transactions}
+
+        while pending_tx_ids:
+            if not self._process_download_statuses(
+                pending_tx_ids, transactions_by_id, download_statuses, download_status_lock
+            ):
+                return False
+            if not pending_tx_ids:
+                break
+
+            self._finalize_finished_download_transactions(pending_tx_ids)
+            if not self._process_download_statuses(
+                pending_tx_ids, transactions_by_id, download_statuses, download_status_lock
+            ):
+                return False
+            if not pending_tx_ids:
+                break
+
+            reason = self._get_download_wait_abandon_reason()
+            if reason:
+                self.logger.warning(f"[subprocess] abandoning result download wait: {reason}")
+                self._delete_download_transactions(transactions)
+                return False
+
+            if not download_done.wait(timeout=0.5):
+                continue
+            download_done.clear()
+
+        self.logger.info("[subprocess] server download complete")
+        return True
+
+    def _wait_for_download_complete_fixed(self, download_done, download_status, wait_start) -> bool:
+        if download_done.wait(timeout=self._download_complete_timeout):
+            download_elapsed = time.time() - wait_start
+            ds = download_status[0]
+            if ds == TransactionDoneStatus.FINISHED:
+                self.logger.info(f"[subprocess] server download complete: elapsed={download_elapsed:.2f}s")
+            else:
+                self.logger.warning(
+                    f"[subprocess] download transaction ended with status={ds} after {download_elapsed:.2f}s"
+                )
+            return True
+
+        self.logger.warning(
+            f"[subprocess] download not signalled within {self._download_complete_timeout}s; "
+            "proceeding (legacy fallback path)"
+        )
+        return True
+
     def _do_submit_result(self, current_task: _TaskContext, result, rc):
         result_shareable = self.task_result_to_shareable(result, rc)
         reply = Message.new_reply(topic=current_task.task_name, req_msg_id=current_task.msg_id, data=result_shareable)
 
         # Gate subprocess exit on download completion for the reverse PASS_THROUGH path
-        # (subprocess → CJ → server).  CJ ACKs send_to_peer() immediately after creating
+        # (subprocess -> CJ -> server). CJ ACKs send_to_peer() immediately after creating
         # LazyDownloadRef objects; the server then downloads tensors asynchronously from
         # this subprocess's DownloadService.  Registering DOWNLOAD_COMPLETE_CB before
         # serialisation ensures _create_downloader() wires it as the transaction_done_cb,
         # so the event is set exactly when the last receiver finishes downloading.
         #
         # For validate results (metrics only, no tensors), _finalize_download_tx() creates
-        # no download transaction and never fires DOWNLOAD_COMPLETE_CB.  We detect this via
-        # was_download_initiated() (thread-local set by _finalize_download_tx()) and return
-        # immediately without waiting — fixing the 1800s hang on CSE round 2+ (RC12 Bug 3).
+        # no download transaction and never fires DOWNLOAD_COMPLETE_CB. We detect this via
+        # thread-local transaction metadata and return immediately when no transfer exists.
         if isinstance(self.pipe, CellPipe) and self.pipe.pass_through_on_send:
             download_done = threading.Event()
             download_status = [None]
+            download_statuses = {}
+            download_status_lock = threading.Lock()
 
             def _on_download_done(tid, status, objs):
                 download_status[0] = status
+                with download_status_lock:
+                    download_statuses[tid] = status
                 download_done.set()
 
             self.pipe.cell.update_fobs_context({FOBSContextKey.DOWNLOAD_COMPLETE_CB: _on_download_done})
-            # Tell cell_pipe.py to use download_complete_timeout as MSG_ROOT_TTL so the
-            # subprocess's DownloadService transaction stays alive long enough for the server
-            # to finish pulling tensors.  submit_result_timeout is the CJ-ACK timeout and is
-            # unrelated to transfer duration — using it here would kill the transaction too early.
-            reply._dl_ttl = self._download_complete_timeout
-            # Reset thread-local so a stale True from a previous training round does not
-            # carry over to the current validate round (no tensors → False expected).
+            # Tell cell_pipe.py to use the streaming idle timeout as MSG_ROOT_TTL so the
+            # subprocess's DownloadService transaction stays alive while the server
+            # keeps pulling tensors. submit_result_timeout is the CJ-ACK timeout and is
+            # unrelated to transfer duration. Using it here would kill the transaction too early.
+            reply._dl_ttl = getattr(self, "_streaming_idle_timeout", self._download_complete_timeout)
+            # Reset thread-local transfer state so a previous result send cannot
+            # affect the wait decision for this result.
             clear_download_initiated()
+            clear_download_transactions()
             try:
                 send_start = time.time()
                 sent = self.pipe_handler.send_to_peer(reply, self.submit_result_timeout)
@@ -397,33 +557,30 @@ class FlareAgent:
                 # _finalize_download_tx() runs synchronously inside send_to_peer().
                 # was_download_initiated() is True iff it created a download transaction
                 # (i.e. the result contained large tensors requiring via-downloader transfer).
-                # False means validate result (metrics only) — skip the download wait and
+                # False means validate result (metrics only); skip the download wait and
                 # fall through to the launch_once shutdown block below.
-                if was_download_initiated():
+                transactions = get_download_transactions()
+                if transactions:
                     self.logger.info(
                         f"[subprocess] result ACK'd by CJ in {send_elapsed:.2f}s; "
-                        f"waiting up to {self._download_complete_timeout}s for server tensor download"
+                        f"waiting for server tensor download transactions {[tx.tx_id for tx in transactions]}"
                     )
-                    wait_start = time.time()
-                    if download_done.wait(timeout=self._download_complete_timeout):
-                        download_elapsed = time.time() - wait_start
-                        ds = download_status[0]
-                        if ds == TransactionDoneStatus.FINISHED:
-                            self.logger.info(f"[subprocess] server download complete: elapsed={download_elapsed:.2f}s")
-                        else:
-                            self.logger.warning(
-                                f"[subprocess] download transaction ended with status={ds} "
-                                f"after {download_elapsed:.2f}s"
-                            )
-                    else:
-                        self.logger.warning(
-                            f"[subprocess] download not signalled within {self._download_complete_timeout}s; "
-                            "proceeding (server may still be downloading from this process)"
-                        )
+                    if not self._wait_for_download_transactions(
+                        download_done, download_statuses, download_status_lock, transactions
+                    ):
+                        return False
+                elif was_download_initiated():
+                    self.logger.info(
+                        f"[subprocess] result ACK'd by CJ in {send_elapsed:.2f}s; "
+                        "download transaction metadata unavailable; "
+                        f"falling back to download_complete_timeout={self._download_complete_timeout}s"
+                    )
+                    if not self._wait_for_download_complete_fixed(download_done, download_status, time.time()):
+                        return False
                 else:
                     self.logger.info(
                         f"[subprocess] result ACK'd by CJ in {send_elapsed:.2f}s; "
-                        "no tensors in result — proceeding immediately"
+                        "no tensors in result; proceeding immediately"
                     )
             finally:
                 # Always clear the callback so stale refs do not accumulate across rounds.
@@ -473,12 +630,13 @@ class FlareAgentWithCellPipe(FlareAgent):
         workspace_dir: str,
         read_interval=0.1,
         heartbeat_interval=5.0,
-        heartbeat_timeout=60.0,  # increased from 30.0 — 30s too tight under large-model GC/relay
+        heartbeat_timeout=60.0,
         resend_interval=2.0,
         max_resends=None,
-        submit_result_timeout=60.0,  # increased from 30.0 — gives CJ enough time to ACK under load
+        submit_result_timeout=60.0,
         has_metrics=False,
-        download_complete_timeout=1800.0,  # new — gate subprocess exit until server finishes tensor download
+        download_complete_timeout=1800.0,
+        streaming_idle_timeout=600.0,
         launch_once: bool = False,
     ):
         """Constructor of Flare Agent with Cell Pipe. This is a convenient class.
@@ -501,6 +659,7 @@ class FlareAgentWithCellPipe(FlareAgent):
             has_metrics (bool): has metric pipe or not.
             download_complete_timeout (float): how long to wait after send_to_peer() ACKs for the server to finish
                 downloading tensors from this subprocess's DownloadService. Defaults to 1800.0.
+            streaming_idle_timeout (float): inactivity timeout for streamed DownloadService transactions.
         """
         pipe = CellPipe(
             mode=Mode.ACTIVE,
@@ -532,5 +691,6 @@ class FlareAgentWithCellPipe(FlareAgent):
             submit_result_timeout=submit_result_timeout,
             metric_pipe=metric_pipe,
             download_complete_timeout=download_complete_timeout,
+            streaming_idle_timeout=streaming_idle_timeout,
             launch_once=launch_once,
         )

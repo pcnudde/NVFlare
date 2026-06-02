@@ -19,7 +19,7 @@ import time as _real_time
 import pytest
 
 from nvflare.apis.event_type import EventType
-from nvflare.apis.fl_constant import ReturnCode
+from nvflare.apis.fl_constant import FLContextKey, ReturnCode
 from nvflare.apis.shareable import make_reply
 from nvflare.app_common.executors.client_api_launcher_executor import ClientAPILauncherExecutor
 from nvflare.app_common.executors.launcher_executor import LauncherExecutor
@@ -98,7 +98,7 @@ def base_executor(monkeypatch):
     monkeypatch.setattr(ClientAPILauncherExecutor, "log_info", lambda self, fl_ctx, msg: None)
     monkeypatch.setattr(ClientAPILauncherExecutor, "log_warning", lambda self, fl_ctx, msg: None)
     executor = ClientAPILauncherExecutor(pipe_id="test_pipe")
-    # Fix 7: PASS_THROUGH is only enabled when pipe is a CellPipe.
+    # PASS_THROUGH is only enabled when pipe is a CellPipe.
     # Set the pipe to a minimal CellPipe instance so PASS_THROUGH tests exercise
     # the correct code path.
     executor.pipe = _make_fake_cell_pipe()
@@ -123,7 +123,7 @@ def test_launcher_converter_ids_warn_when_ignored(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Fix 3: submit_result_timeout wiring through executor
+# submit_result_timeout wiring through executor
 # ---------------------------------------------------------------------------
 
 
@@ -158,7 +158,7 @@ def test_prepare_config_includes_submit_result_timeout(monkeypatch):
 
     executor = ClientAPILauncherExecutor(pipe_id="test_pipe", submit_result_timeout=450.0)
 
-    # Mock pipe.export() — needed by prepare_config_for_launch
+    # Mock pipe.export(), which is needed by prepare_config_for_launch.
     mock_pipe = MagicMock()
     mock_pipe.export.return_value = ("nvflare.some.PipeClass", {"arg1": "val1"})
     executor.pipe = mock_pipe
@@ -240,8 +240,82 @@ def test_prepare_config_submit_result_timeout_default_value(monkeypatch):
     assert captured[ConfigKey.TASK_EXCHANGE][ConfigKey.SUBMIT_RESULT_TIMEOUT] == 300.0
 
 
+def test_prepare_config_includes_streaming_idle_timeout(monkeypatch):
+    """prepare_config_for_launch must include STREAMING_IDLE_TIMEOUT in the subprocess config."""
+    from unittest.mock import MagicMock
+
+    from nvflare.client.config import ConfigKey
+
+    captured = {}
+    monkeypatch.setattr(
+        "nvflare.app_common.executors.client_api_launcher_executor.write_config_to_file",
+        lambda config_data, config_file_path: captured.update(config_data),
+    )
+    monkeypatch.setattr(
+        "nvflare.app_common.executors.client_api_launcher_executor.update_export_props",
+        lambda config_data, fl_ctx: None,
+    )
+
+    executor = ClientAPILauncherExecutor(pipe_id="test_pipe", streaming_idle_timeout=777.0)
+    mock_pipe = MagicMock()
+    mock_pipe.export.return_value = ("SomeClass", {})
+    executor.pipe = mock_pipe
+    executor.get_pipe_channel_name = lambda: "task"
+
+    fake_workspace = MagicMock()
+    fake_workspace.get_app_config_dir.return_value = "/tmp/fake_dir"
+    fake_engine = MagicMock()
+    fake_engine.get_workspace.return_value = fake_workspace
+    fl_ctx = MagicMock()
+    fl_ctx.get_engine.return_value = fake_engine
+    fl_ctx.get_job_id.return_value = "test_job"
+
+    executor.prepare_config_for_launch(fl_ctx)
+
+    assert captured[ConfigKey.TASK_EXCHANGE][ConfigKey.STREAMING_IDLE_TIMEOUT] == 777.0
+
+
+def test_prepare_config_streaming_idle_timeout_overridden_from_config(monkeypatch):
+    """A top-level streaming_idle_timeout client config value overrides the executor default."""
+    from unittest.mock import MagicMock
+
+    from nvflare.apis.fl_constant import ConfigVarName
+    from nvflare.client.config import ConfigKey
+
+    captured = {}
+    monkeypatch.setattr(
+        "nvflare.app_common.executors.client_api_launcher_executor.write_config_to_file",
+        lambda config_data, config_file_path: captured.update(config_data),
+    )
+    monkeypatch.setattr(
+        "nvflare.app_common.executors.client_api_launcher_executor.update_export_props",
+        lambda config_data, fl_ctx: None,
+    )
+    monkeypatch.setattr(_GCV_MODULE, _make_gcv_stub({ConfigVarName.STREAMING_IDLE_TIMEOUT: 888.0}))
+    monkeypatch.setattr(ClientAPILauncherExecutor, "log_info", lambda self, fl_ctx, msg: None)
+
+    executor = ClientAPILauncherExecutor(pipe_id="test_pipe", streaming_idle_timeout=777.0)
+    mock_pipe = MagicMock()
+    mock_pipe.export.return_value = ("SomeClass", {})
+    executor.pipe = mock_pipe
+    executor.get_pipe_channel_name = lambda: "task"
+
+    fake_workspace = MagicMock()
+    fake_workspace.get_app_config_dir.return_value = "/tmp/fake_dir"
+    fake_engine = MagicMock()
+    fake_engine.get_workspace.return_value = fake_workspace
+    fl_ctx = MagicMock()
+    fl_ctx.get_engine.return_value = fake_engine
+    fl_ctx.get_job_id.return_value = "test_job"
+
+    executor.prepare_config_for_launch(fl_ctx)
+
+    assert captured[ConfigKey.TASK_EXCHANGE][ConfigKey.STREAMING_IDLE_TIMEOUT] == 888.0
+    assert executor._streaming_idle_timeout == 888.0
+
+
 # ---------------------------------------------------------------------------
-# Fix 5: peer_read_timeout runtime override via add_client_config()
+# peer_read_timeout runtime override via add_client_config()
 # ---------------------------------------------------------------------------
 
 _GCV_MODULE = "nvflare.app_common.executors.client_api_launcher_executor.get_client_config_value"
@@ -351,7 +425,7 @@ def test_peer_read_timeout_and_external_pre_init_both_overridable(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Fix 10: max_resends wiring
+# max_resends wiring
 # ---------------------------------------------------------------------------
 
 
@@ -476,7 +550,7 @@ def test_ex_process_api_passes_max_resends_to_flare_agent(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# CJ-side RSS logging and memory GC (check_output_shareable / Fix 12)
+# CJ-side RSS logging and memory GC
 # ---------------------------------------------------------------------------
 
 
@@ -615,8 +689,8 @@ def _make_validating_executor(monkeypatch, **executor_kwargs):
     return executor, warnings_emitted, errors_emitted
 
 
-def test_timeout_warning_min_dl_less_than_per_req(monkeypatch):
-    """A warning must fire when min_download_timeout < streaming_per_request_timeout."""
+def test_no_timeout_warning_when_min_dl_less_than_per_req(monkeypatch):
+    """No warning is needed because the decomposer floors min_download_timeout to per-request timeout."""
     import nvflare.fuel.utils.app_config_utils as acu
     from nvflare.apis.fl_constant import ConfigVarName
 
@@ -626,7 +700,7 @@ def test_timeout_warning_min_dl_less_than_per_req(monkeypatch):
 
     def _fake_get(name, default):
         if ConfigVarName.MIN_DOWNLOAD_TIMEOUT in name:
-            return 60.0  # explicitly small → min_dl < per_req
+            return 60.0  # explicitly small, min_dl < per_req
         if ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT in name:
             return 600.0
         return default
@@ -634,7 +708,7 @@ def test_timeout_warning_min_dl_less_than_per_req(monkeypatch):
     monkeypatch.setattr(acu, "get_positive_float_var", _fake_get)
     executor.initialize(fl_ctx)
 
-    assert any("min_download_timeout" in w and "streaming_per_request_timeout" in w for w in warnings), warnings
+    assert not any("min_download_timeout" in w and "streaming_per_request_timeout" in w for w in warnings), warnings
 
 
 def test_no_timeout_warning_when_min_dl_ge_per_req(monkeypatch):
@@ -649,6 +723,28 @@ def test_no_timeout_warning_when_min_dl_ge_per_req(monkeypatch):
     def _fake_get(name, default):
         if ConfigVarName.MIN_DOWNLOAD_TIMEOUT in name:
             return 700.0  # min_dl > per_req
+        if ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT in name:
+            return 600.0
+        return default
+
+    monkeypatch.setattr(acu, "get_positive_float_var", _fake_get)
+    executor.initialize(fl_ctx)
+
+    assert not any("min_download_timeout" in w and "streaming_per_request_timeout" in w for w in warnings), warnings
+
+
+def test_streaming_idle_timeout_satisfies_min_download_warning(monkeypatch):
+    """Generic streaming_idle_timeout acts as the min_download_timeout default."""
+    import nvflare.fuel.utils.app_config_utils as acu
+    from nvflare.apis.fl_constant import ConfigVarName
+
+    executor, warnings, _ = _make_validating_executor(monkeypatch)
+    cell = _FakeCell()
+    fl_ctx = _FakeFLContext(cell)
+
+    def _fake_get(name, default):
+        if name == ConfigVarName.STREAMING_IDLE_TIMEOUT:
+            return 700.0
         if ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT in name:
             return 600.0
         return default
@@ -818,8 +914,8 @@ def test_no_warning_when_all_timeouts_consistent(monkeypatch):
     assert warnings == [], warnings
 
 
-def test_timeout_warning_peer_read_less_than_per_req(monkeypatch):
-    """A warning must fire when peer_read_timeout is lower than streaming_per_request_timeout."""
+def test_peer_read_less_than_per_req_does_not_warn(monkeypatch):
+    """Lazy forward receive decouples pipe ACK latency from byte-transfer duration."""
     import nvflare.fuel.utils.app_config_utils as acu
     from nvflare.apis.fl_constant import ConfigVarName
     from nvflare.fuel.utils.config_service import ConfigService
@@ -843,11 +939,11 @@ def test_timeout_warning_peer_read_less_than_per_req(monkeypatch):
     )
     executor.initialize(fl_ctx)
 
-    assert any("peer_read_timeout" in w and "streaming_per_request_timeout" in w for w in warnings), warnings
+    assert not any("peer_read_timeout" in w and "streaming_per_request_timeout" in w for w in warnings), warnings
 
 
-def test_timeout_warning_peer_read_none_when_per_req_is_configured(monkeypatch):
-    """A warning must fire when peer_read_timeout is unset and streaming timeout is configured."""
+def test_peer_read_none_when_per_req_is_configured_does_not_warn(monkeypatch):
+    """Configured streaming timeout should not force a pipe ACK timeout."""
     import nvflare.fuel.utils.app_config_utils as acu
     from nvflare.apis.fl_constant import ConfigVarName
     from nvflare.fuel.utils.config_service import ConfigService
@@ -871,7 +967,7 @@ def test_timeout_warning_peer_read_none_when_per_req_is_configured(monkeypatch):
     )
     executor.initialize(fl_ctx)
 
-    assert any("peer_read_timeout is not set" in w for w in warnings), warnings
+    assert not any("peer_read_timeout is not set" in w for w in warnings), warnings
 
 
 def test_default_peer_read_timeout_does_not_warn_without_configured_per_req(monkeypatch):
@@ -947,7 +1043,7 @@ def test_download_complete_timeout_does_not_warn_without_configured_per_req(monk
 
 
 # ---------------------------------------------------------------------------
-# Fix 14: PASS_THROUGH direction contract — CJ pipe must NOT stamp the header
+# PASS_THROUGH direction contract: CJ pipe must not stamp the header
 # ---------------------------------------------------------------------------
 
 
@@ -963,7 +1059,7 @@ def test_cj_pipe_pass_through_on_send_false_after_initialize(monkeypatch):
     cannot infer the dtype of a LazyDownloadRef.
 
     Only the subprocess-side CellPipe (set in ExProcessClientAPI.init()) should
-    have pass_through_on_send=True — for the reverse path so CJ creates
+    have pass_through_on_send=True for the reverse path so CJ creates
     LazyDownloadRef from subprocess results and forwards them to the server.
     """
     monkeypatch.setattr(ClientAPILauncherExecutor, "prepare_config_for_launch", lambda self, fl_ctx: None)
@@ -988,7 +1084,7 @@ def test_cj_pipe_pass_through_on_send_false_after_initialize(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Fix: forward-path PASS_THROUGH must register SERVER_COMMAND, not pipe channel
+# Forward-path PASS_THROUGH must register SERVER_COMMAND, not the pipe channel
 # ---------------------------------------------------------------------------
 
 
@@ -1001,7 +1097,7 @@ def test_initialize_registers_server_command_for_pass_through(monkeypatch):
     on the CJ engine cell.
 
     Regression guard: the old code registered get_pipe_channel_name() ("task"),
-    which lives on the CellPipe's own separate cell — never on the engine cell —
+    which lives on the CellPipe's own separate cell, never on the engine cell,
     so the pass_through check in Cell._send_one_request() never fired and the CJ
     downloaded the full model every round.
     """
@@ -1024,7 +1120,7 @@ def test_initialize_registers_server_command_for_pass_through(monkeypatch):
         f"CellChannel.SERVER_COMMAND ('{CellChannel.SERVER_COMMAND}') must be registered "
         "in decode_pass_through_channels so GET_TASK replies are decoded as LazyDownloadRef."
     )
-    # The pipe channel name must NOT be registered — it lives on the CellPipe's own
+    # The pipe channel name must NOT be registered; it lives on the CellPipe's own
     # cell, not the engine cell, so registering it here is a no-op and misleading.
     pipe_channel = executor.get_pipe_channel_name()
     assert pipe_channel not in cell.decode_pass_through_channels, (
@@ -1250,7 +1346,7 @@ def test_finalize_deferred_event_cleared_then_set_by_thread(monkeypatch):
     assert executor._deferred_stop_event.is_set()
     executor._finalize_external_execution("train", MagicMock(), MagicMock(), _FakeAbortSignal())
 
-    # Wait until the deferred thread has entered stop_task() — at this point the
+    # Wait until the deferred thread has entered stop_task(); at this point the
     # finally block has NOT run yet, so the event must still be cleared.
     assert stop_task_entered.wait(timeout=5.0), "Deferred thread did not enter stop_task in time"
     assert not executor._deferred_stop_event.is_set(), "Event must be cleared while deferred thread is in stop_task"
@@ -1359,7 +1455,7 @@ def test_initialize_timeout_fallback_uses_previous_task_name(monkeypatch):
 
 def test_launch_once_finalize_calls_stop_synchronously(monkeypatch):
     """With launch_once=True (needs_deferred=False), stop_task must be called
-    synchronously — it appears in stop_task_calls before _finalize returns."""
+    synchronously and appears in stop_task_calls before _finalize returns."""
     from unittest.mock import MagicMock
 
     executor = _make_deferred_stop_executor(monkeypatch)
@@ -1386,7 +1482,7 @@ def test_launch_once_event_stays_set_after_finalize(monkeypatch):
 
     assert (
         executor._deferred_stop_event.is_set()
-    ), "launch_once=True: event must remain set — synchronous stop does not clear it"
+    ), "launch_once=True: event must remain set because synchronous stop does not clear it"
 
 
 def test_launch_once_sequential_rounds_no_blocking(monkeypatch):
@@ -1407,7 +1503,7 @@ def test_launch_once_sequential_rounds_no_blocking(monkeypatch):
 
 
 def test_launch_once_deferred_task_name_not_captured(monkeypatch):
-    """With needs_deferred=False, _deferred_stop_task_name must NOT be updated —
+    """With needs_deferred=False, _deferred_stop_task_name must NOT be updated;
     task name capture only happens in the deferred branch."""
     from unittest.mock import MagicMock
 
@@ -1447,7 +1543,7 @@ def test_swarm_each_task_type_stop_called_synchronously(monkeypatch):
 
 
 def test_swarm_event_stays_set_across_all_task_types(monkeypatch):
-    """In a swarm job, _deferred_stop_event must remain set after every task type —
+    """In a swarm job, _deferred_stop_event must remain set after every task type;
     no deferred threads are ever started with launch_once=True."""
     from unittest.mock import MagicMock
 
@@ -1594,6 +1690,63 @@ def test_task_exchanger_execute_acquires_and_releases_flag(monkeypatch):
     executor.execute("train", shareable, fl_ctx, abort_signal)
     assert not executor._executing.is_set(), "_executing must be cleared after execute() returns"
     assert observed_during == [True], "_executing must be set during _do_execute"
+
+
+def test_task_exchanger_does_not_resend_after_lazy_ack(monkeypatch):
+    """After the subprocess ACKs the lightweight task message, CJ waits for result without resending.
+
+    Lazy forward receive moves tensor materialization after the ACK. This test
+    guards the control-plane behavior: once send_to_peer() returns True,
+    result wait duration must not cause another task send.
+    """
+    from nvflare.apis.shareable import Shareable
+    from nvflare.fuel.utils.pipe.pipe import Message
+
+    executor = TaskExchanger(pipe_id="test_pipe", peer_read_timeout=0.01, result_poll_interval=0.01)
+    monkeypatch.setattr(TaskExchanger, "log_info", lambda self, fl_ctx, msg: None)
+    monkeypatch.setattr(TaskExchanger, "log_debug", lambda self, fl_ctx, msg: None)
+    monkeypatch.setattr(TaskExchanger, "log_warning", lambda self, fl_ctx, msg: None)
+    monkeypatch.setattr(TaskExchanger, "log_error", lambda self, fl_ctx, msg: None)
+
+    class _LazyAckHandler:
+        def __init__(self):
+            self.asked_to_stop = False
+            self.sent = []
+            self.polls = 0
+            self.req = None
+
+        def send_to_peer(self, msg, timeout=None, abort_signal=None):
+            self.sent.append((msg, timeout))
+            self.req = msg
+            return True
+
+        def get_next(self):
+            self.polls += 1
+            if self.polls < 3:
+                return None
+            result = Shareable()
+            result.set_return_code(ReturnCode.OK)
+            return Message.new_reply(topic=self.req.topic, data=result, req_msg_id=self.req.msg_id)
+
+        def notify_abort(self, task_id):
+            raise AssertionError("task must not be aborted after a successful ACK")
+
+        def stop(self, close_pipe=True):
+            raise AssertionError("pipe handler must not stop in this test")
+
+    handler = _LazyAckHandler()
+    executor.pipe_handler = handler
+    task = Shareable()
+    task.set_header(FLContextKey.TASK_ID, "task-1")
+    fl_ctx = _FakeFLContext(_FakeCell())
+
+    result = executor.execute("train", task, fl_ctx, _FakeAbortSignal())
+
+    assert result.get_return_code() == ReturnCode.OK
+    assert len(handler.sent) == 1
+    sent_msg, timeout = handler.sent[0]
+    assert sent_msg.topic == "train"
+    assert timeout == 0.01
 
 
 def test_task_exchanger_execute_clears_flag_on_exception(monkeypatch):

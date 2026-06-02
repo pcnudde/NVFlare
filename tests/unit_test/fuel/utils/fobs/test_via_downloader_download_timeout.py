@@ -12,24 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for ViaDownloaderDecomposer._create_downloader() (Fix 9).
+"""Unit tests for ViaDownloaderDecomposer streamed download timeouts.
 
-Fix 9 — Make _MIN_DOWNLOAD_TIMEOUT configurable via job config:
-    Root Cause: _MIN_DOWNLOAD_TIMEOUT was hardcoded to 60s.  For large models
-    (5 GiB+) with slow networks, the gap between chunk N completing and chunk
-    N+1 being requested can exceed 60s, causing _monitor_tx to kill the
-    transaction mid-download ("ref not found" errors).
-    Fix: read min_download_timeout from job config via acu.get_positive_float_var()
-    using the same ConfigVarName + config_var_prefix pattern as DOWNLOAD_CHUNK_SIZE
-    and STREAMING_PER_REQUEST_TIMEOUT.  The module-level constant _MIN_DOWNLOAD_TIMEOUT
-    remains as the fallback default (60s) when the key is absent.
+DownloadService transaction timeout is an inactivity timeout. It must honor the
+generic streaming_idle_timeout default, per-decomposer min_download_timeout
+overrides, and a floor at least as large as streaming_per_request_timeout.
 
 CONTRACT:
-- When no job config value is set → use _MIN_DOWNLOAD_TIMEOUT (60s) as min_timeout
-- When job config sets np_min_download_timeout=600 → min_timeout=600
-- msg_root_ttl > min_timeout → timeout = msg_root_ttl (not clamped up)
-- msg_root_ttl < min_timeout → timeout floored to min_timeout
-- msg_root_ttl absent → timeout = min_timeout
+- When no job config value is set, use the default effective idle timeout
+- When job config sets streaming_idle_timeout=500, min_timeout=500
+- When job config sets np_min_download_timeout=600, min_timeout=600
+- msg_root_ttl > min_timeout means timeout = msg_root_ttl
+- msg_root_ttl < min_timeout means timeout is floored to min_timeout
+- msg_root_ttl absent means timeout = min_timeout
 - ObjectDownloader receives the computed timeout value
 """
 
@@ -37,10 +32,10 @@ from unittest.mock import MagicMock, patch
 
 from nvflare.apis.fl_constant import ConfigVarName
 from nvflare.fuel.utils import fobs
-from nvflare.fuel.utils.fobs.decomposers.via_downloader import _MIN_DOWNLOAD_TIMEOUT, ViaDownloaderDecomposer, _CtxKey
+from nvflare.fuel.utils.fobs.decomposers.via_downloader import ViaDownloaderDecomposer, _CtxKey
 
 # ---------------------------------------------------------------------------
-# Minimal concrete subclass — only _create_downloader is under test
+# Minimal concrete subclass; only _create_downloader is under test
 # ---------------------------------------------------------------------------
 
 
@@ -80,14 +75,14 @@ def _make_fobs_ctx(msg_root_id=None, msg_root_ttl=None, cell=None):
 
 
 # ---------------------------------------------------------------------------
-# Fix 9: min_timeout comes from job config via acu.get_positive_float_var
+# min_timeout comes from job config via acu.get_positive_float_var
 # ---------------------------------------------------------------------------
 
 
-class TestCreateDownloaderFix9:
+class TestCreateDownloaderTimeouts:
 
-    def test_default_min_timeout_used_when_no_config(self, monkeypatch):
-        """When job config has no np_min_download_timeout, default 60s is used as floor."""
+    def test_default_min_timeout_honors_per_request_floor(self, monkeypatch):
+        """When no timeout config is set, the idle timeout is at least the per-request timeout."""
         decomposer = _FakeDecomposer()
         captured = []
 
@@ -110,10 +105,10 @@ class TestCreateDownloaderFix9:
             decomposer._create_downloader(ctx)
 
         assert len(captured) == 1
-        assert captured[0] == _MIN_DOWNLOAD_TIMEOUT
+        assert captured[0] == 600.0
 
     def test_job_config_min_timeout_overrides_default(self, monkeypatch):
-        """When job config sets np_min_download_timeout=600, ObjectDownloader gets 600."""
+        """When job config sets np_min_download_timeout above per-request timeout, ObjectDownloader uses it."""
         decomposer = _FakeDecomposer()
         captured = []
 
@@ -126,7 +121,7 @@ class TestCreateDownloaderFix9:
         # Simulate job config returning 600 for the np_min_download_timeout key
         def fake_get_positive_float_var(name, default):
             if name == "np_min_download_timeout":
-                return 600.0
+                return 700.0
             return default
 
         monkeypatch.setattr(
@@ -141,6 +136,66 @@ class TestCreateDownloaderFix9:
             decomposer._create_downloader(ctx)
 
         assert len(captured) == 1
+        assert captured[0] == 700.0
+
+    def test_streaming_idle_timeout_is_generic_default(self, monkeypatch):
+        """When only streaming_idle_timeout is set, ObjectDownloader uses it as the idle timeout."""
+        decomposer = _FakeDecomposer()
+        captured = []
+
+        def fake_object_downloader(**kwargs):
+            captured.append(kwargs["timeout"])
+            od = MagicMock()
+            od.add_object = MagicMock()
+            return od
+
+        def fake_get_positive_float_var(name, default):
+            if name == ConfigVarName.STREAMING_IDLE_TIMEOUT:
+                return 700.0
+            return default
+
+        monkeypatch.setattr(
+            "nvflare.fuel.utils.fobs.decomposers.via_downloader.acu.get_positive_float_var",
+            fake_get_positive_float_var,
+        )
+        with patch(
+            "nvflare.fuel.utils.fobs.decomposers.via_downloader.ObjectDownloader",
+            side_effect=fake_object_downloader,
+        ):
+            ctx = _make_fobs_ctx()
+            decomposer._create_downloader(ctx)
+
+        assert captured[0] == 700.0
+
+    def test_explicit_min_timeout_below_per_request_is_floored(self, monkeypatch):
+        """A too-low min_download_timeout is floored to the per-request timeout."""
+        decomposer = _FakeDecomposer()
+        captured = []
+
+        def fake_object_downloader(**kwargs):
+            captured.append(kwargs["timeout"])
+            od = MagicMock()
+            od.add_object = MagicMock()
+            return od
+
+        def fake_get_positive_float_var(name, default):
+            if name == "np_min_download_timeout":
+                return 120.0
+            if name == "np_streaming_per_request_timeout":
+                return 600.0
+            return default
+
+        monkeypatch.setattr(
+            "nvflare.fuel.utils.fobs.decomposers.via_downloader.acu.get_positive_float_var",
+            fake_get_positive_float_var,
+        )
+        with patch(
+            "nvflare.fuel.utils.fobs.decomposers.via_downloader.ObjectDownloader",
+            side_effect=fake_object_downloader,
+        ):
+            ctx = _make_fobs_ctx()
+            decomposer._create_downloader(ctx)
+
         assert captured[0] == 600.0
 
     def test_msg_root_ttl_above_min_not_clamped(self, monkeypatch):
@@ -156,16 +211,16 @@ class TestCreateDownloaderFix9:
 
         monkeypatch.setattr(
             "nvflare.fuel.utils.fobs.decomposers.via_downloader.acu.get_positive_float_var",
-            lambda name, default: default,  # min_timeout = 60
+            lambda name, default: default,
         )
         with patch(
             "nvflare.fuel.utils.fobs.decomposers.via_downloader.ObjectDownloader",
             side_effect=fake_object_downloader,
         ):
-            ctx = _make_fobs_ctx(msg_root_ttl=300.0)
+            ctx = _make_fobs_ctx(msg_root_ttl=700.0)
             decomposer._create_downloader(ctx)
 
-        assert captured[0] == 300.0  # not raised to min_timeout
+        assert captured[0] == 700.0  # not raised above msg_root_ttl
 
     def test_msg_root_ttl_below_min_is_floored(self, monkeypatch):
         """msg_root_ttl smaller than min_timeout is floored to min_timeout."""
@@ -205,7 +260,11 @@ class TestCreateDownloaderFix9:
 
         monkeypatch.setattr(
             "nvflare.fuel.utils.fobs.decomposers.via_downloader.acu.get_positive_float_var",
-            lambda name, default: 120.0 if "min_download_timeout" in name else default,
+            lambda name, default: (
+                120.0
+                if "min_download_timeout" in name
+                else 100.0 if "streaming_per_request_timeout" in name else default
+            ),
         )
         with patch(
             "nvflare.fuel.utils.fobs.decomposers.via_downloader.ObjectDownloader",

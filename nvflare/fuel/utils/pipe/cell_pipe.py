@@ -291,15 +291,19 @@ class CellPipe(Pipe):
         # context with FOBSContextKey.PASS_THROUGH=True so that tensors arrive
         # as LazyDownloadRef placeholders rather than being downloaded inline.
         #
-        # Set by ExProcessClientAPI.init() (subprocess→CJ reverse direction)
+        # Set by ExProcessClientAPI.init() (subprocess->CJ reverse direction)
         # when CellPipe is in use.  Has no effect for FilePipe (which is not a
         # CellPipe and never has this attribute set).
         #
-        # Note: the forward direction (Fix 18, CJ→subprocess) does not use this
+        # Note: the forward direction (CJ->subprocess) does not use this
         # flag; it is implemented via ReservedHeaderKey.PASS_THROUGH stamped on
         # the shareable in SwarmClientController._scatter() and propagated by
-        # aux_runner.py — not through pipe.pass_through_on_send.
+        # aux_runner.py, not through pipe.pass_through_on_send.
         self.pass_through_on_send: bool = False
+        # When True, incoming non-heartbeat messages on this pipe channel are
+        # decoded with FOBSContextKey.PASS_THROUGH=True. This lets the receiver
+        # ACK a lightweight ref message before materializing large tensors.
+        self.pass_through_on_receive: bool = False
 
     def _update_peer_active_time(self, msg: CellMessage, ch_name: str, msg_type: str):
         origin = msg.get_header(MessageHeaderKey.ORIGIN)
@@ -366,10 +370,10 @@ class CellPipe(Pipe):
         # Serialize the message ONCE and cache the result on the Message object.
         #
         # Why: PipeHandler retries the same `msg` object on every failed send.
-        # Without caching, each retry calls _to_cell_message(msg) → FOBS encodes
-        # msg.data (the Shareable/numpy result) → creates a new ArrayDownloadable
+        # Without caching, each retry calls _to_cell_message(msg), FOBS encodes
+        # msg.data (the Shareable/numpy result), and creates a new ArrayDownloadable
         # transaction in DownloadService.  With a 5 GiB model and 14+ retries this
-        # produces 70–135 GiB of live transactions simultaneously (OOM crash).
+        # produces 70-135 GiB of live transactions simultaneously (OOM crash).
         #
         # How it works: cell.send_request() calls encode_payload() which checks
         # whether the CellMessage's encoding header is already set.  On the first
@@ -381,15 +385,15 @@ class CellPipe(Pipe):
             msg._cached_cell_msg = _to_cell_message(msg)
         request = msg._cached_cell_msg
         request.set_header(MessageHeaderKey.MSG_ROOT_ID, msg.msg_id)
-        # For REPLY messages (subprocess→CJ result direction), stamp MSG_ROOT_TTL so
+        # For REPLY messages (subprocess->CJ result direction), stamp MSG_ROOT_TTL so
         # via_downloader._create_downloader() keeps the subprocess's DownloadService
         # transaction alive long enough for the server to pull tensors directly from
         # the subprocess.
         #
         # When pass_through_on_send is active (reverse PASS_THROUGH path), use
-        # _dl_ttl stamped by FlareAgent._do_submit_result() — this is
-        # download_complete_timeout (default 1800s), the actual transfer budget.
-        # Mirrors the forward direction where the server uses task.timeout.
+        # _dl_ttl stamped by FlareAgent._do_submit_result(). This is the
+        # streaming idle timeout for the data-plane transaction, not the
+        # control-plane CJ ACK timeout.
         #
         # Fall back to `timeout` (= submit_result_timeout, the CJ-ACK timeout)
         # for non-PASS_THROUGH REPLY messages where no tensor transfer occurs.
@@ -439,7 +443,7 @@ class CellPipe(Pipe):
         #
         # We queue the raw CellMessage rather than converting it to a Message here.
         # The conversion (_from_cell_message) is deferred to receive() time so that
-        # this callback – and therefore the cell-level ACK path – performs the
+        # this callback, and therefore the cell-level ACK path, performs the
         # absolute minimum work before returning ReturnCode.OK to the sender.
         sender = request.get_header(MessageHeaderKey.ORIGIN)
         topic = request.get_header(MessageHeaderKey.TOPIC)
@@ -485,11 +489,15 @@ class CellPipe(Pipe):
                 raise BrokenPipeError("pipe already closed")
             self.ci.start()
             self.set_cell_cb(name)
+            if self.pass_through_on_receive:
+                self.cell.decode_pass_through_channels.add(self.channel)
 
     def close(self):
         with self.pipe_lock:
             if self.closed:
                 return
+            if self.pass_through_on_receive and self.channel:
+                self.cell.decode_pass_through_channels.discard(self.channel)
             self.ci.close_pipe(self)
             self.closed = True
 

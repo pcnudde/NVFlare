@@ -12,54 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Unit tests for Fix 16: subprocess exit gating via DOWNLOAD_COMPLETE_CB.
+"""Tests for reverse result download completion gating.
 
-Without Fix 16, FlareAgent._do_submit_result() returns as soon as
-send_to_peer() ACKs the pipe message.  With reverse PASS_THROUGH active, CJ
-ACKs immediately (LazyDownloadRef creation is microseconds) while the server
-downloads tensors asynchronously from the subprocess DownloadService.  If the
-subprocess exits right after ACK, the DownloadService disappears and the server
-gets "no ref found".
-
-Fix 16 wires a threading.Event through FOBSContextKey.DOWNLOAD_COMPLETE_CB so
-that _create_downloader() sets it as the ObjectDownloader transaction_done_cb.
-When the transaction completes (all receivers finished), the event is set and
-_do_submit_result() unblocks and returns.
-
-Tests verify:
-
-  FlareAgent._do_submit_result():
-  1. CellPipe + pass_through_on_send=True → DOWNLOAD_COMPLETE_CB registered in
-     FOBS context before send_to_peer().
-  2. CellPipe + pass_through_on_send=True → waits for DOWNLOAD_COMPLETE_CB to
-     fire; returns True when it fires within timeout.
-  3. Timeout path → warning logged and True returned (non-fatal: server may
-     still be downloading when we proceed).
-  4. send_to_peer() fails → returns False without waiting.
-  5. CellPipe + pass_through_on_send=False → falls back to plain send_to_peer()
-     (no DOWNLOAD_COMPLETE_CB, no wait).
-  6. Non-CellPipe (FilePipe) → falls back to plain send_to_peer().
-  7. DOWNLOAD_COMPLETE_CB is cleared from FOBS context after the wait (cleanup).
-
-  via_downloader._create_downloader():
-  8. DOWNLOAD_COMPLETE_CB present in fobs_ctx → passed as transaction_done_cb.
-  9. DOWNLOAD_COMPLETE_CB absent → transaction_done_cb=None (no gating).
-  10. _on_tx_done function removed → GC callback no longer exists.
-
-  ClientConfig:
-  11. get_download_complete_timeout() returns configured value.
-  12. get_download_complete_timeout() returns 1800.0 when not set.
+With reverse PASS_THROUGH active, the CJ can ACK a result message before the
+server has downloaded tensor payloads from the subprocess DownloadService. These
+tests cover the subprocess wait contract: known download transactions must reach
+terminal state before shutdown, metric-only results must not wait, and legacy
+fallback paths remain bounded by download_complete_timeout.
 """
 
 import threading
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from nvflare.client.flare_agent import FlareAgent, _TaskContext
+from nvflare.fuel.f3.streaming.download_service import TransactionDoneStatus
 from nvflare.fuel.utils.fobs import FOBSContextKey
-from nvflare.fuel.utils.fobs.decomposers.via_downloader import _tls, clear_download_initiated
+from nvflare.fuel.utils.fobs.decomposers.via_downloader import (
+    DownloadTransactionInfo,
+    _tls,
+    clear_download_initiated,
+    clear_download_transactions,
+)
 
 # ---------------------------------------------------------------------------
 # Module-level fixture: prevent os._exit() from killing the pytest worker.
@@ -85,6 +61,7 @@ def _make_cell_pipe(pass_through_on_send: bool = True):
 
     pipe = MagicMock(spec=CellPipe)
     pipe.pass_through_on_send = pass_through_on_send
+    pipe.closed = False
     # cell.update_fobs_context() captures the props dict for inspection
     pipe.cell = MagicMock()
     return pipe
@@ -98,7 +75,7 @@ def _make_non_cell_pipe():
     return pipe
 
 
-def _make_agent(pipe, download_complete_timeout: float = 5.0):
+def _make_agent(pipe, download_complete_timeout: float = 5.0, streaming_idle_timeout: float = 600.0):
     """Return a FlareAgent stub backed by the given pipe.
 
     Bypasses __init__ network setup by constructing manually.
@@ -108,6 +85,7 @@ def _make_agent(pipe, download_complete_timeout: float = 5.0):
     agent.pipe = pipe
     agent.submit_result_timeout = 30.0
     agent._download_complete_timeout = download_complete_timeout
+    agent._streaming_idle_timeout = streaming_idle_timeout
     agent._close_pipe = False
     agent._close_metric_pipe = False
     agent.task_lock = threading.Lock()
@@ -118,6 +96,7 @@ def _make_agent(pipe, download_complete_timeout: float = 5.0):
     # pipe_handler.send_to_peer returns True by default
     agent.pipe_handler = MagicMock()
     agent.pipe_handler.send_to_peer.return_value = True
+    agent.pipe_handler.asked_to_stop = False
 
     return agent
 
@@ -139,6 +118,7 @@ class TestDoSubmitResultGating:
 
     def setup_method(self):
         clear_download_initiated()
+        clear_download_transactions()
 
     def test_download_complete_cb_registered_before_send(self):
         """DOWNLOAD_COMPLETE_CB must be in cell FOBS context before send_to_peer() is called."""
@@ -204,10 +184,314 @@ class TestDoSubmitResultGating:
 
         assert result is True
 
+    def test_transaction_timeout_returns_false(self):
+        pipe = _make_cell_pipe(pass_through_on_send=True)
+        agent = _make_agent(pipe, download_complete_timeout=5.0)
+        self._patch_shareable(agent)
+
+        registered_cb = {}
+
+        def fire_timeout_on_send(reply, timeout):
+            _tls.download_initiated = True
+            _tls.download_transactions = [
+                DownloadTransactionInfo(tx_id="tx-timeout", ref_ids=("ref-1",), created_time=1.0)
+            ]
+            for c in pipe.cell.update_fobs_context.call_args_list:
+                props = c[0][0]
+                if (
+                    FOBSContextKey.DOWNLOAD_COMPLETE_CB in props
+                    and props[FOBSContextKey.DOWNLOAD_COMPLETE_CB] is not None
+                ):
+                    registered_cb["cb"] = props[FOBSContextKey.DOWNLOAD_COMPLETE_CB]
+            if registered_cb.get("cb"):
+                registered_cb["cb"]("tx-timeout", TransactionDoneStatus.TIMEOUT, [])
+            return True
+
+        agent.pipe_handler.send_to_peer.side_effect = fire_timeout_on_send
+
+        result = agent._do_submit_result(_make_task_ctx(), None, "OK")
+
+        assert result is False
+
+    def test_transaction_wait_abort_deletes_known_transactions(self):
+        pipe = _make_cell_pipe(pass_through_on_send=True)
+        agent = _make_agent(pipe, download_complete_timeout=5.0)
+        self._patch_shareable(agent)
+
+        def send_then_stop(reply, timeout):
+            _tls.download_initiated = True
+            _tls.download_transactions = [
+                DownloadTransactionInfo(tx_id="tx-abort", ref_ids=("ref-1",), created_time=1.0)
+            ]
+            agent.asked_to_stop = True
+            return True
+
+        agent.pipe_handler.send_to_peer.side_effect = send_then_stop
+
+        with (
+            patch("nvflare.client.flare_agent.DownloadService.finalize_transaction_if_finished", return_value=False),
+            patch("nvflare.client.flare_agent.DownloadService.delete_transaction") as delete_tx,
+        ):
+            result = agent._do_submit_result(_make_task_ctx(), None, "OK")
+
+        assert result is False
+        delete_tx.assert_called_once_with("tx-abort")
+
+    def test_transaction_wait_stop_after_finish_returns_true_without_delete(self):
+        pipe = _make_cell_pipe(pass_through_on_send=True)
+        agent = _make_agent(pipe, download_complete_timeout=5.0)
+        self._patch_shareable(agent)
+
+        registered_cb = {}
+
+        def send_then_stop(reply, timeout):
+            _tls.download_initiated = True
+            _tls.download_transactions = [
+                DownloadTransactionInfo(tx_id="tx-finished-on-stop", ref_ids=("ref-1",), created_time=1.0)
+            ]
+            for c in pipe.cell.update_fobs_context.call_args_list:
+                props = c[0][0]
+                if (
+                    FOBSContextKey.DOWNLOAD_COMPLETE_CB in props
+                    and props[FOBSContextKey.DOWNLOAD_COMPLETE_CB] is not None
+                ):
+                    registered_cb["cb"] = props[FOBSContextKey.DOWNLOAD_COMPLETE_CB]
+            agent.asked_to_stop = True
+            return True
+
+        def finalize_if_finished(tx_id):
+            registered_cb["cb"](tx_id, TransactionDoneStatus.FINISHED, [])
+            return True
+
+        agent.pipe_handler.send_to_peer.side_effect = send_then_stop
+
+        with (
+            patch(
+                "nvflare.client.flare_agent.DownloadService.finalize_transaction_if_finished",
+                side_effect=finalize_if_finished,
+            ) as finalize_tx,
+            patch("nvflare.client.flare_agent.DownloadService.delete_transaction") as delete_tx,
+        ):
+            result = agent._do_submit_result(_make_task_ctx(), None, "OK")
+
+        assert result is True
+        finalize_tx.assert_called_once_with("tx-finished-on-stop")
+        delete_tx.assert_not_called()
+
+    def test_transaction_finished_wait_returns_true(self):
+        pipe = _make_cell_pipe(pass_through_on_send=True)
+        agent = _make_agent(pipe, download_complete_timeout=5.0)
+        self._patch_shareable(agent)
+
+        registered_cb = {}
+
+        def fire_finished_on_send(reply, timeout):
+            _tls.download_initiated = True
+            _tls.download_transactions = [
+                DownloadTransactionInfo(tx_id="tx-finished", ref_ids=("ref-1",), created_time=1.0)
+            ]
+            for c in pipe.cell.update_fobs_context.call_args_list:
+                props = c[0][0]
+                if (
+                    FOBSContextKey.DOWNLOAD_COMPLETE_CB in props
+                    and props[FOBSContextKey.DOWNLOAD_COMPLETE_CB] is not None
+                ):
+                    registered_cb["cb"] = props[FOBSContextKey.DOWNLOAD_COMPLETE_CB]
+            if registered_cb.get("cb"):
+                registered_cb["cb"]("tx-finished", TransactionDoneStatus.FINISHED, [])
+            return True
+
+        agent.pipe_handler.send_to_peer.side_effect = fire_finished_on_send
+
+        result = agent._do_submit_result(_make_task_ctx(), None, "OK")
+
+        assert result is True
+
+    def test_transaction_wait_polls_finished_transaction_without_monitor_tick(self):
+        pipe = _make_cell_pipe(pass_through_on_send=True)
+        agent = _make_agent(pipe, download_complete_timeout=5.0)
+        self._patch_shareable(agent)
+
+        registered_cb = {}
+
+        def send_with_finished_transaction(reply, timeout):
+            _tls.download_initiated = True
+            _tls.download_transactions = [
+                DownloadTransactionInfo(tx_id="tx-finished-before-monitor", ref_ids=("ref-1",), created_time=1.0)
+            ]
+            for c in pipe.cell.update_fobs_context.call_args_list:
+                props = c[0][0]
+                if (
+                    FOBSContextKey.DOWNLOAD_COMPLETE_CB in props
+                    and props[FOBSContextKey.DOWNLOAD_COMPLETE_CB] is not None
+                ):
+                    registered_cb["cb"] = props[FOBSContextKey.DOWNLOAD_COMPLETE_CB]
+            return True
+
+        def finalize_if_finished(tx_id):
+            registered_cb["cb"](tx_id, TransactionDoneStatus.FINISHED, [])
+            return True
+
+        agent.pipe_handler.send_to_peer.side_effect = send_with_finished_transaction
+
+        with patch(
+            "nvflare.client.flare_agent.DownloadService.finalize_transaction_if_finished",
+            side_effect=finalize_if_finished,
+        ) as finalize_tx:
+            result = agent._do_submit_result(_make_task_ctx(), None, "OK")
+
+        assert result is True
+        finalize_tx.assert_called_once_with("tx-finished-before-monitor")
+
+    def test_waits_for_all_download_transactions_before_returning(self):
+        pipe = _make_cell_pipe(pass_through_on_send=True)
+        agent = _make_agent(pipe, download_complete_timeout=5.0)
+        self._patch_shareable(agent)
+
+        registered_cb = {}
+        delayed_thread = None
+
+        def fire_one_then_delay_sibling_on_send(reply, timeout):
+            nonlocal delayed_thread
+            _tls.download_initiated = True
+            _tls.download_transactions = [
+                DownloadTransactionInfo(tx_id="tx-1", ref_ids=("ref-1",), created_time=1.0),
+                DownloadTransactionInfo(tx_id="tx-2", ref_ids=("ref-2",), created_time=1.0),
+            ]
+            for c in pipe.cell.update_fobs_context.call_args_list:
+                props = c[0][0]
+                if (
+                    FOBSContextKey.DOWNLOAD_COMPLETE_CB in props
+                    and props[FOBSContextKey.DOWNLOAD_COMPLETE_CB] is not None
+                ):
+                    registered_cb["cb"] = props[FOBSContextKey.DOWNLOAD_COMPLETE_CB]
+            registered_cb["cb"]("tx-1", TransactionDoneStatus.FINISHED, [])
+
+            def _finish_later():
+                time.sleep(0.05)
+                registered_cb["cb"]("tx-2", TransactionDoneStatus.FINISHED, [])
+
+            delayed_thread = threading.Thread(target=_finish_later, daemon=True)
+            delayed_thread.start()
+            return True
+
+        agent.pipe_handler.send_to_peer.side_effect = fire_one_then_delay_sibling_on_send
+
+        start = time.monotonic()
+        result = agent._do_submit_result(_make_task_ctx(), None, "OK")
+        elapsed = time.monotonic() - start
+        delayed_thread.join(timeout=1.0)
+
+        assert result is True
+        assert elapsed >= 0.04, "must not return after only the first sibling transaction finishes"
+
+    def test_failed_sibling_transaction_returns_false_and_deletes_pending_transactions(self):
+        pipe = _make_cell_pipe(pass_through_on_send=True)
+        agent = _make_agent(pipe, download_complete_timeout=5.0)
+        self._patch_shareable(agent)
+
+        registered_cb = {}
+
+        def fire_failed_sibling_on_send(reply, timeout):
+            _tls.download_initiated = True
+            _tls.download_transactions = [
+                DownloadTransactionInfo(tx_id="tx-1", ref_ids=("ref-1",), created_time=1.0),
+                DownloadTransactionInfo(tx_id="tx-2", ref_ids=("ref-2",), created_time=1.0),
+                DownloadTransactionInfo(tx_id="tx-3", ref_ids=("ref-3",), created_time=1.0),
+            ]
+            for c in pipe.cell.update_fobs_context.call_args_list:
+                props = c[0][0]
+                if (
+                    FOBSContextKey.DOWNLOAD_COMPLETE_CB in props
+                    and props[FOBSContextKey.DOWNLOAD_COMPLETE_CB] is not None
+                ):
+                    registered_cb["cb"] = props[FOBSContextKey.DOWNLOAD_COMPLETE_CB]
+            registered_cb["cb"]("tx-1", TransactionDoneStatus.FINISHED, [])
+            registered_cb["cb"]("tx-2", TransactionDoneStatus.TIMEOUT, [])
+            return True
+
+        agent.pipe_handler.send_to_peer.side_effect = fire_failed_sibling_on_send
+
+        with patch("nvflare.client.flare_agent.DownloadService.delete_transaction") as delete_tx:
+            result = agent._do_submit_result(_make_task_ctx(), None, "OK")
+
+        assert result is False
+        delete_tx.assert_called_once_with("tx-3")
+        warning_msgs = [call[0][0] for call in agent.logger.warning.call_args_list]
+        assert any("tx-2" in msg and TransactionDoneStatus.TIMEOUT in msg for msg in warning_msgs)
+
+    def test_ignores_unknown_transaction_callback_until_expected_transaction_finishes(self):
+        pipe = _make_cell_pipe(pass_through_on_send=True)
+        agent = _make_agent(pipe, download_complete_timeout=5.0)
+        self._patch_shareable(agent)
+
+        registered_cb = {}
+        delayed_thread = None
+
+        def fire_unknown_then_expected_on_send(reply, timeout):
+            nonlocal delayed_thread
+            _tls.download_initiated = True
+            _tls.download_transactions = [
+                DownloadTransactionInfo(tx_id="tx-expected", ref_ids=("ref-1",), created_time=1.0)
+            ]
+            for c in pipe.cell.update_fobs_context.call_args_list:
+                props = c[0][0]
+                if (
+                    FOBSContextKey.DOWNLOAD_COMPLETE_CB in props
+                    and props[FOBSContextKey.DOWNLOAD_COMPLETE_CB] is not None
+                ):
+                    registered_cb["cb"] = props[FOBSContextKey.DOWNLOAD_COMPLETE_CB]
+            registered_cb["cb"]("tx-other", TransactionDoneStatus.FINISHED, [])
+
+            def _finish_expected():
+                time.sleep(0.05)
+                registered_cb["cb"]("tx-expected", TransactionDoneStatus.FINISHED, [])
+
+            delayed_thread = threading.Thread(target=_finish_expected, daemon=True)
+            delayed_thread.start()
+            return True
+
+        agent.pipe_handler.send_to_peer.side_effect = fire_unknown_then_expected_on_send
+
+        start = time.monotonic()
+        result = agent._do_submit_result(_make_task_ctx(), None, "OK")
+        elapsed = time.monotonic() - start
+        delayed_thread.join(timeout=1.0)
+
+        assert result is True
+        assert elapsed >= 0.04, "unknown completion callbacks must not satisfy the expected transaction"
+
+    def test_reverse_transaction_ttl_uses_streaming_idle_timeout(self):
+        pipe = _make_cell_pipe(pass_through_on_send=True)
+        agent = _make_agent(pipe, download_complete_timeout=1800.0, streaming_idle_timeout=777.0)
+        self._patch_shareable(agent)
+
+        registered_cb = {}
+
+        def fire_finished_on_send(reply, timeout):
+            assert reply._dl_ttl == 777.0
+            _tls.download_initiated = True
+            _tls.download_transactions = [
+                DownloadTransactionInfo(tx_id="tx-finished", ref_ids=("ref-1",), created_time=1.0)
+            ]
+            for c in pipe.cell.update_fobs_context.call_args_list:
+                props = c[0][0]
+                if (
+                    FOBSContextKey.DOWNLOAD_COMPLETE_CB in props
+                    and props[FOBSContextKey.DOWNLOAD_COMPLETE_CB] is not None
+                ):
+                    registered_cb["cb"] = props[FOBSContextKey.DOWNLOAD_COMPLETE_CB]
+            registered_cb["cb"]("tx-finished", TransactionDoneStatus.FINISHED, [])
+            return True
+
+        agent.pipe_handler.send_to_peer.side_effect = fire_finished_on_send
+
+        assert agent._do_submit_result(_make_task_ctx(), None, "OK") is True
+
     def test_timeout_logs_warning_and_returns_true(self):
         """When DOWNLOAD_COMPLETE_CB never fires, a warning is logged and True is returned.
 
-        Subprocess exit is non-fatal even on timeout — the server may still be
+        Subprocess exit is non-fatal even on timeout; the server may still be
         downloading, but blocking forever would hang the entire training job.
         """
         pipe = _make_cell_pipe(pass_through_on_send=True)
@@ -241,7 +525,7 @@ class TestDoSubmitResultGating:
         assert result is False
 
     def test_pass_through_false_uses_plain_send(self):
-        """pass_through_on_send=False → plain send_to_peer() without event gating."""
+        """pass_through_on_send=False uses plain send_to_peer() without event gating."""
         pipe = _make_cell_pipe(pass_through_on_send=False)
         agent = _make_agent(pipe)
         self._patch_shareable(agent)
@@ -257,7 +541,7 @@ class TestDoSubmitResultGating:
             ), "DOWNLOAD_COMPLETE_CB must not be set when pass_through_on_send=False"
 
     def test_non_cell_pipe_uses_plain_send(self):
-        """Non-CellPipe (e.g. FilePipe) → plain send_to_peer(), no gating.
+        """Non-CellPipe (e.g. FilePipe) uses plain send_to_peer(), no gating.
 
         FilePipe has no cell attribute; the code must not attempt to access
         pipe.cell.update_fobs_context.  We verify by confirming the result is
@@ -302,7 +586,7 @@ class TestDoSubmitResultGating:
 
 
 # ---------------------------------------------------------------------------
-# 8-9: via_downloader._create_downloader() — DOWNLOAD_COMPLETE_CB wiring
+# via_downloader._create_downloader() DOWNLOAD_COMPLETE_CB wiring
 # ---------------------------------------------------------------------------
 
 
@@ -321,7 +605,7 @@ class TestCreateDownloaderCallback:
         return ctx
 
     def _make_decomposer(self):
-        """Return a NumpyArrayDecomposer — the simplest concrete ViaDownloaderDecomposer."""
+        """Return the simplest concrete ViaDownloaderDecomposer used in these tests."""
         from nvflare.app_common.decomposers.numpy_decomposers import NumpyArrayDecomposer
 
         return NumpyArrayDecomposer()
@@ -359,8 +643,8 @@ class TestCreateDownloaderCallback:
         import nvflare.fuel.utils.fobs.decomposers.via_downloader as vd
 
         assert not hasattr(vd, "_on_tx_done"), (
-            "_on_tx_done must be removed; GC via transaction_done_cb was discarded "
-            "(Fix 4 already frees base_obj synchronously)"
+            "_on_tx_done must remain absent; object cleanup is handled synchronously "
+            "and transaction completion belongs to DownloadService"
         )
 
 
@@ -388,12 +672,12 @@ class TestClientConfigDownloadCompleteTimeout:
 
 
 # ---------------------------------------------------------------------------
-# M-new: ClientConfig.get_max_resends() — negative value clamping
+# ClientConfig.get_max_resends() negative value clamping
 # ---------------------------------------------------------------------------
 
 
 class TestClientConfigMaxResends:
-    """M-new fix: get_max_resends() must clamp negative values to 0 with a warning.
+    """get_max_resends() clamps negative values to 0 with a warning.
 
     A negative max_resends (e.g. a typo of -1 in YAML) would otherwise behave
     like max_resends=0 silently, causing send_to_peer() to abort after the first
@@ -415,14 +699,14 @@ class TestClientConfigMaxResends:
         assert cfg.get_max_resends() == 0
 
     def test_none_returns_none(self):
-        """max_resends=None means unlimited retries — returned as None."""
+        """max_resends=None means unlimited retries and is returned as None."""
         from nvflare.client.config import ClientConfig, ConfigKey
 
         cfg = ClientConfig(config={ConfigKey.TASK_EXCHANGE: {ConfigKey.MAX_RESENDS: None}})
         assert cfg.get_max_resends() is None
 
     def test_negative_clamped_to_zero(self):
-        """Negative max_resends is clamped to 0 (M-new fix)."""
+        """Negative max_resends is clamped to 0."""
         from nvflare.client.config import ClientConfig, ConfigKey
 
         cfg = ClientConfig(config={ConfigKey.TASK_EXCHANGE: {ConfigKey.MAX_RESENDS: -1}})
@@ -430,7 +714,7 @@ class TestClientConfigMaxResends:
         assert result == 0, f"Expected 0 for max_resends=-1, got {result}"
 
     def test_negative_clamped_logs_warning(self):
-        """Negative max_resends logs a warning so the user knows it was corrected (M-new fix)."""
+        """Negative max_resends logs a warning so the user knows it was corrected."""
         from nvflare.client.config import ClientConfig, ConfigKey
 
         cfg = ClientConfig(config={ConfigKey.TASK_EXCHANGE: {ConfigKey.MAX_RESENDS: -3}})
@@ -449,17 +733,12 @@ class TestClientConfigMaxResends:
 
 
 # ---------------------------------------------------------------------------
-# L11: status-based download logging (FINISHED→info, TIMEOUT/DELETED→warning)
+# Status-based download logging
 # ---------------------------------------------------------------------------
 
 
 class TestDownloadStatusLogging:
-    """L11 fix: _do_submit_result() logs info for FINISHED, warning for TIMEOUT/DELETED.
-
-    Before L11 fix, the lambda ignored status and line 376 always logged
-    "server download complete" — misleading when the transaction timed out.
-    After fix, status is captured and the log level matches the outcome.
-    """
+    """_do_submit_result() logs info for FINISHED and warning for terminal failures."""
 
     def _patch_shareable(self, agent):
         agent.task_result_to_shareable = MagicMock(return_value=MagicMock())
@@ -494,7 +773,7 @@ class TestDownloadStatusLogging:
         return agent
 
     def test_finished_logs_info(self):
-        """FINISHED status → logger.info called (not warning)."""
+        """FINISHED status logs info, not a download warning."""
         from nvflare.fuel.f3.streaming.download_service import TransactionDoneStatus
 
         agent = self._run_with_status(TransactionDoneStatus.FINISHED)
@@ -505,7 +784,7 @@ class TestDownloadStatusLogging:
             assert "download transaction" not in msg, f"FINISHED must not trigger download warning: {msg}"
 
     def test_timeout_logs_warning(self):
-        """TIMEOUT status → logger.warning called with status in message."""
+        """TIMEOUT status logs warning with status in the message."""
         from nvflare.fuel.f3.streaming.download_service import TransactionDoneStatus
 
         agent = self._run_with_status(TransactionDoneStatus.TIMEOUT)
@@ -517,7 +796,7 @@ class TestDownloadStatusLogging:
         ), f"Warning must include status={TransactionDoneStatus.TIMEOUT!r}. Got: {msgs}"
 
     def test_deleted_logs_warning(self):
-        """DELETED status → logger.warning called with status in message."""
+        """DELETED status logs warning with status in the message."""
         from nvflare.fuel.f3.streaming.download_service import TransactionDoneStatus
 
         agent = self._run_with_status(TransactionDoneStatus.DELETED)
@@ -529,18 +808,12 @@ class TestDownloadStatusLogging:
 
 
 # ---------------------------------------------------------------------------
-# H3 + L12: FlareAgentWithCellPipe default values
+# FlareAgentWithCellPipe default values
 # ---------------------------------------------------------------------------
 
 
 class TestFlareAgentWithCellPipeDefaults:
-    """H3 + L12: FlareAgentWithCellPipe must have aligned defaults and forward
-    download_complete_timeout to the base class.
-
-    Before H3/L12: submit_result_timeout=30.0 and heartbeat_timeout=30.0 diverged
-    silently from FlareAgent base (both 60.0). download_complete_timeout was missing
-    entirely — users of this convenience class could not override it.
-    """
+    """FlareAgentWithCellPipe forwards timeout defaults to the base class."""
 
     def _make_cellpipe_cls(self):
         """Patch CellPipe so FlareAgentWithCellPipe.__init__ doesn't open sockets."""
@@ -549,7 +822,7 @@ class TestFlareAgentWithCellPipeDefaults:
         return MagicMock(spec=CellPipe)
 
     def test_submit_result_timeout_default_is_60(self):
-        """submit_result_timeout default must be 60.0 (was 30.0 before H3)."""
+        """submit_result_timeout default must match the base-class default."""
         import inspect
 
         from nvflare.client.flare_agent import FlareAgentWithCellPipe
@@ -561,7 +834,7 @@ class TestFlareAgentWithCellPipeDefaults:
         ), f"submit_result_timeout default must be 60.0 (aligned with FlareAgent base). Got {default}"
 
     def test_heartbeat_timeout_default_is_60(self):
-        """heartbeat_timeout default must be 60.0 (was 30.0 before L12)."""
+        """heartbeat_timeout default must match the base-class default."""
         import inspect
 
         from nvflare.client.flare_agent import FlareAgentWithCellPipe
@@ -571,7 +844,7 @@ class TestFlareAgentWithCellPipeDefaults:
         assert default == 60.0, f"heartbeat_timeout default must be 60.0 (aligned with FlareAgent base). Got {default}"
 
     def test_download_complete_timeout_param_exists(self):
-        """download_complete_timeout parameter must exist with default 1800.0 (H3)."""
+        """download_complete_timeout parameter must exist with default 1800.0."""
         import inspect
 
         from nvflare.client.flare_agent import FlareAgentWithCellPipe
@@ -579,6 +852,6 @@ class TestFlareAgentWithCellPipeDefaults:
         sig = inspect.signature(FlareAgentWithCellPipe.__init__)
         assert (
             "download_complete_timeout" in sig.parameters
-        ), "download_complete_timeout parameter must exist on FlareAgentWithCellPipe (H3 fix)"
+        ), "download_complete_timeout parameter must exist on FlareAgentWithCellPipe"
         default = sig.parameters["download_complete_timeout"].default
         assert default == 1800.0, f"download_complete_timeout default must be 1800.0. Got {default}"

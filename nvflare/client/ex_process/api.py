@@ -198,7 +198,10 @@ class ExProcessClientAPI(APISpec):
 
                     if isinstance(pipe, _CellPipe):
                         pipe.pass_through_on_send = True
+                        pipe.pass_through_on_receive = client_config.get_lazy_forward_receive()
                         self.logger.info("PASS_THROUGH enabled on subprocess CellPipe (reverse path)")
+                        if pipe.pass_through_on_receive:
+                            self.logger.info("PASS_THROUGH enabled on subprocess CellPipe (forward receive path)")
                 metric_pipe, metric_channel_name = None, ""
                 if ConfigKey.METRICS_EXCHANGE in client_config.config:
                     metric_pipe, metric_channel_name = _create_pipe_using_config(
@@ -221,6 +224,7 @@ class ExProcessClientAPI(APISpec):
                     submit_result_timeout=client_config.get_submit_result_timeout(),
                     max_resends=client_config.get_max_resends(),
                     download_complete_timeout=client_config.get_download_complete_timeout(),
+                    streaming_idle_timeout=client_config.get_streaming_idle_timeout(),
                     launch_once=client_config.get_launch_once(),
                     from_nvflare_converter=from_nvflare_converter,
                     to_nvflare_converter=to_nvflare_converter,

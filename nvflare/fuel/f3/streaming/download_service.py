@@ -436,6 +436,25 @@ class DownloadService:
                 tx.transaction_done(TransactionDoneStatus.DELETED)
 
     @classmethod
+    def finalize_transaction_if_finished(cls, transaction_id: str) -> bool:
+        """Finalize a transaction whose receivers have already consumed every object.
+
+        The background monitor normally marks finished transactions, but it only
+        runs periodically.  Callers that are about to tear down a producer can use
+        this to avoid deleting an already-complete transaction during that monitor
+        interval.
+        """
+
+        with cls._tx_lock:
+            tx = cls._tx_table.get(transaction_id)
+            if not tx or not tx.is_finished():
+                return False
+
+            tx.transaction_done(TransactionDoneStatus.FINISHED)
+            cls._delete_tx(tx, tombstone_finished_refs=True)
+            return True
+
+    @classmethod
     def shutdown(cls):
         """Shutdown and clean up resources.
 

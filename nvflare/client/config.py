@@ -55,6 +55,8 @@ class ConfigKey:
     SUBMIT_RESULT_TIMEOUT = "submit_result_timeout"
     MAX_RESENDS = "max_resends"
     DOWNLOAD_COMPLETE_TIMEOUT = "download_complete_timeout"
+    STREAMING_IDLE_TIMEOUT = "streaming_idle_timeout"
+    LAZY_FORWARD_RECEIVE = "lazy_forward_receive"
     LAUNCH_ONCE = "launch_once"
 
 
@@ -133,6 +135,16 @@ class ClientConfig:
         self.config = config
         self.logger = get_obj_logger(self)
 
+    @staticmethod
+    def _get_bool(value, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "y", "on")
+        return bool(value)
+
     def get_config(self) -> Dict:
         return self.config
 
@@ -193,7 +205,7 @@ class ClientConfig:
         False → subprocess handles one round; must os._exit() after download so the deferred-stop
                 poller on the CJ side unblocks (default, preserves original behaviour).
         """
-        return bool(self.config.get(ConfigKey.TASK_EXCHANGE, {}).get(ConfigKey.LAUNCH_ONCE, False))
+        return self._get_bool(self.config.get(ConfigKey.TASK_EXCHANGE, {}).get(ConfigKey.LAUNCH_ONCE), False)
 
     def get_download_complete_timeout(self) -> float:
         """Return timeout (seconds) for subprocess to wait for the server to finish downloading its result.
@@ -203,6 +215,16 @@ class ClientConfig:
         the download completes.  Defaults to 1800 s (30 min) for large-model transfers.
         """
         return float(self.config.get(ConfigKey.TASK_EXCHANGE, {}).get(ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT, 1800.0))
+
+    def get_streaming_idle_timeout(self) -> float:
+        """Return the inactivity timeout for streamed object transfers."""
+
+        return float(self.config.get(ConfigKey.TASK_EXCHANGE, {}).get(ConfigKey.STREAMING_IDLE_TIMEOUT, 600.0))
+
+    def get_lazy_forward_receive(self) -> bool:
+        """Return whether the subprocess task pipe should ACK before materializing streamed task payloads."""
+
+        return self._get_bool(self.config.get(ConfigKey.TASK_EXCHANGE, {}).get(ConfigKey.LAZY_FORWARD_RECEIVE), True)
 
     def get_submit_result_timeout(self) -> float:
         """Return the timeout (seconds) for the subprocess to wait for CJ to ACK a result message.

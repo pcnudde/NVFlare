@@ -16,6 +16,7 @@ import logging
 import os
 from typing import Optional
 
+from nvflare.apis.fl_constant import ConfigVarName
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.shareable import Shareable
 from nvflare.app_common.app_constant import AppConstants
@@ -24,7 +25,7 @@ from nvflare.app_common.utils.export_utils import update_export_props
 from nvflare.client.config import ConfigKey, ExchangeFormat, TransferType, write_config_to_file
 from nvflare.client.constants import CLIENT_API_CONFIG, EXTERNAL_PRE_INIT_TIMEOUT, PEER_READ_TIMEOUT
 from nvflare.fuel.utils.attributes_exportable import ExportMode
-from nvflare.fuel.utils.fobs.decomposers.via_downloader import MIN_DOWNLOAD_TIMEOUT_DEFAULT
+from nvflare.fuel.utils.fobs.decomposers.via_downloader import get_effective_download_timeouts
 from nvflare.utils.configs import get_client_config_value
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         submit_result_timeout: float = 300.0,
         max_resends: int = 3,
         download_complete_timeout: float = 1800.0,
+        streaming_idle_timeout: float = 600.0,
     ) -> None:
         """Initializes the ClientAPILauncherExecutor.
 
@@ -105,6 +107,8 @@ class ClientAPILauncherExecutor(LauncherExecutor):
                 this gate, the subprocess may exit before the download completes and the server gets
                 "no ref found".  Defaults to 1800 s.  Configurable via
                 recipe.add_client_config({"download_complete_timeout": N}).
+            streaming_idle_timeout (float): Inactivity timeout for streamed object transfers. The subprocess uses
+                this as the reverse DownloadService transaction timeout when transaction metadata is available.
         """
         LauncherExecutor.__init__(
             self,
@@ -137,12 +141,12 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         self._submit_result_timeout = submit_result_timeout
         self._max_resends = max_resends
         self._download_complete_timeout = download_complete_timeout
+        self._streaming_idle_timeout = streaming_idle_timeout
         self._cj_round_count = 0
 
-        # Allow the subprocess to exit naturally after Fix 16's download_done.wait()
-        # before stop_task() sends SIGTERM.  Without this, _finalize_external_execution()
-        # kills the subprocess immediately, tearing down its cell connection before the
-        # server can download tensors from it ("no path" / deadlock).
+        # Allow the subprocess to exit naturally after its reverse transfer wait
+        # before stop_task() sends SIGTERM. Without this, _finalize_external_execution()
+        # can tear down its cell connection while the server is still downloading tensors.
         self._stop_task_wait_timeout = download_complete_timeout
         self._cell_with_pass_through = None  # track cell so finalize() can clean up
         self._pass_through_channel = None  # channel name registered in decode_pass_through_channels
@@ -171,7 +175,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
             if not get_cell_fn:
                 self.log_warning(
                     fl_ctx,
-                    "engine.get_cell() is not available — receiver-side PASS_THROUGH "
+                    "engine.get_cell() is not available; receiver-side PASS_THROUGH "
                     "cannot be enabled. Tensors will be fully materialised inside the CJ "
                     "instead of being downloaded directly by the subprocess.",
                 )
@@ -180,7 +184,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
                 if cell is None:
                     self.log_warning(
                         fl_ctx,
-                        "engine.get_cell() returned None — receiver-side PASS_THROUGH "
+                        "engine.get_cell() returned None; receiver-side PASS_THROUGH "
                         "cannot be enabled. Tensors will be fully materialised inside the CJ "
                         "instead of being downloaded directly by the subprocess.",
                     )
@@ -231,7 +235,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         """Return the config-var prefix for the active decomposer type.
 
         The prefix must match what the ViaDownloaderDecomposer subclass uses
-        (e.g. NumpyArrayDecomposer → "np_") so that _validate_timeout_config()
+        (e.g. NumpyArrayDecomposer -> "np_") so that _validate_timeout_config()
         reads the same job-config keys as the download infrastructure.
 
         Framework-specific subclasses (e.g. PTClientAPILauncherExecutor) should
@@ -258,6 +262,11 @@ class ClientAPILauncherExecutor(LauncherExecutor):
             self.log_error(fl_ctx, msg)
             raise ValueError(msg)
 
+        if self._streaming_idle_timeout is None or self._streaming_idle_timeout <= 0:
+            msg = f"streaming_idle_timeout must be positive, got {self._streaming_idle_timeout}"
+            self.log_error(fl_ctx, msg)
+            raise ValueError(msg)
+
     def _validate_timeout_config(self, fl_ctx: FLContext):
         """Validate timeout parameters at job start.
 
@@ -267,8 +276,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         the first download attempt.
         """
         try:
-            import nvflare.fuel.utils.app_config_utils as acu
-            from nvflare.apis.fl_constant import ConfigVarName, SystemConfigs
+            from nvflare.apis.fl_constant import SystemConfigs
             from nvflare.fuel.utils.config_service import ConfigService
         except ImportError as e:
             self.log_warning(fl_ctx, f"_validate_timeout_config skipped: {e}")
@@ -277,35 +285,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
         prefix = self._decomposer_prefix()
         per_req_key = f"{prefix}{ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT}"
         configured_per_req = ConfigService.get_float_var(per_req_key, conf=SystemConfigs.APPLICATION_CONF, default=None)
-        per_req = acu.get_positive_float_var(per_req_key, 600.0)
-        min_dl = acu.get_positive_float_var(
-            f"{prefix}{ConfigVarName.MIN_DOWNLOAD_TIMEOUT}", MIN_DOWNLOAD_TIMEOUT_DEFAULT
-        )
-
-        if min_dl < per_req:
-            self.log_warning(
-                fl_ctx,
-                f"Timeout inconsistency: {prefix}min_download_timeout ({min_dl}s) < "
-                f"{prefix}streaming_per_request_timeout ({per_req}s). "
-                f"Transactions may be killed mid-download. "
-                f"Set {prefix}min_download_timeout >= {per_req}s in job config.",
-            )
-
-        if configured_per_req is not None and self.peer_read_timeout is None:
-            self.log_warning(
-                fl_ctx,
-                "Timeout inconsistency: peer_read_timeout is not set after applying job-config overrides. "
-                "Large task payloads may fall back to a shorter pipe default and resend while the subprocess is "
-                f"still downloading. Set peer_read_timeout >= {per_req}s in job config.",
-            )
-        elif configured_per_req is not None and self.peer_read_timeout < per_req:
-            self.log_warning(
-                fl_ctx,
-                f"Timeout inconsistency: peer_read_timeout ({self.peer_read_timeout}s, after job-config overrides) < "
-                f"{prefix}streaming_per_request_timeout ({per_req}s). "
-                "The CJ may resend the task while the subprocess is still downloading large payloads. "
-                f"Set peer_read_timeout >= {per_req}s in job config.",
-            )
+        per_req, min_dl = get_effective_download_timeouts(prefix)
 
         if configured_per_req is not None and self._download_complete_timeout < per_req:
             self.log_warning(
@@ -321,8 +301,8 @@ class ClientAPILauncherExecutor(LauncherExecutor):
                 fl_ctx,
                 f"Timeout inconsistency: submit_result_timeout ({self._submit_result_timeout}s) > "
                 f"{prefix}min_download_timeout ({min_dl}s). "
-                f"Each send attempt may expire the download transaction before the next retry. "
-                f"Fix: set {prefix}min_download_timeout >= {self._submit_result_timeout}s in job config "
+                "Each send attempt may expire the download transaction before the next retry. "
+                f"Set {prefix}min_download_timeout >= {self._submit_result_timeout}s in job config "
                 f'(e.g. recipe.add_client_config({{"{prefix}min_download_timeout": {int(self._submit_result_timeout)}}})).',
             )
 
@@ -342,7 +322,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
 
         Mirrors the subprocess-side cleanup in APISpec._maybe_cleanup_memory().
         Runs at the point the client job process has finished relaying the
-        subprocess result to the server — the result Shareable and any tensors
+        subprocess result to the server; the result Shareable and any tensors
         it referenced are no longer needed, making this the right moment to
         force a GC cycle.
         """
@@ -370,8 +350,25 @@ class ClientAPILauncherExecutor(LauncherExecutor):
             return False  # safe default: treat as per-round (direct os._exit path)
         return not launcher.needs_deferred_stop()
 
+    def _resolve_streaming_idle_timeout(self, fl_ctx: FLContext) -> float:
+        configured = get_client_config_value(fl_ctx, ConfigVarName.STREAMING_IDLE_TIMEOUT)
+        if configured is None:
+            return float(self._streaming_idle_timeout)
+
+        value = float(configured)
+        if value <= 0:
+            self.log_error(fl_ctx, f"Invalid streaming_idle_timeout: {value}s (must be positive)")
+            raise ValueError(f"streaming_idle_timeout must be positive, got {value}")
+        self.log_info(
+            fl_ctx,
+            f"Overriding streaming_idle_timeout from config: {self._streaming_idle_timeout}s -> {value}s",
+        )
+        self._streaming_idle_timeout = value
+        return value
+
     def prepare_config_for_launch(self, fl_ctx: FLContext):
         self._validate_required_timeout_values(fl_ctx)
+        streaming_idle_timeout = self._resolve_streaming_idle_timeout(fl_ctx)
 
         pipe_export_class, pipe_export_args = self.pipe.export(ExportMode.PEER)
         task_exchange_attributes = {
@@ -393,6 +390,7 @@ class ClientAPILauncherExecutor(LauncherExecutor):
             ConfigKey.SUBMIT_RESULT_TIMEOUT: self._submit_result_timeout,
             ConfigKey.MAX_RESENDS: self._max_resends,
             ConfigKey.DOWNLOAD_COMPLETE_TIMEOUT: self._download_complete_timeout,
+            ConfigKey.STREAMING_IDLE_TIMEOUT: streaming_idle_timeout,
             ConfigKey.LAUNCH_ONCE: self._resolve_launch_once(fl_ctx),
         }
 

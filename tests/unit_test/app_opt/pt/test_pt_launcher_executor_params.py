@@ -12,64 +12,64 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for H2 fix: PTClientAPILauncherExecutor must accept and forward
-submit_result_timeout, max_resends, and download_complete_timeout.
-
-Before H2 fix, these three parameters were not in the PT subclass signature.
-Users configuring the PT executor in JSON/YAML could not set them — the base
-class defaults always won silently.
-"""
+"""Tests for PTClientAPILauncherExecutor timeout/resend parameters."""
 
 import inspect
 
 
 class TestPTClientAPILauncherExecutorParams:
-    """H2 fix: PTClientAPILauncherExecutor must expose and forward new timeout params."""
+    """PTClientAPILauncherExecutor must expose and forward timeout/resend params."""
 
     def test_submit_result_timeout_param_exists(self):
-        """submit_result_timeout must be in PTClientAPILauncherExecutor signature (H2)."""
+        """submit_result_timeout must be in PTClientAPILauncherExecutor signature."""
         from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
 
         sig = inspect.signature(PTClientAPILauncherExecutor.__init__)
-        assert (
-            "submit_result_timeout" in sig.parameters
-        ), "submit_result_timeout must be a parameter of PTClientAPILauncherExecutor (H2 fix)"
+        assert "submit_result_timeout" in sig.parameters
 
     def test_max_resends_param_exists(self):
-        """max_resends must be in PTClientAPILauncherExecutor signature (H2)."""
+        """max_resends must be in PTClientAPILauncherExecutor signature."""
         from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
 
         sig = inspect.signature(PTClientAPILauncherExecutor.__init__)
-        assert (
-            "max_resends" in sig.parameters
-        ), "max_resends must be a parameter of PTClientAPILauncherExecutor (H2 fix)"
+        assert "max_resends" in sig.parameters
 
     def test_download_complete_timeout_param_exists(self):
-        """download_complete_timeout must be in PTClientAPILauncherExecutor signature (H2)."""
+        """download_complete_timeout must be in PTClientAPILauncherExecutor signature."""
         from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
 
         sig = inspect.signature(PTClientAPILauncherExecutor.__init__)
-        assert (
-            "download_complete_timeout" in sig.parameters
-        ), "download_complete_timeout must be a parameter of PTClientAPILauncherExecutor (H2 fix)"
+        assert "download_complete_timeout" in sig.parameters
+
+    def test_streaming_idle_timeout_param_exists(self):
+        """streaming_idle_timeout must be in PTClientAPILauncherExecutor signature."""
+        from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
+
+        sig = inspect.signature(PTClientAPILauncherExecutor.__init__)
+        assert "streaming_idle_timeout" in sig.parameters
 
     def test_defaults_match_base_class(self):
-        """Default values for new params must match ClientAPILauncherExecutor defaults (H2)."""
+        """Default values for new params must match ClientAPILauncherExecutor defaults."""
         from nvflare.app_common.executors.client_api_launcher_executor import ClientAPILauncherExecutor
         from nvflare.app_opt.pt.client_api_launcher_executor import PTClientAPILauncherExecutor
 
         base_sig = inspect.signature(ClientAPILauncherExecutor.__init__)
         pt_sig = inspect.signature(PTClientAPILauncherExecutor.__init__)
 
-        for param_name in ("submit_result_timeout", "max_resends", "download_complete_timeout"):
+        for param_name in (
+            "submit_result_timeout",
+            "max_resends",
+            "download_complete_timeout",
+            "streaming_idle_timeout",
+        ):
             base_default = base_sig.parameters[param_name].default
             pt_default = pt_sig.parameters[param_name].default
             assert (
                 pt_default == base_default
-            ), f"{param_name}: PT default {pt_default!r} must match base default {base_default!r} (H2 fix)"
+            ), f"{param_name}: PT default {pt_default!r} must match base default {base_default!r}"
 
     def test_new_params_forwarded_to_base(self):
-        """submit_result_timeout/max_resends/download_complete_timeout are forwarded to base __init__ (H2).
+        """Timeout/resend params are forwarded to base __init__.
 
         Verifies by patching ClientAPILauncherExecutor.__init__ and checking
         the kwargs it receives.
@@ -94,12 +94,10 @@ class TestPTClientAPILauncherExecutorParams:
                 submit_result_timeout=999.0,
                 max_resends=7,
                 download_complete_timeout=3600.0,
+                streaming_idle_timeout=777.0,
             )
 
-        assert (
-            received_kwargs.get("submit_result_timeout") == 999.0
-        ), "submit_result_timeout must be forwarded to base __init__ (H2 fix)"
-        assert received_kwargs.get("max_resends") == 7, "max_resends must be forwarded to base __init__ (H2 fix)"
-        assert (
-            received_kwargs.get("download_complete_timeout") == 3600.0
-        ), "download_complete_timeout must be forwarded to base __init__ (H2 fix)"
+        assert received_kwargs.get("submit_result_timeout") == 999.0
+        assert received_kwargs.get("max_resends") == 7
+        assert received_kwargs.get("download_complete_timeout") == 3600.0
+        assert received_kwargs.get("streaming_idle_timeout") == 777.0

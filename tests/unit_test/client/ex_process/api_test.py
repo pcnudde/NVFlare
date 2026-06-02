@@ -88,11 +88,6 @@ def test_create_params_converters_skips_when_server_expected_format_is_not_numpy
     assert to_converter is None
 
 
-# ---------------------------------------------------------------------------
-# Fix 3: ClientConfig.get_submit_result_timeout() and ExProcessClientAPI wiring
-# ---------------------------------------------------------------------------
-
-
 def test_get_submit_result_timeout_default():
     """When SUBMIT_RESULT_TIMEOUT is absent, default must be 300.0."""
     config = ClientConfig({ConfigKey.TASK_EXCHANGE: {}})
@@ -119,6 +114,36 @@ def test_get_submit_result_timeout_absent_section():
     assert config.get_submit_result_timeout() == 300.0
 
 
+def test_get_streaming_idle_timeout_default():
+    config = ClientConfig({ConfigKey.TASK_EXCHANGE: {}})
+    assert config.get_streaming_idle_timeout() == 600.0
+
+
+def test_get_streaming_idle_timeout_explicit():
+    config = ClientConfig({ConfigKey.TASK_EXCHANGE: {ConfigKey.STREAMING_IDLE_TIMEOUT: 777}})
+    assert config.get_streaming_idle_timeout() == 777.0
+
+
+def test_get_lazy_forward_receive_default():
+    config = ClientConfig({ConfigKey.TASK_EXCHANGE: {}})
+    assert config.get_lazy_forward_receive() is True
+
+
+def test_get_lazy_forward_receive_explicit_false():
+    config = ClientConfig({ConfigKey.TASK_EXCHANGE: {ConfigKey.LAZY_FORWARD_RECEIVE: False}})
+    assert config.get_lazy_forward_receive() is False
+
+
+def test_get_lazy_forward_receive_string_false():
+    config = ClientConfig({ConfigKey.TASK_EXCHANGE: {ConfigKey.LAZY_FORWARD_RECEIVE: "false"}})
+    assert config.get_lazy_forward_receive() is False
+
+
+def test_get_launch_once_string_false():
+    config = ClientConfig({ConfigKey.TASK_EXCHANGE: {ConfigKey.LAUNCH_ONCE: "false"}})
+    assert config.get_launch_once() is False
+
+
 def test_ex_process_api_passes_submit_result_timeout_to_agent(monkeypatch):
     """ExProcessClientAPI.init() must pass submit_result_timeout from config to FlareAgentWithFLModel."""
     from unittest.mock import MagicMock
@@ -136,6 +161,7 @@ def test_ex_process_api_passes_submit_result_timeout_to_agent(monkeypatch):
                 ConfigKey.SUBMIT_MODEL_TASK_NAME: "submit_model",
                 ConfigKey.HEARTBEAT_TIMEOUT: 60,
                 ConfigKey.SUBMIT_RESULT_TIMEOUT: 999.0,
+                ConfigKey.STREAMING_IDLE_TIMEOUT: 777.0,
             }
         }
     )
@@ -177,6 +203,51 @@ def test_ex_process_api_passes_submit_result_timeout_to_agent(monkeypatch):
 
     assert "submit_result_timeout" in captured_kwargs, "submit_result_timeout was not passed to FlareAgentWithFLModel"
     assert captured_kwargs["submit_result_timeout"] == 999.0
+    assert captured_kwargs["streaming_idle_timeout"] == 777.0
+
+
+def test_ex_process_api_enables_forward_receive_pass_through_on_task_cell_pipe(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from nvflare.client.ex_process.api import ExProcessClientAPI
+    from nvflare.fuel.utils.pipe.cell_pipe import CellPipe
+
+    fake_config = ClientConfig(
+        {
+            ConfigKey.TASK_EXCHANGE: {
+                ConfigKey.EXCHANGE_FORMAT: ExchangeFormat.NUMPY,
+                ConfigKey.SERVER_EXPECTED_FORMAT: ExchangeFormat.NUMPY,
+                ConfigKey.TRAIN_TASK_NAME: "train",
+                ConfigKey.EVAL_TASK_NAME: "validate",
+                ConfigKey.SUBMIT_MODEL_TASK_NAME: "submit_model",
+                ConfigKey.LAZY_FORWARD_RECEIVE: True,
+            }
+        }
+    )
+    task_pipe = object.__new__(CellPipe)
+
+    class _CapturingAgent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr("nvflare.client.ex_process.api._create_client_config", lambda config: fake_config)
+    monkeypatch.setattr(
+        "nvflare.client.ex_process.api._create_pipe_using_config",
+        lambda client_config, section: (task_pipe, "task"),
+    )
+    monkeypatch.setattr("nvflare.client.ex_process.api.FlareAgentWithFLModel", _CapturingAgent)
+    monkeypatch.setattr("nvflare.client.ex_process.api.create_default_params_converters", lambda **kwargs: (None, None))
+    monkeypatch.setattr("nvflare.client.ex_process.api.ModelRegistry", lambda *args, **kwargs: MagicMock())
+
+    api = ExProcessClientAPI(config_file="fake_config.json")
+    api._configure_subprocess_logging = lambda client_config: None
+    api.init(rank="0")
+
+    assert task_pipe.pass_through_on_send is True
+    assert task_pipe.pass_through_on_receive is True
 
 
 # ── _downgrade_rotating_handlers tests ────────────────────────────────────────

@@ -53,6 +53,7 @@ class PTClientAPILauncherExecutor(ClientAPILauncherExecutor):
         submit_result_timeout: float = 300.0,
         max_resends: int = 3,
         download_complete_timeout: float = 1800.0,
+        streaming_idle_timeout: float = 600.0,
     ) -> None:
         ClientAPILauncherExecutor.__init__(
             self,
@@ -83,6 +84,7 @@ class PTClientAPILauncherExecutor(ClientAPILauncherExecutor):
             submit_result_timeout=submit_result_timeout,
             max_resends=max_resends,
             download_complete_timeout=download_complete_timeout,
+            streaming_idle_timeout=streaming_idle_timeout,
         )
 
     def _decomposer_prefix(self) -> str:

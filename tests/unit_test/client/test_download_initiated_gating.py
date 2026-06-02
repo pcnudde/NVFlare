@@ -12,19 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for Bug 3 fix: thread-local download-initiation detection.
+"""Unit tests for thread-local download transaction detection.
 
-Root cause: FlareAgent._do_submit_result() unconditionally waits 1800s for
-DOWNLOAD_COMPLETE_CB after every result send when pass_through_on_send=True.
 For validate results (metrics only, no tensors), _finalize_download_tx() finds
-no downloadable objects and creates no download transaction — DOWNLOAD_COMPLETE_CB
-never fires — subprocess blocks for 1800s.
-
-Fix: Use thread-local was_download_initiated() / clear_download_initiated() in
-via_downloader.py.  _finalize_download_tx() sets _tls.download_initiated=True
-only when downloadable objects exist.  FlareAgent checks this flag after
-send_to_peer() returns (synchronous, same thread) and returns immediately if
-False (no download transaction created — validate result).
+no downloadable objects and creates no download transaction. DOWNLOAD_COMPLETE_CB
+never fires in that path, so FlareAgent must skip the reverse-transfer wait.
+Thread-local state lets _do_submit_result() distinguish that path from tensor
+results without cross-thread interference.
 
 Why thread-local: task pipe and metric pipe share the same CoreCell
 (same FQCN -> same _CellInfo cache), so a plain fobs_ctx flag could be clobbered
@@ -36,8 +30,8 @@ Tests verify:
   3. clear_download_initiated() resets the flag -> was_download_initiated() returns False.
   4. Thread isolation: another thread setting _tls.download_initiated=True does NOT
      affect the main thread's was_download_initiated().
-  5. FlareAgent: was_download_initiated()=False -> returns immediately (validate path).
-  6. FlareAgent: was_download_initiated()=True -> waits for DOWNLOAD_COMPLETE_CB (train path).
+  5. FlareAgent: was_download_initiated()=False -> returns immediately.
+  6. FlareAgent: was_download_initiated()=True -> waits for DOWNLOAD_COMPLETE_CB.
   7. clear_download_initiated() called before send_to_peer() in FlareAgent.
 """
 
@@ -48,11 +42,18 @@ import pytest
 
 from nvflare.client.flare_agent import FlareAgent, _TaskContext
 from nvflare.fuel.utils.fobs import FOBSContextKey
-from nvflare.fuel.utils.fobs.decomposers.via_downloader import _tls, clear_download_initiated, was_download_initiated
+from nvflare.fuel.utils.fobs.decomposers.via_downloader import (
+    DownloadTransactionInfo,
+    _tls,
+    clear_download_initiated,
+    clear_download_transactions,
+    get_download_transactions,
+    was_download_initiated,
+)
 
 # ---------------------------------------------------------------------------
 # Prevent os._exit() from killing the pytest worker (same reason as in
-# test_download_complete_gating.py — _do_submit_result() calls os._exit(0)
+# test_download_complete_gating.py because _do_submit_result() calls os._exit(0)
 # for launch_once=False after the download gate).
 # ---------------------------------------------------------------------------
 
@@ -72,6 +73,7 @@ def _make_cell_pipe(pass_through_on_send=True):
 
     pipe = MagicMock(spec=CellPipe)
     pipe.pass_through_on_send = pass_through_on_send
+    pipe.closed = False
     pipe.cell = MagicMock()
     return pipe
 
@@ -90,6 +92,7 @@ def _make_agent(pipe, download_complete_timeout=5.0):
     agent._launch_once = False  # direct os._exit(0) path; patched to no-op by _no_os_exit fixture
     agent.pipe_handler = MagicMock()
     agent.pipe_handler.send_to_peer.return_value = True
+    agent.pipe_handler.asked_to_stop = False
     return agent
 
 
@@ -108,6 +111,7 @@ class TestThreadLocal:
     def setup_method(self):
         # Ensure clean state before each test
         clear_download_initiated()
+        clear_download_transactions()
 
     def test_default_is_false(self):
         """was_download_initiated() returns False when never set."""
@@ -125,11 +129,20 @@ class TestThreadLocal:
         clear_download_initiated()
         assert was_download_initiated() is False
 
+    def test_download_transaction_metadata_is_thread_local(self):
+        transaction = DownloadTransactionInfo(tx_id="tx-1", ref_ids=("ref-1",), created_time=1.0)
+        _tls.download_transactions = [transaction]
+
+        assert get_download_transactions() == (transaction,)
+
+        clear_download_transactions()
+        assert get_download_transactions() == ()
+
     def test_thread_isolation(self):
         """Another thread's download_initiated=True does NOT affect the main thread.
 
         This is the core correctness property: task pipe and metric pipe share the
-        same CoreCell — concurrent metric serialisation (different thread) must not
+        same CoreCell; concurrent metric serialisation from a different thread must not
         set the main thread's detection flag.
         """
         clear_download_initiated()  # main thread starts as False
@@ -171,13 +184,14 @@ class TestDoSubmitResultGatingWithThreadLocal:
 
     def setup_method(self):
         clear_download_initiated()
+        clear_download_transactions()
 
     def test_validate_result_returns_immediately(self):
         """validate result (no tensors): was_download_initiated()=False -> returns True immediately.
 
-        Before Bug 3 fix, the subprocess would block for 1800s waiting for a
-        DOWNLOAD_COMPLETE_CB that never fires (no download transaction created).
-        After fix, it returns immediately and the next validate task can be consumed.
+        No download transaction is created for this path, so DOWNLOAD_COMPLETE_CB
+        never fires. The subprocess must return immediately so the next task can
+        be consumed.
         """
         pipe = _make_cell_pipe(pass_through_on_send=True)
         agent = _make_agent(pipe, download_complete_timeout=1800.0)
@@ -194,16 +208,16 @@ class TestDoSubmitResultGatingWithThreadLocal:
         elapsed = time.time() - start
 
         assert result is True
-        # Must return in well under 1s — NOT wait for download_complete_timeout
+        # Must return in well under 1s and not wait for download_complete_timeout.
         assert elapsed < 1.0, (
             f"validate result must return immediately (got {elapsed:.2f}s); "
-            "Bug 3 not fixed: subprocess would hang for 1800s on validate round 2+"
+            "subprocess would otherwise hang waiting for a missing download callback"
         )
 
     def test_train_result_waits_for_download_complete(self):
         """train result (has tensors): was_download_initiated()=True -> waits for DOWNLOAD_COMPLETE_CB.
 
-        The existing gating behaviour (Fix 16) must be preserved for training results.
+        Reverse transfer completion gating must be preserved for tensor results.
         """
         pipe = _make_cell_pipe(pass_through_on_send=True)
         agent = _make_agent(pipe, download_complete_timeout=5.0)

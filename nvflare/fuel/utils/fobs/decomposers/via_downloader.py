@@ -13,8 +13,10 @@
 # limitations under the License.
 import json
 import threading
+import time
 import uuid
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 import nvflare.fuel.utils.app_config_utils as acu
@@ -27,17 +29,25 @@ from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.fobs.datum import Datum, DatumManager, DatumType
 from nvflare.fuel.utils.log_utils import get_obj_logger
 
-MIN_DOWNLOAD_TIMEOUT_DEFAULT = 300  # inactivity timeout between chunk requests; 5 min covers GC pauses
+MIN_DOWNLOAD_TIMEOUT_DEFAULT = 300  # legacy inactivity floor; effective timeout also honors per-request timeout
 _MIN_DOWNLOAD_TIMEOUT = MIN_DOWNLOAD_TIMEOUT_DEFAULT  # backward-compat alias
+STREAMING_PER_REQUEST_TIMEOUT_DEFAULT = 600.0
 
 # Thread-local flag for synchronous download-initiation detection.
 # Task pipe and metric pipe share the same CoreCell (same site_name + token + mode
-# → same FQCN → same _CellInfo cache entry → same core_cell.fobs_ctx).  A plain
+# -> same FQCN -> same _CellInfo cache entry -> same core_cell.fobs_ctx). A plain
 # fobs_ctx flag would be clobbered by concurrent serialisation calls from different
 # threads on the same cell.  Thread-local gives per-thread isolation because
 # _finalize_download_tx() is always called synchronously in the thread that invoked
-# send_to_peer() → encode_payload() → FOBS serialisation.
+# send_to_peer() -> encode_payload() -> FOBS serialisation.
 _tls = threading.local()
+
+
+@dataclass(frozen=True)
+class DownloadTransactionInfo:
+    tx_id: str
+    ref_ids: tuple[str, ...]
+    created_time: float
 
 
 def was_download_initiated() -> bool:
@@ -49,6 +59,47 @@ def was_download_initiated() -> bool:
     Returns False for validate results (metrics only, no tensors).
     """
     return getattr(_tls, "download_initiated", False)
+
+
+def get_download_transactions() -> tuple[DownloadTransactionInfo, ...]:
+    """Return download transactions created by the current thread's most recent encode call."""
+
+    return tuple(getattr(_tls, "download_transactions", ()))
+
+
+def clear_download_transactions() -> None:
+    """Reset thread-local download transaction metadata before a send_to_peer() call."""
+
+    _tls.download_transactions = []
+
+
+def _append_download_transaction(transaction: DownloadTransactionInfo) -> None:
+    transactions = list(getattr(_tls, "download_transactions", ()))
+    transactions.append(transaction)
+    _tls.download_transactions = transactions
+
+
+def get_effective_download_timeouts(config_var_prefix: str) -> tuple[float, float]:
+    """Return (per_request_timeout, transaction_idle_timeout).
+
+    The transaction idle timeout owns transfer liveness, so it must not be
+    shorter than the longest single chunk request. This keeps default timeout
+    behavior internally consistent without requiring users to tune both knobs.
+    """
+
+    per_request_timeout = acu.get_positive_float_var(
+        f"{config_var_prefix}{ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT}",
+        STREAMING_PER_REQUEST_TIMEOUT_DEFAULT,
+    )
+    streaming_idle_timeout = acu.get_positive_float_var(
+        ConfigVarName.STREAMING_IDLE_TIMEOUT,
+        _MIN_DOWNLOAD_TIMEOUT,
+    )
+    min_timeout = acu.get_positive_float_var(
+        f"{config_var_prefix}{ConfigVarName.MIN_DOWNLOAD_TIMEOUT}",
+        streaming_idle_timeout,
+    )
+    return per_request_timeout, max(min_timeout, per_request_timeout)
 
 
 def clear_download_initiated() -> None:
@@ -321,22 +372,16 @@ class ViaDownloaderDecomposer(fobs.Decomposer, ABC):
     def _create_downloader(self, fobs_ctx: dict):
         # Transaction lifecycle is managed solely by _monitor_tx() (download_service.py).
         # We deliberately do NOT subscribe to msg_root deletion here.  The msg_root is
-        # deleted as soon as all blobs are delivered, but blob_cb fires asynchronously —
+        # deleted as soon as all blobs are delivered, but blob_cb fires asynchronously.
         # secondary tensor downloads are still in flight when msg_root is deleted.
         # Subscribing caused a race: delete_transaction() removed refs from _ref_table
         # before blob_cb could finish its _download_from_remote_cell() calls, producing
-        # "no ref found" FATAL_SYSTEM_ERROR (RC12 Bug 1).
+        # "no ref found" FATAL_SYSTEM_ERROR.
         # _monitor_tx() polls is_finished() every 5s and cleans up within 5s of the last
-        # receiver completing all chunk downloads — sufficient for all model sizes.
+        # receiver completing all chunk downloads.
         msg_root_id, msg_root_ttl = self._determine_msg_root(fobs_ctx)
 
-        # Read min_download_timeout from job config so operators can tune
-        # it per-job (e.g. np_min_download_timeout: 600 for a 70B model).
-        # Falls back to the module-level constant (60s) when not set.
-        min_timeout = acu.get_positive_float_var(
-            self._config_var_name(ConfigVarName.MIN_DOWNLOAD_TIMEOUT),
-            _MIN_DOWNLOAD_TIMEOUT,
-        )
+        _, min_timeout = get_effective_download_timeouts(self.config_var_prefix)
 
         if msg_root_ttl:
             timeout = msg_root_ttl
@@ -355,7 +400,7 @@ class ViaDownloaderDecomposer(fobs.Decomposer, ABC):
             num_receivers = num if num else 1
 
             # Optional lifecycle callback set by FlareAgent._do_submit_result()
-            # (subprocess → CJ → server reverse path) so the subprocess can wait
+            # (subprocess -> CJ -> server reverse path) so the subprocess can wait
             # until the server has finished downloading from its DownloadService
             # before exiting.  None when no gating is needed (forward path).
             on_complete_cb = fobs_ctx.get(fobs.FOBSContextKey.DOWNLOAD_COMPLETE_CB)
@@ -438,12 +483,21 @@ class ViaDownloaderDecomposer(fobs.Decomposer, ABC):
 
         if downloadable_objs:
             downloader = self._create_downloader(fobs_ctx)
+            ref_ids = []
             for ref_id, obj in downloadable_objs:
                 self.logger.debug(f"ViaDownloader: adding object to downloader: {ref_id=}")
                 downloader.add_object(obj, ref_id=ref_id)
+                ref_ids.append(ref_id)
+            _append_download_transaction(
+                DownloadTransactionInfo(
+                    tx_id=downloader.tx_id,
+                    ref_ids=tuple(ref_ids),
+                    created_time=time.time(),
+                )
+            )
             # Signal FlareAgent (same thread) that a download transaction was created.
             # Thread-local avoids shared-state races when task pipe and metric pipe
-            # share the same CoreCell (RC12 Bug 3).
+            # share the same CoreCell.
             _tls.download_initiated = True
 
     def _finalize_lazy_batch(self, mgr: DatumManager):
@@ -580,9 +634,7 @@ class ViaDownloaderDecomposer(fobs.Decomposer, ABC):
 
         req_timeout = fobs_ctx.get(fobs.FOBSContextKey.DOWNLOAD_REQ_TIMEOUT, None)
         if not req_timeout:
-            req_timeout = acu.get_positive_float_var(
-                self._config_var_name(ConfigVarName.STREAMING_PER_REQUEST_TIMEOUT), 600.0
-            )
+            req_timeout, _ = get_effective_download_timeouts(self.config_var_prefix)
         self.logger.debug(f"DOWNLOAD_REQ_TIMEOUT={req_timeout}")
 
         abort_signal = fobs_ctx.get(fobs.FOBSContextKey.ABORT_SIGNAL)

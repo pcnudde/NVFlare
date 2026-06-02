@@ -74,11 +74,13 @@ def _make_pipe():
     pipe.hb_seq = 1
     pipe.received_msgs = queue.Queue()
     pipe.pass_through_on_send = False
+    pipe.pass_through_on_receive = False
 
     # Mock the cell so send_request returns a successful reply.
     ok_reply = MagicMock()
     ok_reply.get_header.return_value = ReturnCode.OK
     pipe.cell = MagicMock()
+    pipe.cell.decode_pass_through_channels = set()
     pipe.cell.send_request.return_value = ok_reply
     pipe.cell.fire_and_forget.return_value = None
     return pipe
@@ -223,6 +225,29 @@ class TestHeartbeatNotCached:
 
         pipe.cell.fire_and_forget.assert_called_once()
         pipe.cell.send_request.assert_not_called()
+
+
+class TestReceivePassThrough:
+    def test_open_registers_receive_pass_through_channel(self):
+        pipe = _make_pipe()
+        pipe.pass_through_on_receive = True
+        pipe.ci = MagicMock()
+        pipe.set_cell_cb = MagicMock(side_effect=lambda name: setattr(pipe, "channel", f"cell_pipe.{name}"))
+
+        pipe.open("task")
+
+        assert "cell_pipe.task" in pipe.cell.decode_pass_through_channels
+
+    def test_close_deregisters_receive_pass_through_channel(self):
+        pipe = _make_pipe()
+        pipe.pass_through_on_receive = True
+        pipe.channel = "cell_pipe.task"
+        pipe.cell.decode_pass_through_channels.add(pipe.channel)
+        pipe.ci = MagicMock()
+
+        pipe.close()
+
+        assert "cell_pipe.task" not in pipe.cell.decode_pass_through_channels
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +432,30 @@ class TestReceiveMessageFix6:
         pipe.receive()
         assert len(calls_in_callback) == 1, "_from_cell_message must be called in receive()"
 
+    def test_many_receive_messages_are_acknowledged_before_conversion(self, monkeypatch):
+        pipe = _make_pipe()
+        cell_messages = [_make_cell_message(msg_id=f"m{i}", topic=f"train_{i}") for i in range(16)]
+
+        converted = []
+        original_from_cm = _from_cell_message
+
+        def tracking_from_cm(cell_msg):
+            converted.append(cell_msg)
+            return original_from_cm(cell_msg)
+
+        monkeypatch.setattr("nvflare.fuel.utils.pipe.cell_pipe._from_cell_message", tracking_from_cm)
+
+        replies = [pipe._receive_message(cm) for cm in cell_messages]
+
+        assert all(reply.get_header(MessageHeaderKey.RETURN_CODE) == ReturnCode.OK for reply in replies)
+        assert converted == [], "_receive_message must ACK without converting queued cell messages"
+        assert pipe.received_msgs.qsize() == len(cell_messages)
+
+        received = [pipe.receive() for _ in cell_messages]
+
+        assert converted == cell_messages
+        assert [msg.topic for msg in received] == [f"train_{i}" for i in range(16)]
+
     def test_receive_message_raises_on_fqcn_mismatch(self):
         """_receive_message() must raise when the sender FQCN does not match peer_fqcn."""
         pipe = _make_pipe()
@@ -441,8 +490,8 @@ class TestMsgRootTtlOnReply:
     When the subprocess sends its result back through the CellPipe and PASS_THROUGH
     is enabled on the pipe cell, the server needs to download tensors directly from
     the subprocess.  MSG_ROOT_TTL tells the ViaDownloader how long to keep the
-    transaction alive.  We use float(timeout) = submit_result_timeout as the TTL,
-    matching the value already configurable via Fix 3.
+    transaction alive.  The direct CellPipe fallback uses float(timeout); the
+    reverse PASS_THROUGH path may stamp a data-plane idle timeout on the message.
 
     CONTRACT:
     - REPLY messages WITH a positive timeout → MSG_ROOT_TTL set to float(timeout)
@@ -512,3 +561,15 @@ class TestMsgRootTtlOnReply:
         ttl = cell_msg.get_header(MessageHeaderKey.MSG_ROOT_TTL)
         assert ttl == 42.0
         assert isinstance(ttl, float)
+
+    def test_pass_through_reply_uses_dl_ttl_override(self):
+        """Reverse PASS_THROUGH uses the explicit data-plane idle timeout when present."""
+        pipe = _make_pipe()
+        pipe.pass_through_on_send = True
+        msg = Message.new_reply(topic="train", data="result", req_msg_id="r1")
+        msg._dl_ttl = 777.0
+
+        pipe.send(msg, timeout=42.0)
+
+        cell_msg = self._get_sent_request(pipe)
+        assert cell_msg.get_header(MessageHeaderKey.MSG_ROOT_TTL) == 777.0

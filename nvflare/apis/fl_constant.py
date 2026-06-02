@@ -583,6 +583,10 @@ class ConfigVarName:
     # SJ and CJ: per-msg timeout for streaming
     STREAMING_PER_REQUEST_TIMEOUT = "streaming_per_request_timeout"
 
+    # SJ and CJ: generic inactivity timeout for streamed object transfer.
+    # Advanced decomposer-specific min_download_timeout values may override it.
+    STREAMING_IDLE_TIMEOUT = "streaming_idle_timeout"
+
     # SJ and CJ: chunk size for downloading
     DOWNLOAD_CHUNK_SIZE = "download_chunk_size"
 
