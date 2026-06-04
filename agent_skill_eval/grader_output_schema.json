@@ -1,0 +1,85 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "score",
+    "score_before_caps",
+    "caps_applied",
+    "rubric_breakdown",
+    "summary",
+    "process_observations",
+    "skill_improvement_suggestions",
+    "failures"
+  ],
+  "properties": {
+    "score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "score_before_caps": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "caps_applied": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rubric_breakdown": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "category",
+          "points_awarded",
+          "points_possible",
+          "evidence"
+        ],
+        "properties": {
+          "category": {
+            "type": "string"
+          },
+          "points_awarded": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "points_possible": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evidence": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "string"
+    },
+    "process_observations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "skill_improvement_suggestions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "failures": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    }
+  }
+}
