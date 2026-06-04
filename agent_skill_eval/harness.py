@@ -709,7 +709,12 @@ def collect_baseline_evidence(
 
 
 def runs_job_py(command: list[str]) -> bool:
-    return any(Path(part).name == "job.py" for part in command)
+    if not command:
+        return False
+    executable = Path(command[0]).name
+    if executable == "job.py":
+        return True
+    return executable.startswith("python") and len(command) >= 2 and Path(command[1]).name == "job.py"
 
 
 def collect_nvflare_version_evidence(
@@ -748,7 +753,10 @@ def nvflare_version_command(job_command: list[str]) -> list[str]:
         "import sys\n"
         "try:\n"
         "    import nvflare\n"
-        "    distribution_version = md.version('nvflare')\n"
+        "    try:\n"
+        "        distribution_version = md.version('nvflare')\n"
+        "    except md.PackageNotFoundError:\n"
+        "        distribution_version = None\n"
         "    print(json.dumps({\n"
         "        'nvflare_version': getattr(nvflare, '__version__', None) or distribution_version,\n"
         "        'distribution_version': distribution_version,\n"
@@ -760,7 +768,6 @@ def nvflare_version_command(job_command: list[str]) -> list[str]:
         "        'error': f'{type(e).__name__}: {e}',\n"
         "        'python': sys.executable,\n"
         "    }, sort_keys=True))\n"
-        "    raise\n"
     )
     return [python_executable, "-c", probe]
 
