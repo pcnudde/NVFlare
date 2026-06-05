@@ -19,9 +19,13 @@ my_project/
 Environment:
 
 - Docker image: `nvflare-agent-eval:basic`.
+- Version comparison runs may override this with `nvflare-agent-eval:2.8` or
+  `nvflare-agent-eval:2.9-skills`.
 - Agent timeout: 20 minutes.
 - Python 3.12 with `torch` installed.
-- `nvflare` is not installed in the agent container.
+- NVFlare availability and version are determined by the selected Docker image.
+  If NVFlare is already installed, use that installed package instead of
+  changing the environment version.
 - CPU-only execution must work.
 
 Starting `train.py` contains these functions/classes:
@@ -40,7 +44,9 @@ learnable synthetic dataset. With the starting defaults, `python train.py
 
 ```text
 Convert my centralized training script to federated learning using NVIDIA FLARE
-with 3 clients and 5 rounds. I want to run it in simulation.
+with 3 clients and 5 rounds. I want to run it in simulation. Add job.py as the
+simulation entry point. Install or configure only missing dependencies
+persistently so `python job.py` works in this environment when you are done.
 ```
 
 ## Expected Outcome
@@ -51,7 +57,8 @@ federated simulation.
 A strong solution:
 
 - Adds `job.py` as the executable NVFlare simulation entry point.
-- Adds `client.py` as the NVFlare client training script.
+- Adds or refactors NVFlare client training code. This can be a separate client
+  script or a federated mode in the existing trainer.
 - Uses the NVFlare FedAvg recipe API in `job.py`: `FedAvgRecipe`.
 - Uses a simulation environment in `job.py`: `SimEnv`.
 - Configures 3 simulated clients and 5 federated rounds.
@@ -60,65 +67,61 @@ A strong solution:
   `flare.init()`, `flare.receive()`, and `flare.send()`.
 - Reuses or adapts the starting training functions: `build_loaders`,
   `train_one_epoch`, and `evaluate`.
-- Reports an accuracy metric from `evaluate` during or after federated training,
-  so the result can be compared to the centralized baseline.
+- Reports an accuracy metric above 0.50 from `evaluate` during or after
+  federated training, so the run demonstrates that federated training actually
+  happened.
+- Uses the NVFlare package already installed in the selected Docker image. If
+  NVFlare is missing, installs a persistent dependency without relying on extra
+  `PYTHONPATH` values, temporary source trees, or hidden one-off setup commands.
 
 ## Grading Rubric
 
 Score from 0 to 100.
 
-- FedAvg recipe simulation job, 30 pts: `job.py` imports `FedAvgRecipe`;
-  imports `SimEnv`; constructs `FedAvgRecipe` with `min_clients=3`,
-  `num_rounds=5`, and `SimpleNetwork()` as `model` or `initial_model`;
-  constructs `SimEnv` with `num_clients=3`; calls the recipe execution method
-  with that simulation environment.
-- Client API integration, 30 pts: `client.py` imports `nvflare.client` as
-  `flare`; calls `flare.init()`; calls `flare.receive()` in the federated round
-  loop; loads received parameters into `SimpleNetwork`; performs local PyTorch
-  training; calls `flare.send()` with `flare.FLModel(...)` containing updated
-  model parameters and at least one metric.
-- Training adaptation, 20 pts: The FL client reuses or adapts
-  `StripeDataset`, `build_loaders`, `train_one_epoch`, and `evaluate`; uses
-  `SimpleNetwork` from `model.py`; uses `torch.optim.SGD` and
-  `nn.CrossEntropyLoss` or the same optimizer/loss from the starting script;
-  works on CPU; does not replace the learnable synthetic dataset with random
-  labels.
-- Runtime behavior, 15 pts: `model.py`, `client.py`, and `job.py` parse;
-  `python job.py` runs the configured simulation without uncaught errors; the
-  simulation evidence includes an accuracy metric comparable to the centralized
-  baseline, ideally at least 0.80 after 5 rounds.
-- Dependency declaration, 5 pts: `requirements.txt` declares an `nvflare`
-  dependency compatible with the APIs used.
+- Functional FL job, 70 pts:
+  - `python job.py` runs a simulation successfully, 20 pts.
+  - The simulation is configured for exactly 3 clients and 5 federated rounds,
+    15 pts.
+  - The job performs actual federated training with client-local updates and
+    server-side aggregation, not just centralized training or fake logs, 15 pts.
+  - The FL code uses `SimpleNetwork` from `model.py` and reuses or adapts the
+    starting `StripeDataset`, `build_loaders`, `train_one_epoch`, and
+    `evaluate` logic, 10 pts.
+  - The simulation reports a meaningful accuracy metric above 0.50 during or
+    after federated training, 10 pts.
+- NVFlare API quality, 20 pts:
+  - `job.py` uses the NVFlare FedAvg recipe API with `FedAvgRecipe` and a
+    simulation environment with `SimEnv`, 10 pts.
+  - The FL client code uses the NVFlare Client API with `flare.init()`,
+    `flare.receive()`, and `flare.send()` around local PyTorch training, 10 pts.
+- Usability and environment hygiene, 10 pts:
+  - Adds a clear root-level `job.py`, keeps the code readable and CPU-safe, and
+    does not unnecessarily destroy the starting training script, 5 pts.
+  - Uses the NVFlare version already installed in the selected Docker image, or
+    if NVFlare is missing, installs a persistent dependency without temporary
+    path hacks or hidden setup commands, 5 pts.
 
 ## Score Caps
 
 Apply these caps after assigning the rubric score:
 
-- Max 60 if the client does not use the NVFlare Client API.
-- Max 60 if `job.py` does not use `FedAvgRecipe`.
-- Max 55 if there is no runnable simulation job entry point.
-- Max 50 if `job.py` or `client.py` has syntax errors.
-- Max 75 if the solution does not use `SimpleNetwork` from `model.py`.
-- Max 70 if the simulation is not configured for exactly 3 clients and 5
-  rounds.
+- Max 40 if `python job.py` does not complete.
+- Max 30 if the result is not actually federated.
+- Max 20 for syntax or import errors in core files such as `model.py`, `job.py`,
+  `train.py`, or separate FL client code.
+- Max 80 if the job works but misses either `FedAvgRecipe` or the NVFlare Client
+  API.
+- Max 90 if the job works but changes or reinstalls the selected Docker image's
+  NVFlare version without being asked.
 
 ## Evidence To Collect
 
 Before grading, collect:
 
 ```bash
-python -m py_compile model.py client.py job.py
+python -m py_compile model.py job.py
 timeout 600 python job.py
 ```
 
-## Baseline Evidence To Collect
-
-Before running the agent, collect this from a separate copy of the unmodified
-starting workspace:
-
-```bash
-python train.py --epochs 2
-```
-
-Also inspect `job.py`, `client.py`, `train.py`, and `model.py` when assigning
-partial credit.
+Also inspect `job.py`, `train.py`, `model.py`, and any separate FL client script
+when assigning partial credit.

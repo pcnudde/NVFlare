@@ -1,6 +1,7 @@
 agents:
   - id: codex-5.5-xhigh
     label: codex 5.5 xhigh
+    agent_type: codex
     command:
       - codex
       - exec
@@ -21,6 +22,7 @@ agents:
 
   - id: codex-5.5-low
     label: codex 5.5 low
+    agent_type: codex
     command:
       - codex
       - exec
@@ -41,6 +43,7 @@ agents:
 
   - id: claude-opus-4.8-xhigh
     label: claude opus 4.8 xhigh
+    agent_type: claude
     command:
       - claude
       - -p
@@ -51,18 +54,23 @@ agents:
       - --output-format
       - json
       - --no-session-persistence
+      - --permission-mode
+      - bypassPermissions
+      - --tools
+      - default
       - --dangerously-skip-permissions
 
-  - id: claude-sonnet-4.6-low
-    label: claude sonnet 4.6 low
+  - id: hermes-nemotron-3-ultra
+    label: hermes nemotron 3 ultra
+    agent_type: hermes
     command:
-      - claude
-      - -p
-      - --model
-      - claude-sonnet-4-6
-      - --effort
-      - low
-      - --output-format
-      - json
-      - --no-session-persistence
-      - --dangerously-skip-permissions
+      - bash
+      - -lc
+      - |
+        prompt="$(cat)"
+        exec hermes-nvidia \
+          --model nvidia/nvidia/nemotron-3-ultra \
+          --provider nvidia \
+          --yolo \
+          --ignore-user-config \
+          --oneshot "$prompt"

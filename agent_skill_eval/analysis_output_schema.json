@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "flare_version_used",
+    "achieved_accuracy",
+    "run_summary_bullets",
+    "testcase_improvement_recommendations",
+    "interesting_observations"
+  ],
+  "properties": {
+    "flare_version_used": {
+      "type": "string"
+    },
+    "achieved_accuracy": {
+      "type": "string"
+    },
+    "run_summary_bullets": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "string"
+      }
+    },
+    "testcase_improvement_recommendations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "interesting_observations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,176 @@
+schema_version: agent-skill-model-costs/v1
+currency: USD
+unit: per_1m_tokens
+prefer_reported_cost: true
+source:
+  title: AI Coding Tools - Model Selection Guide - Model Pricing Reference
+  url: https://nvidia.atlassian.net/wiki/spaces/NOVA/pages/3523842427/AI+Coding+Tools+-+Model+Selection+Guide#Model-Pricing-Reference
+  official_cross_check:
+    openai: https://openai.com/api/pricing/
+    anthropic: https://platform.claude.com/docs/en/about-claude/pricing
+    cursor: https://cursor.com/changelog/composer-2-5
+    google_gemini: https://ai.google.dev/gemini-api/docs/pricing
+  note: >
+    Rates are from the Model Pricing Reference table on the source page. Cache
+    creation/read rates are represented separately because agent CLIs may report
+    those token classes independently. The harness prefers CLI-reported cost
+    when available and uses these rates as a fallback.
+
+models:
+  composer-2.5:
+    aliases:
+      - Composer 2.5
+    rates:
+      input_tokens: 0.50
+      output_tokens: 2.50
+      cached_input_tokens: null
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
+
+  composer-2.5-fast:
+    aliases:
+      - Composer 2.5 Fast
+    rates:
+      input_tokens: 3.00
+      output_tokens: 15.00
+      cached_input_tokens: null
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
+
+  gpt-5.5:
+    aliases:
+      - codex-5.5-xhigh
+      - codex-5.5-low
+      - GPT-5.5
+    rates:
+      input_tokens: 5.00
+      output_tokens: 30.00
+      cached_input_tokens: 0.50
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
+
+  gpt-5.5-max-long-context:
+    aliases:
+      - GPT-5.5 MAX long context
+    rates:
+      input_tokens: 10.00
+      output_tokens: 45.00
+      cached_input_tokens: 1.00
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
+
+  gpt-5.5-fast:
+    aliases:
+      - GPT-5.5 Fast
+    rates:
+      input_tokens: 12.50
+      output_tokens: 75.00
+      cached_input_tokens: 1.25
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
+
+  gpt-5.4:
+    aliases:
+      - GPT-5.4
+    rates:
+      input_tokens: 2.50
+      output_tokens: 15.00
+      cached_input_tokens: 0.25
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
+
+  gpt-5.4-mini:
+    aliases:
+      - GPT-5.4-mini
+    rates:
+      input_tokens: 0.75
+      output_tokens: 4.50
+      cached_input_tokens: 0.075
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
+
+  gpt-5.3-codex:
+    aliases:
+      - GPT-5.3-Codex
+      - codex-5.3-codex-spark-low
+    rates:
+      input_tokens: 1.75
+      output_tokens: 14.00
+      cached_input_tokens: 0.175
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
+
+  claude-haiku-4-5:
+    aliases:
+      - Haiku 4.5
+    rates:
+      input_tokens: 1.00
+      output_tokens: 5.00
+      cached_input_tokens: 0.10
+      cache_creation_input_tokens: 1.25
+      cache_read_input_tokens: 0.10
+
+  claude-opus-4-8:
+    aliases:
+      - Opus 4.8
+      - claude-opus-4.8-xhigh
+      - claude-opus-4-8
+    rates:
+      input_tokens: 5.00
+      output_tokens: 25.00
+      cached_input_tokens: 0.50
+      cache_creation_input_tokens: 6.25
+      cache_read_input_tokens: 0.50
+
+  claude-opus-4-8-fast:
+    aliases:
+      - Opus 4.8 Fast
+    rates:
+      input_tokens: 10.00
+      output_tokens: 50.00
+      cached_input_tokens: 1.00
+      cache_creation_input_tokens: 12.50
+      cache_read_input_tokens: 1.00
+
+  claude-opus-4-7:
+    aliases:
+      - Opus 4.7
+      - claude-opus-4-7
+    rates:
+      input_tokens: 5.00
+      output_tokens: 25.00
+      cached_input_tokens: 0.50
+      cache_creation_input_tokens: 6.25
+      cache_read_input_tokens: 0.50
+
+  claude-opus-4-7-fast:
+    aliases:
+      - Opus 4.7 Fast
+    rates:
+      input_tokens: 30.00
+      output_tokens: 150.00
+      cached_input_tokens: 3.00
+      cache_creation_input_tokens: 37.50
+      cache_read_input_tokens: 3.00
+
+  claude-sonnet-4-6:
+    aliases:
+      - Sonnet 4.6
+      - claude-sonnet-4.6-low
+      - claude-sonnet-4-6
+    rates:
+      input_tokens: 3.00
+      output_tokens: 15.00
+      cached_input_tokens: 0.30
+      cache_creation_input_tokens: 3.75
+      cache_read_input_tokens: 0.30
+
+  gemini-3.1-pro:
+    aliases:
+      - Gemini 3.1 Pro
+    rates:
+      input_tokens: 2.00
+      output_tokens: 12.00
+      cached_input_tokens: 0.20
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
