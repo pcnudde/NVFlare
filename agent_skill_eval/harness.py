@@ -102,13 +102,6 @@ HERMES_SESSION_USAGE_FIELDS = {
     "estimated_cost_usd",
     "api_call_count",
 }
-SENSITIVE_DOCKER_ENV_NAMES = {
-    "ANTHROPIC_API_KEY",
-    "NVIDIA_API_KEY",
-    "OPENAI_API_KEY",
-}
-
-
 @dataclass
 class CommandResult:
     command: list[str]
@@ -199,11 +192,6 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Print planned runs without invoking agents.")
     parser.add_argument("--list-agents", action="store_true", help="List configured agents and exit.")
-    parser.add_argument(
-        "--regrade-run-dir",
-        type=Path,
-        help="Re-run evidence, grading, and analysis for an existing run directory without rerunning agents.",
-    )
     args = parser.parse_args()
 
     agents = select_agents(args.agent, load_agents(args.agents_file.resolve()))
@@ -220,17 +208,6 @@ def main() -> int:
     args.model_costs = load_model_costs(args.model_costs_file.resolve())
     configure_keychain_env(args)
     testcases = load_testcases(args)
-    if args.regrade_run_dir:
-        if len(testcases) != 1:
-            raise SystemExit("--regrade-run-dir supports exactly one testcase")
-        summaries = regrade_existing_run(args.regrade_run_dir.resolve(), testcases[0], args.model_costs)
-        aggregate_rows = build_aggregate_rows(summaries)
-        write_summary_csv(args.regrade_run_dir.resolve() / "regrade_summary.csv", summaries)
-        write_aggregate_csv(args.regrade_run_dir.resolve() / "regrade_aggregate.csv", aggregate_rows)
-        print(f"Wrote {args.regrade_run_dir.resolve() / 'regrade_summary.csv'}")
-        print(f"Wrote {args.regrade_run_dir.resolve() / 'regrade_aggregate.csv'}")
-        print_aggregate_table(aggregate_rows)
-        return 0
 
     if args.dry_run:
         for testcase in testcases:
@@ -334,105 +311,6 @@ def run_eval_tasks(
                 summaries.append(future.result())
             except Exception as e:  # noqa: BLE001
                 summaries.append(harness_error_summary(testcase, agent, run_index, e))
-    return sorted(summaries, key=lambda row: (row["testcase_id"], row["agent_id"], row["run_index"]))
-
-
-def regrade_existing_run(run_dir: Path, testcase: TestcaseConfig, model_costs: dict[str, Any]) -> list[dict[str, Any]]:
-    if not run_dir.exists():
-        raise SystemExit(f"Run directory does not exist: {run_dir}")
-
-    result_paths = sorted(run_dir.glob(f"{testcase.id}/*/run_*/result.json"))
-    if not result_paths:
-        result_paths = sorted(run_dir.glob("*/*/run_*/result.json"))
-    if not result_paths:
-        raise SystemExit(f"No result.json files found under: {run_dir}")
-
-    env = build_run_env(run_dir / "regrade")
-    summaries = []
-    for result_path in result_paths:
-        existing = json.loads(result_path.read_text())
-        workdir = Path(existing["workdir"])
-        logs_dir = result_path.parent / "logs"
-        logs_dir.mkdir(exist_ok=True)
-        started = time.monotonic()
-        agent_id = existing.get("agent", {}).get("id", result_path.parents[1].name)
-        run_index = int(existing.get("run_index", 1))
-        if existing.get("agent_result", {}).get("timed_out"):
-            regraded = dict(existing)
-            regraded["testcase_id"] = testcase.id
-            regraded["testcase"] = str(testcase.path)
-            regraded["regrade_duration_seconds"] = round(time.monotonic() - started, 3)
-            regraded["regrade_evidence_mode"] = "skipped_agent_timeout"
-            regraded["evidence"] = []
-            regraded["grade"] = timed_out_grade(logs_dir, output_prefix="regrade_")
-            regraded["analysis"] = timed_out_analysis(logs_dir, output_prefix="regrade_")
-            existing_usage = existing.get("token_usage", {})
-            regraded["token_usage"] = {
-                "agent": existing_usage.get("agent", {}),
-                "grader": {},
-                "analysis": {},
-            }
-            apply_cost_estimates(regraded, model_costs)
-            write_json(result_path, regraded)
-            summaries.append(flatten_summary(regraded))
-            continue
-
-        kept_container = existing.get("agent_container", {}).get("name")
-
-        if not kept_container:
-            raise SystemExit(f"Cannot regrade {result_path}: result has no kept agent container")
-        if not docker_container_exists(kept_container, env):
-            raise SystemExit(f"Cannot regrade {result_path}: kept container does not exist: {kept_container}")
-
-        evidence = collect_evidence(
-            workdir=workdir,
-            logs_dir=logs_dir,
-            testcase_text=testcase.text,
-            timeout_seconds=EVIDENCE_TIMEOUT_SECONDS,
-            env=env,
-            docker_config=testcase.docker_config,
-            container_name=kept_container,
-            evidence_name="regrade_evidence",
-            reuse_existing_container=True,
-        )
-        agent_public_context = build_agent_public_context_from_result(existing)
-        grade = grade_with_codex(
-            workdir=workdir,
-            logs_dir=logs_dir,
-            testcase_text=testcase.text,
-            evidence=evidence,
-            agent_public_context=agent_public_context,
-            env=env,
-            output_prefix="regrade_",
-        )
-        analysis = analyze_with_codex(
-            workdir=workdir,
-            logs_dir=logs_dir,
-            testcase_text=testcase.text,
-            evidence=evidence,
-            agent_public_context=agent_public_context,
-            env=env,
-            output_prefix="regrade_",
-        )
-
-        regraded = dict(existing)
-        regraded["testcase_id"] = testcase.id
-        regraded["testcase"] = str(testcase.path)
-        regraded["regrade_duration_seconds"] = round(time.monotonic() - started, 3)
-        regraded["regrade_evidence_mode"] = "kept_agent_container"
-        regraded["evidence"] = evidence
-        regraded["grade"] = grade
-        regraded["analysis"] = analysis
-        existing_usage = existing.get("token_usage", {})
-        regraded["token_usage"] = {
-            "agent": existing_usage.get("agent", {}),
-            "grader": grade.get("grader_result", {}).get("token_usage", {}),
-            "analysis": analysis.get("analysis_result", {}).get("token_usage", {}),
-        }
-        apply_cost_estimates(regraded, model_costs)
-        write_json(result_path, regraded)
-        summaries.append(flatten_summary(regraded))
-
     return sorted(summaries, key=lambda row: (row["testcase_id"], row["agent_id"], row["run_index"]))
 
 
@@ -631,31 +509,42 @@ def run_agent_eval(
         analysis = timed_out_analysis(logs_dir)
     else:
         evidence = collect_evidence(
-            workdir,
-            logs_dir,
-            testcase.text,
-            EVIDENCE_TIMEOUT_SECONDS,
-            env,
-            testcase.docker_config,
-            agent_container_name,
-            reuse_existing_container=True,
+            logs_dir=logs_dir,
+            testcase_text=testcase.text,
+            timeout_seconds=EVIDENCE_TIMEOUT_SECONDS,
+            env=env,
+            container_name=agent_container_name,
         )
         container_stop_result = stop_recoverable_container(agent_container_name, logs_dir, env)
-        grade = grade_with_codex(
+        grade = run_codex_json_eval(
+            name="grader",
             workdir=workdir,
             logs_dir=logs_dir,
             testcase_text=testcase.text,
             evidence=evidence,
             agent_public_context=agent_public_context,
             env=env,
+            schema_path=GRADER_OUTPUT_SCHEMA,
+            output_file_name="grade.json",
+            prompt_builder=build_grader_prompt,
+            file_result_key="grade_file",
+            command_result_key="grader_result",
+            run_command_key="grader_run_command",
         )
-        analysis = analyze_with_codex(
+        analysis = run_codex_json_eval(
+            name="analyzer",
             workdir=workdir,
             logs_dir=logs_dir,
             testcase_text=testcase.text,
             evidence=evidence,
             agent_public_context=agent_public_context,
             env=env,
+            schema_path=ANALYSIS_OUTPUT_SCHEMA,
+            output_file_name="analysis.json",
+            prompt_builder=build_analysis_prompt,
+            file_result_key="analysis_file",
+            command_result_key="analysis_result",
+            run_command_key="analysis_run_command",
         )
 
     total_duration = time.monotonic() - started
@@ -940,84 +829,22 @@ def extract_section_code_block(markdown: str, section: str) -> str | None:
 
 
 def collect_evidence(
-    workdir: Path,
     logs_dir: Path,
     testcase_text: str,
     timeout_seconds: int,
     env: dict[str, str],
-    docker_config: DockerConfig,
     container_name: str,
     evidence_name: str = "evidence",
-    reuse_existing_container: bool = False,
 ) -> list[dict[str, Any]]:
     evidence_dir = logs_dir / evidence_name
     evidence_dir.mkdir(exist_ok=True)
     commands = parse_evidence_commands(testcase_text, timeout_seconds)
-    if reuse_existing_container:
-        return run_evidence_commands_in_existing_container(
-            commands=commands,
-            evidence_dir=evidence_dir,
-            env=env,
-            container_name=container_name,
-        )
-    return run_evidence_commands_in_docker(
+    return run_evidence_commands_in_container(
         commands=commands,
         evidence_dir=evidence_dir,
-        workdir=workdir,
         env=env,
-        docker_config=docker_config,
         container_name=container_name,
-        timeout_seconds=timeout_seconds,
     )
-
-
-def run_evidence_commands_in_docker(
-    commands: list[tuple[str, list[str], int, str]],
-    evidence_dir: Path,
-    workdir: Path,
-    env: dict[str, str],
-    docker_config: DockerConfig,
-    container_name: str,
-    timeout_seconds: int,
-) -> list[dict[str, Any]]:
-    records = []
-    start_result = start_evidence_container(workdir, docker_config, container_name, env)
-    records.append(command_record("00_start_container", start_result, evidence_dir, "start evidence container"))
-    if start_result.returncode not in (0, None):
-        return records
-
-    try:
-        records.extend(run_evidence_commands_in_container(commands, evidence_dir, env, container_name))
-    finally:
-        stop_docker_container(container_name, env)
-    return records
-
-
-def run_evidence_commands_in_existing_container(
-    commands: list[tuple[str, list[str], int, str]],
-    evidence_dir: Path,
-    env: dict[str, str],
-    container_name: str,
-) -> list[dict[str, Any]]:
-    records = []
-    was_running = docker_container_is_running(container_name, env)
-    if was_running is False:
-        start_result = start_existing_docker_container(container_name, env)
-        records.append(
-            command_record("00_start_kept_container", start_result, evidence_dir, "start kept agent container")
-        )
-        if start_result.returncode != 0:
-            return records
-
-    try:
-        records.extend(run_evidence_commands_in_container(commands, evidence_dir, env, container_name))
-    finally:
-        if was_running is False:
-            stop_result = stop_docker_container_result(container_name, env)
-            records.append(
-                command_record("99_stop_kept_container", stop_result, evidence_dir, "stop kept agent container")
-            )
-    return records
 
 
 def run_evidence_commands_in_container(
@@ -1064,22 +891,6 @@ def start_agent_container(
         env=env,
         remove_on_stop=False,
         include_oauth=True,
-    )
-
-
-def start_evidence_container(
-    workdir: Path,
-    docker_config: DockerConfig,
-    container_name: str,
-    env: dict[str, str],
-) -> CommandResult:
-    return start_container(
-        workdir=workdir,
-        docker_config=evidence_docker_config(docker_config),
-        container_name=container_name,
-        env=env,
-        remove_on_stop=True,
-        include_oauth=False,
     )
 
 
@@ -1273,19 +1084,6 @@ def merge_usage(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
-def evidence_docker_config(docker_config: DockerConfig) -> DockerConfig:
-    return DockerConfig(
-        image=docker_config.image,
-        env=tuple(
-            env_spec
-            for env_spec in docker_config.env
-            if env_spec.split("=", 1)[0] not in SENSITIVE_DOCKER_ENV_NAMES
-        ),
-        oauth_mounts=(),
-        oauth_setup_script=None,
-    )
-
-
 def runs_job_py(command: list[str]) -> bool:
     if not command:
         return False
@@ -1447,8 +1245,8 @@ def slugify(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
 
 
-def timed_out_grade(logs_dir: Path, output_prefix: str = "") -> dict[str, Any]:
-    grade_file = logs_dir / f"{output_prefix}grade.json"
+def timed_out_grade(logs_dir: Path) -> dict[str, Any]:
+    grade_file = logs_dir / "grade.json"
     parsed = {
         "score": 0,
         "score_before_caps": 0,
@@ -1475,8 +1273,8 @@ def timed_out_grade(logs_dir: Path, output_prefix: str = "") -> dict[str, Any]:
     }
 
 
-def timed_out_analysis(logs_dir: Path, output_prefix: str = "") -> dict[str, Any]:
-    analysis_file = logs_dir / f"{output_prefix}analysis.json"
+def timed_out_analysis(logs_dir: Path) -> dict[str, Any]:
+    analysis_file = logs_dir / "analysis.json"
     parsed = {
         "flare_version_used": "unknown",
         "achieved_accuracy": "none",
@@ -1499,25 +1297,31 @@ def timed_out_analysis(logs_dir: Path, output_prefix: str = "") -> dict[str, Any
     }
 
 
-def grade_with_codex(
+def run_codex_json_eval(
+    name: str,
     workdir: Path,
     logs_dir: Path,
     testcase_text: str,
     evidence: list[dict[str, Any]],
     agent_public_context: dict[str, str | None],
     env: dict[str, str],
-    output_prefix: str = "",
+    schema_path: Path,
+    output_file_name: str,
+    prompt_builder: Any,
+    file_result_key: str,
+    command_result_key: str,
+    run_command_key: str,
 ) -> dict[str, Any]:
-    grade_file = logs_dir / f"{output_prefix}grade.json"
-    grader_stdout = logs_dir / f"{output_prefix}grader_stdout.txt"
-    grader_stderr = logs_dir / f"{output_prefix}grader_stderr.txt"
-    prompt = build_grader_prompt(testcase_text, evidence, agent_public_context, str(workdir))
+    output_file = logs_dir / output_file_name
+    stdout_path = logs_dir / f"{name}_stdout.txt"
+    stderr_path = logs_dir / f"{name}_stderr.txt"
+    prompt = prompt_builder(testcase_text, evidence, agent_public_context, str(workdir))
     command = expand_command(
         GRADER_COMMAND,
         {
             "workdir": str(workdir),
-            "schema_file": str(GRADER_OUTPUT_SCHEMA),
-            "grade_file": str(grade_file),
+            "schema_file": str(schema_path),
+            "grade_file": str(output_file),
         },
     )
     result = run_command(
@@ -1526,56 +1330,15 @@ def grade_with_codex(
         stdin=prompt,
         timeout_seconds=GRADER_TIMEOUT_SECONDS,
         env=env,
-        stdout_path=grader_stdout,
-        stderr_path=grader_stderr,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
     )
 
-    parsed_grade = parse_grade_file(grade_file)
     return {
-        "parsed": parsed_grade,
-        "grade_file": str(grade_file) if grade_file.exists() else None,
-        "grader_result": result.to_record(grader_stdout, grader_stderr),
-        "grader_run_command": command,
-    }
-
-
-def analyze_with_codex(
-    workdir: Path,
-    logs_dir: Path,
-    testcase_text: str,
-    evidence: list[dict[str, Any]],
-    agent_public_context: dict[str, str | None],
-    env: dict[str, str],
-    output_prefix: str = "",
-) -> dict[str, Any]:
-    analysis_file = logs_dir / f"{output_prefix}analysis.json"
-    analyzer_stdout = logs_dir / f"{output_prefix}analyzer_stdout.txt"
-    analyzer_stderr = logs_dir / f"{output_prefix}analyzer_stderr.txt"
-    prompt = build_analysis_prompt(testcase_text, evidence, agent_public_context, str(workdir))
-    command = expand_command(
-        GRADER_COMMAND,
-        {
-            "workdir": str(workdir),
-            "schema_file": str(ANALYSIS_OUTPUT_SCHEMA),
-            "grade_file": str(analysis_file),
-        },
-    )
-    result = run_command(
-        command,
-        cwd=workdir,
-        stdin=prompt,
-        timeout_seconds=GRADER_TIMEOUT_SECONDS,
-        env=env,
-        stdout_path=analyzer_stdout,
-        stderr_path=analyzer_stderr,
-    )
-
-    parsed_analysis = parse_grade_file(analysis_file)
-    return {
-        "parsed": parsed_analysis,
-        "analysis_file": str(analysis_file) if analysis_file.exists() else None,
-        "analysis_result": result.to_record(analyzer_stdout, analyzer_stderr),
-        "analysis_run_command": command,
+        "parsed": parse_grade_file(output_file),
+        file_result_key: str(output_file) if output_file.exists() else None,
+        command_result_key: result.to_record(stdout_path, stderr_path),
+        run_command_key: command,
     }
 
 
@@ -1583,17 +1346,6 @@ def build_agent_public_context(agent_result: CommandResult, last_message: Path) 
     return {
         "agent_stdout_tail": tail(agent_result.stdout),
         "agent_stderr_tail": tail(agent_result.stderr),
-        "agent_last_message": last_message.read_text(errors="replace") if last_message.exists() else None,
-    }
-
-
-def build_agent_public_context_from_result(result: dict[str, Any]) -> dict[str, str | None]:
-    agent_result = result.get("agent_result", {})
-    workdir = Path(result.get("workdir", "."))
-    last_message = workdir / ".agent_eval_last_message.txt"
-    return {
-        "agent_stdout_tail": agent_result.get("stdout_tail"),
-        "agent_stderr_tail": agent_result.get("stderr_tail"),
         "agent_last_message": last_message.read_text(errors="replace") if last_message.exists() else None,
     }
 
@@ -1773,10 +1525,6 @@ def run_command_streaming(
     )
 
 
-def start_existing_docker_container(container_name: str, env: dict[str, str]) -> CommandResult:
-    return run_subprocess_command(["docker", "start", container_name], env, timeout_seconds=60)
-
-
 def stop_recoverable_container(container_name: str, logs_dir: Path, env: dict[str, str]) -> CommandResult:
     stdout_path = logs_dir / "container_stop_stdout.txt"
     stderr_path = logs_dir / "container_stop_stderr.txt"
@@ -1860,23 +1608,6 @@ def docker_container_is_running(container_name: str, env: dict[str, str]) -> boo
     if completed.returncode != 0:
         return None
     return completed.stdout.strip().lower() == "true"
-
-
-def docker_container_exists(container_name: str, env: dict[str, str]) -> bool:
-    try:
-        completed = subprocess.run(
-            ["docker", "inspect", container_name],
-            text=True,
-            cwd=str(REPO_ROOT),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=20,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return completed.returncode == 0
 
 
 def expand_command(command: list[str], placeholders: dict[str, str]) -> list[str]:

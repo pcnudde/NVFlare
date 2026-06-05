@@ -25,6 +25,39 @@ The 2.8 image installs `nvflare==2.8.0` from pip. The 2.9 skills image installs
 FLARE from `git+https://github.com/chesterxgchen/NVFlare.git@flare_agent` and
 pre-installs skills for Codex, Claude, and Hermes.
 
+Run the current full comparison matrix on an eval host:
+
+```bash
+python3 agent_skill_eval/run_full_eval.py
+```
+
+That command bootstraps `.agent-skill-eval-venv`, builds the `basic`, `2.8`,
+and `2.9-skills` Docker images, runs all configured agents 3 times per image
+with `--parallel 6`, and writes one combined HTML report under
+`agent_skill_eval/runs/`. It expects Docker, git, and the Codex CLI to be
+available on the host. Codex auth is read from `~/.codex/auth.json`; Claude can
+use `ANTHROPIC_API_KEY` or `~/.claude/.credentials.json`; Hermes uses
+`NVIDIA_API_KEY`.
+
+To run the same workload on `pcnudde@rajivc.nvidia.com` from this machine, use
+the SSH launcher:
+
+```bash
+python3 agent_skill_eval/run_remote.py \
+  --host pcnudde@rajivc.nvidia.com \
+  --run-image 2.8 \
+  --run-image 2.9-skills \
+  -- \
+  --runs-per-agent 3 \
+  --parallel 6 \
+  --docker-oauth all
+```
+
+The SSH launcher clones or updates the pushed branch on the remote host, builds
+the selected images there, runs the harness there, and generates the report
+there. For the simplest remote workflow, SSH to the host, update the checkout,
+and run `python3 agent_skill_eval/run_full_eval.py` from the repo root.
+
 Run all configured agents:
 
 ```bash
@@ -212,4 +245,4 @@ The default agents are:
 - `codex-5.5-xhigh`
 - `codex-5.5-low`
 - `claude-opus-4.8-xhigh`
-- `claude-sonnet-4.6-low`
+- `hermes-nemotron-3-ultra`
