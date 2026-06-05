@@ -158,21 +158,20 @@ python3 agent_skill_eval/report.py agent_skill_eval/runs/<timestamp-a> agent_ski
 ```
 
 The harness executes the evidence commands listed in each `testcase.md` inside
-the agent container before grading, then stops the container without removing
-it. Those commands are testcase-specific; this first testcase runs the generated
-NVFlare job. When an evidence command runs `job.py`, the harness first probes
-the active `nvflare` package in that same run container and records the runtime
-version or import error; reports do not infer NVFlare versions from
-`requirements.txt`.
+the agent container before grading. Those commands are testcase-specific; this
+first testcase runs the generated NVFlare job. When an evidence command runs
+`job.py`, the harness first probes the active `nvflare` package in that same run
+container and records the runtime version or import error; reports do not infer
+NVFlare versions from `requirements.txt`.
 
 If an agent exceeds the testcase timeout, the harness stops the run container,
 skips final evidence and grader/analysis calls for that run, and records a
-deterministic score of 0. The stopped container is still kept for debugging; use
-`docker start <container-name>` before `docker exec -it <container-name> bash`.
+deterministic score of 0.
 
-Regrade starts a kept container only long enough to rerun evidence, then stops
-it again. This keeps each run recoverable without keeping idle containers in
-memory.
+At the end of each run, the harness writes a sibling `run_XX.zip` archive with
+the run directory contents, including logs, `result.json`, and the final copied
+workspace, then removes the Docker container. The run directory remains on disk
+for reports and quick inspection.
 
 The agent container uses Docker's `bridge` network by default so Codex and
 Claude can make model calls. The copied project folder is the only mounted
@@ -226,19 +225,6 @@ Agents are asked to write `AGENT_EVAL_NOTES.md` with public notes on approach,
 assumptions, blockers, and skill improvements. The grader and analyzer may use
 those notes and public stdout/stderr for process feedback, but should not rely
 on hidden chain-of-thought.
-
-Regrade existing runs against the current testcase rubric without rerunning the
-agents:
-
-```bash
-python3 agent_skill_eval/harness.py --regrade-run-dir agent_skill_eval/runs/<timestamp>
-```
-
-Regrade requires the run's kept agent container to still exist. Older runs
-created before container retention cannot be regraded because the agent-created
-environment no longer exists. Regrade updates each run's existing `result.json`
-so summaries and reports use the latest score. Timed-out runs are overwritten
-with score 0 and stale evidence is cleared.
 
 The default agents are:
 

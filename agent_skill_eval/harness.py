@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -547,6 +548,8 @@ def run_agent_eval(
             run_command_key="analysis_run_command",
         )
 
+    container_remove_result = remove_container(agent_container_name, logs_dir, env)
+    archive_path = agent_dir.with_suffix(".zip")
     total_duration = time.monotonic() - started
     result = {
         "agent": {
@@ -558,16 +561,26 @@ def run_agent_eval(
         "agent_run_command": agent_run_command,
         "agent_container": {
             "name": agent_container_name,
-            "kept": container_start_result.returncode == 0,
-            "recoverable": container_start_result.returncode == 0,
+            "kept": False,
+            "recoverable": False,
             "stopped_after_run": container_stop_result.returncode == 0,
             "stopped_after_timeout": agent_result.timed_out,
+            "removed_after_run": container_remove_result.returncode == 0,
             "start": container_start_result.to_record(container_start_stdout, container_start_stderr),
             "prepare": container_prepare_result.to_record(container_prepare_stdout, container_prepare_stderr),
             "stop": container_stop_result.to_record(
                 logs_dir / "container_stop_stdout.txt",
                 logs_dir / "container_stop_stderr.txt",
             ),
+            "remove": container_remove_result.to_record(
+                logs_dir / "container_remove_stdout.txt",
+                logs_dir / "container_remove_stderr.txt",
+            ),
+        },
+        "artifact_archive": {
+            "path": str(archive_path),
+            "created": True,
+            "contains": "run directory files, including logs, result metadata, and final workspace output",
         },
         "testcase_id": testcase.id,
         "run_index": run_index,
@@ -587,6 +600,9 @@ def run_agent_eval(
         },
     }
     apply_cost_estimates(result, model_costs)
+    write_json(agent_dir / "result.json", result)
+    archive_result = create_run_archive(agent_dir, archive_path)
+    result["artifact_archive"].update(archive_result)
     write_json(agent_dir / "result.json", result)
     return flatten_summary(result)
 
@@ -1534,6 +1550,15 @@ def stop_recoverable_container(container_name: str, logs_dir: Path, env: dict[st
     return result
 
 
+def remove_container(container_name: str, logs_dir: Path, env: dict[str, str]) -> CommandResult:
+    stdout_path = logs_dir / "container_remove_stdout.txt"
+    stderr_path = logs_dir / "container_remove_stderr.txt"
+    result = remove_docker_container_result(container_name, env)
+    write_text(stdout_path, result.stdout)
+    write_text(stderr_path, result.stderr)
+    return result
+
+
 def stop_docker_container(container_name: str | None, env: dict[str, str]) -> None:
     stop_docker_container_result(container_name, env)
 
@@ -1552,6 +1577,13 @@ def stop_docker_container_result(container_name: str | None, env: dict[str, str]
             stderr="",
         )
     return run_subprocess_command(command, env, timeout_seconds=20)
+
+
+def remove_docker_container_result(container_name: str | None, env: dict[str, str]) -> CommandResult:
+    command = ["docker", "rm", "-f", container_name or ""]
+    if not container_name:
+        return CommandResult(command=command, returncode=0, duration_seconds=0, stdout="", stderr="")
+    return run_subprocess_command(command, env, timeout_seconds=30)
 
 
 def run_subprocess_command(command: list[str], env: dict[str, str], timeout_seconds: int) -> CommandResult:
@@ -2084,6 +2116,39 @@ def format_number(value: Any) -> str:
 
 def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True))
+
+
+def create_run_archive(run_dir: Path, archive_path: Path) -> dict[str, Any]:
+    started = time.monotonic()
+    temp_path = archive_path.with_name(f"{archive_path.name}.tmp")
+    file_count = 0
+    try:
+        if temp_path.exists():
+            temp_path.unlink()
+        with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(run_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                archive.write(path, Path(run_dir.name) / path.relative_to(run_dir))
+                file_count += 1
+        temp_path.replace(archive_path)
+        return {
+            "path": str(archive_path),
+            "created": True,
+            "file_count": file_count,
+            "size_bytes": archive_path.stat().st_size,
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
+    except Exception as e:  # noqa: BLE001
+        if temp_path.exists():
+            temp_path.unlink()
+        return {
+            "path": str(archive_path),
+            "created": False,
+            "file_count": file_count,
+            "duration_seconds": round(time.monotonic() - started, 3),
+            "error": f"{type(e).__name__}: {e}",
+        }
 
 
 def write_text(path: Path, text: str) -> None:
