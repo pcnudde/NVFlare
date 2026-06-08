@@ -66,7 +66,9 @@ Validation rules:
 - Admins listed in a study must reference existing admin participants.
 - Study names use lowercase alphanumeric characters plus hyphens or underscores, 1-63 characters, and must start and end with an alphanumeric character.
 - ``"default"`` is reserved and cannot be used as a study name.
-- Provisioning generates ``study_registry.json`` in the server's ``local/`` folder.
+- Provisioning may generate ``study_registry.json`` in the server's ``local/`` folder. Before server startup, run
+  ``nvflare-state-store-migrate`` to import this initial study configuration into the State Store. After migration,
+  runtime study changes are stored in the State Store, not written back to ``study_registry.json``.
 
 Per-Study Role Resolution
 =========================

@@ -56,7 +56,12 @@ readme_fs: |
   stop_fl.sh
   signature.json
 
-  Run start.sh to start the server.
+  Before the first start after installing or upgrading this server package, run:
+  nvflare-state-store-migrate --server-root <path-to-this-server-package>
+
+  This imports legacy job metadata, study_registry.json, and disabled_clients.json into the StateStore database and
+  records the migration marker required by server startup. After the migration succeeds, run start.sh to start the
+  server.
 
   The rootCA.pem file is pointed by "ssl_root_cert" in fed_server.json.  If you plan to move/copy it to a different place,
   you will need to modify fed_server.json.  The same applies to the other two files, server.crt and server.key.
@@ -392,6 +397,13 @@ local_server_resources: |
           {
               "id": "job_store",
               "path": "nvflare.app_common.storages.filesystem_storage.FilesystemStorage"
+          },
+          {
+              "id": "state_store",
+              "path": "nvflare.app_common.state_store.sql_store.SqlStateStore",
+              "args": {
+                  "db_url": "sqlite:////tmp/nvflare/state-store.db"
+              }
           },
           {
               "id": "process_launcher",

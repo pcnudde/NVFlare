@@ -153,6 +153,15 @@ run_tensorflow_test() {
     return $status
 }
 
+run_state_store_postgres_test() {
+    if [[ -z "${NVFLARE_TEST_STATE_STORE_DB_URL:-}" ]]; then
+        echo "ERROR: NVFLARE_TEST_STATE_STORE_DB_URL must be set for state_store_postgres integration tests."
+        return 1
+    fi
+    "${PYTHON_BIN[@]}" -m pip install -e "${REPO_ROOT}[STATE_STORE_POSTGRES]"
+    run_pytest app_common/state_store/postgres_sql_store_test.py
+}
+
 run_pytest_mode() {
     local test_mode=$1
     case $test_mode in
@@ -168,6 +177,9 @@ run_pytest_mode() {
             ;;
         tensorflow)
             run_tensorflow_test
+            ;;
+        state_store_postgres)
+            run_state_store_postgres_test
             ;;
         numpy|pytorch|auth|cifar|stats|xgboost|client_api|client_api_qa|model_controller_api)
             run_system_test "$test_mode"

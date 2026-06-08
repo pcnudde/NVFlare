@@ -232,6 +232,13 @@ def _add_server_storage(resources_path, snapshot_persistor=None):
             "args": {"uri_root": "/tmp/nvflare/jobs-storage", "job_store_id": "job_store"},
         }
     )
+    resources["components"].append(
+        {
+            "id": "state_store",
+            "path": "nvflare.app_common.state_store.sql_store.SqlStateStore",
+            "args": {"db_url": "sqlite:////tmp/nvflare/state-store.db"},
+        }
+    )
     _write_json(resources_path, resources)
 
 
@@ -363,6 +370,55 @@ def test_prepare_docker_server_relocates_storage_to_mounted_workspace(tmp_path, 
         == "/var/tmp/nvflare/workspace/snapshot-storage"
     )
     assert _component(resources, "job_manager")["args"]["uri_root"] == "/var/tmp/nvflare/workspace/jobs-storage"
+    assert (
+        _component(resources, "state_store")["args"]["db_url"] == "sqlite:////var/tmp/nvflare/workspace/state-store.db"
+    )
+
+
+def test_prepare_docker_server_preserves_external_state_store_db_url(tmp_path, capsys):
+    kit = _make_server_kit(tmp_path)
+    _add_server_storage(kit / "local" / "resources.json.default")
+    resources_path = kit / "local" / "resources.json.default"
+    resources = json.loads(resources_path.read_text())
+    _component(resources, "state_store")["args"]["db_url"] = "postgresql+psycopg://flare@db/flare"
+    _write_json(resources_path, resources)
+    output = tmp_path / "server-docker"
+
+    _run_prepare(
+        kit,
+        output,
+        {
+            "runtime": "docker",
+            "parent": {"docker_image": "repo/nvflare:dev"},
+        },
+    )
+    capsys.readouterr()
+
+    resources = json.loads((output / "local" / "resources.json.default").read_text())
+    assert _component(resources, "state_store")["args"]["db_url"] == "postgresql+psycopg://flare@db/flare"
+
+
+def test_prepare_docker_server_preserves_env_state_store_db_url(tmp_path, capsys):
+    kit = _make_server_kit(tmp_path)
+    _add_server_storage(kit / "local" / "resources.json.default")
+    resources_path = kit / "local" / "resources.json.default"
+    resources = json.loads(resources_path.read_text())
+    _component(resources, "state_store")["args"] = {"db_url_env": "NVFLARE_STATE_STORE_DB_URL"}
+    _write_json(resources_path, resources)
+    output = tmp_path / "server-docker"
+
+    _run_prepare(
+        kit,
+        output,
+        {
+            "runtime": "docker",
+            "parent": {"docker_image": "repo/nvflare:dev"},
+        },
+    )
+    capsys.readouterr()
+
+    resources = json.loads((output / "local" / "resources.json.default").read_text())
+    assert _component(resources, "state_store")["args"] == {"db_url_env": "NVFLARE_STATE_STORE_DB_URL"}
 
 
 @pytest.mark.parametrize(
@@ -390,10 +446,24 @@ def test_prepare_k8s_server_exposes_admin_port_only_when_distinct(tmp_path, caps
     assert values["fedLearnPort"] == 8002
     assert values["adminPort"] == expected_admin_port
     assert values["command"] == ["/usr/local/bin/python3"]
+    assert values["migration"] == {
+        "enabled": True,
+        "command": ["/usr/local/bin/python3"],
+        "args": [
+            "-u",
+            "-m",
+            "nvflare.app_common.state_store.state_store_migration",
+            "--server-root",
+            "/var/tmp/nvflare/workspace",
+        ],
+    }
 
     tcp_services = (output / "helm_chart" / "templates" / "server-tcp-services.yaml").read_text()
     assert ".Values.fedLearnPort" in tcp_services
     assert ".Values.adminPort" in tcp_services
+    deployment = (output / "helm_chart" / "templates" / "server-deployment.yaml").read_text()
+    assert "initContainers:" in deployment
+    assert "state-store-migration" in deployment
 
 
 def test_prepare_k8s_server_uses_configured_service_name(tmp_path, capsys):
@@ -474,6 +544,9 @@ def test_prepare_server_warns_when_snapshot_persistor_shape_is_unexpected(tmp_pa
     resources = json.loads((output / "local" / "resources.json.default").read_text())
     assert "args" not in resources["snapshot_persistor"]["args"]["storage"]
     assert _component(resources, "job_manager")["args"]["uri_root"] == "/var/tmp/nvflare/workspace/jobs-storage"
+    assert (
+        _component(resources, "state_store")["args"]["db_url"] == "sqlite:////var/tmp/nvflare/workspace/state-store.db"
+    )
 
 
 def test_prepare_k8s_server_uses_parent_python_path_for_chart_command(tmp_path, capsys):
@@ -493,6 +566,7 @@ def test_prepare_k8s_server_uses_parent_python_path_for_chart_command(tmp_path, 
 
     values = yaml.safe_load((output / "helm_chart" / "values.yaml").read_text())
     assert values["command"] == ["/opt/conda/bin/python"]
+    assert values["migration"]["command"] == ["/opt/conda/bin/python"]
 
 
 def test_prepare_k8s_server_does_not_use_job_launcher_python_path_for_chart_command(tmp_path, capsys):
@@ -512,6 +586,56 @@ def test_prepare_k8s_server_does_not_use_job_launcher_python_path_for_chart_comm
 
     values = yaml.safe_load((output / "helm_chart" / "values.yaml").read_text())
     assert values["command"] == [K8S_PARENT_PYTHON_PATH]
+    assert values["migration"]["command"] == [K8S_PARENT_PYTHON_PATH]
+
+
+def test_prepare_k8s_passes_parent_env_to_parent_pod_values(tmp_path, capsys):
+    kit = _make_server_kit(tmp_path)
+    output = tmp_path / "server-k8s"
+    env = [
+        {
+            "name": "NVFLARE_STATE_STORE_DB_URL",
+            "valueFrom": {"secretKeyRef": {"name": "state-store-db", "key": "db-url"}},
+        }
+    ]
+
+    _run_prepare(
+        kit,
+        output,
+        {
+            "runtime": "k8s",
+            "parent": {"docker_image": "repo/nvflare:dev", "env": env},
+        },
+    )
+    capsys.readouterr()
+
+    values = yaml.safe_load((output / "helm_chart" / "values.yaml").read_text())
+    deployment = (output / "helm_chart" / "templates" / "server-deployment.yaml").read_text()
+    assert values["env"] == env
+    assert "{{- with .Values.env }}" in deployment
+
+
+def test_prepare_k8s_server_can_configure_state_store_db_url_env(tmp_path, capsys):
+    kit = _make_server_kit(tmp_path)
+    _add_server_storage(kit / "local" / "resources.json.default")
+    output = tmp_path / "server-k8s"
+
+    _run_prepare(
+        kit,
+        output,
+        {
+            "runtime": "k8s",
+            "parent": {
+                "docker_image": "repo/nvflare:dev",
+                "state_store": {"db_url_env": "NVFLARE_STATE_STORE_DB_URL"},
+            },
+        },
+    )
+    capsys.readouterr()
+
+    resources = json.loads((output / "local" / "resources.json.default").read_text())
+    assert _component(resources, "state_store")["args"] == {"db_url_env": "NVFLARE_STATE_STORE_DB_URL"}
+    assert _component(resources, "job_manager")["args"]["uri_root"] == "/var/tmp/nvflare/workspace/jobs-storage"
 
 
 def test_prepare_k8s_launcher_default_python_path_matches_parent_default(tmp_path, capsys):
@@ -1341,6 +1465,28 @@ def test_prepare_rejects_admin_kit_without_writing_output(tmp_path, capsys):
         (
             {"runtime": "k8s", "parent": {"docker_image": "repo/nvflare:dev", "python_path": 7}},
             "parent.python_path",
+        ),
+        (
+            {"runtime": "k8s", "parent": {"docker_image": "repo/nvflare:dev", "env": {}}},
+            "parent.env",
+        ),
+        (
+            {"runtime": "k8s", "parent": {"docker_image": "repo/nvflare:dev", "env": [{"value": "missing"}]}},
+            "parent.env[0].name",
+        ),
+        (
+            {"runtime": "k8s", "parent": {"docker_image": "repo/nvflare:dev", "state_store": []}},
+            "parent.state_store",
+        ),
+        (
+            {
+                "runtime": "k8s",
+                "parent": {
+                    "docker_image": "repo/nvflare:dev",
+                    "state_store": {"db_url_env": 7},
+                },
+            },
+            "parent.state_store.db_url_env",
         ),
         (
             {

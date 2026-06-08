@@ -17,9 +17,9 @@ import os
 from unittest import mock
 
 from nvflare.apis.fl_context import FLContext
-from nvflare.apis.impl import job_def_manager as job_def_manager_module
 from nvflare.apis.impl.job_def_manager import SimpleJobDefManager
-from nvflare.app_common.storages.filesystem_storage import FilesystemStorage
+from nvflare.apis.job_def import SubmitRecordKey, SubmitRecordState
+from nvflare.apis.utils.job_submit_token import submit_record_scope_hashes, submitter_to_dict
 
 
 def _submitter():
@@ -43,11 +43,63 @@ def _record(job_id="job-1", state="created"):
     }
 
 
+class _FakeStateStore:
+    def __init__(self):
+        self.records = {}
+
+    def _key(self, study, submitter, submit_token):
+        return submit_record_scope_hashes(study, submitter, submit_token)
+
+    def _key_from_record(self, record):
+        submitter = {
+            "name": record.get(SubmitRecordKey.SUBMITTER_NAME.value, ""),
+            "org": record.get(SubmitRecordKey.SUBMITTER_ORG.value, ""),
+            "role": record.get(SubmitRecordKey.SUBMITTER_ROLE.value, ""),
+        }
+        return self._key(
+            record.get(SubmitRecordKey.STUDY.value, ""),
+            submitter,
+            record.get(SubmitRecordKey.SUBMIT_TOKEN.value),
+        )
+
+    def create_submit_record(self, record: dict) -> bool:
+        key = self._key_from_record(record)
+        if key in self.records:
+            return False
+        self.records[key] = dict(record)
+        return True
+
+    def get_submit_record(self, study: str, submitter, submit_token: str):
+        record = self.records.get(self._key(study, submitter, submit_token))
+        return dict(record) if record else None
+
+    def update_submit_record(self, record: dict):
+        self.records[self._key_from_record(record)] = dict(record)
+        return dict(record)
+
+    def mark_submit_records_job_deleted(self, job_id: str, deleted_by):
+        deleted_by_info = submitter_to_dict(deleted_by)
+        deleted_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        updated = []
+        for key, record in list(self.records.items()):
+            if record.get(SubmitRecordKey.JOB_ID.value) != job_id:
+                continue
+            if record.get(SubmitRecordKey.STATE.value) == SubmitRecordState.JOB_DELETED.value:
+                continue
+            record = dict(record)
+            record[SubmitRecordKey.STATE.value] = SubmitRecordState.JOB_DELETED.value
+            record[SubmitRecordKey.DELETED_TIME.value] = deleted_time
+            record[SubmitRecordKey.DELETED_BY.value] = deleted_by_info
+            self.records[key] = record
+            updated.append(dict(record))
+        return updated
+
+
 def test_submit_record_persists_across_manager_restart(tmp_path):
-    storage = FilesystemStorage(root_dir=str(tmp_path / "store"), uri_root="/")
+    state_store = _FakeStateStore()
     fl_ctx = FLContext()
 
-    with mock.patch.object(SimpleJobDefManager, "_get_job_store", return_value=storage):
+    with mock.patch.object(SimpleJobDefManager, "_get_state_store", return_value=state_store):
         manager = SimpleJobDefManager(uri_root=str(tmp_path / "jobs"))
         manager.create_submit_record(_record(), fl_ctx)
 
@@ -60,10 +112,10 @@ def test_submit_record_persists_across_manager_restart(tmp_path):
 
 
 def test_creating_record_survives_restart_for_retry_recovery(tmp_path):
-    storage = FilesystemStorage(root_dir=str(tmp_path / "store"), uri_root="/")
+    state_store = _FakeStateStore()
     fl_ctx = FLContext()
 
-    with mock.patch.object(SimpleJobDefManager, "_get_job_store", return_value=storage):
+    with mock.patch.object(SimpleJobDefManager, "_get_state_store", return_value=state_store):
         manager = SimpleJobDefManager(uri_root=str(tmp_path / "jobs"))
         manager.create_submit_record(_record(job_id="pre-generated-job", state="creating"), fl_ctx)
 
@@ -75,10 +127,10 @@ def test_creating_record_survives_restart_for_retry_recovery(tmp_path):
 
 
 def test_mark_submit_record_job_deleted_preserves_record_for_audit(tmp_path):
-    storage = FilesystemStorage(root_dir=str(tmp_path / "store"), uri_root="/")
+    state_store = _FakeStateStore()
     fl_ctx = FLContext()
 
-    with mock.patch.object(SimpleJobDefManager, "_get_job_store", return_value=storage):
+    with mock.patch.object(SimpleJobDefManager, "_get_state_store", return_value=state_store):
         manager = SimpleJobDefManager(uri_root=str(tmp_path / "jobs"))
         manager.create_submit_record(_record(), fl_ctx)
 
@@ -99,10 +151,7 @@ def test_mark_submit_record_job_deleted_preserves_record_for_audit(tmp_path):
     }
 
 
-def test_submit_record_uri_root_is_beside_trailing_slash_job_root(tmp_path):
+def test_job_manager_defaults_to_state_store_component(tmp_path):
     manager = SimpleJobDefManager(uri_root=str(tmp_path / "jobs") + os.sep)
 
-    assert manager.submit_record_uri_root == str(tmp_path / job_def_manager_module._SUBMIT_RECORD_URI_ROOT)
-    assert manager.submit_record_job_index_uri_root == str(
-        tmp_path / job_def_manager_module._SUBMIT_RECORD_JOB_INDEX_URI_ROOT
-    )
+    assert manager.state_store_id == "state_store"

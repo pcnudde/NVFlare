@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from nvflare.apis.client import Client, ClientPropKey
 from nvflare.apis.fl_constant import FLContextKey
@@ -24,6 +21,34 @@ from nvflare.apis.shareable import Shareable
 from nvflare.fuel.f3.cellnet.defs import IdentityChallengeKey, MessageHeaderKey
 from nvflare.private.defs import CellMessageHeaderKeys, ClientRegSession, ClientType, InternalFLContextKey
 from nvflare.private.fed.server.client_manager import ClientManager
+
+
+class _FakeDisabledClientStore:
+    def __init__(self):
+        self.disabled = {}
+        self.disable_error = None
+        self.enable_error = None
+
+    def get_disabled_client(self, client_name):
+        return self.disabled.get(client_name)
+
+    def disable_client(self, client_name, disabled_by=None, reason=None):
+        if self.disable_error:
+            raise self.disable_error
+        row = {"client_name": client_name, "disabled_by": disabled_by, "reason": reason}
+        self.disabled[client_name] = row
+        return row
+
+    def enable_client(self, client_name):
+        if self.enable_error:
+            raise self.enable_error
+        return self.disabled.pop(client_name, None) is not None
+
+
+def _make_manager():
+    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
+    manager.set_state_store(_FakeDisabledClientStore())
+    return manager
 
 
 def _make_request(client_name: str) -> MagicMock:
@@ -57,7 +82,7 @@ def _make_fl_ctx(secure_mode: bool, client_name: str) -> MagicMock:
 
 
 def test_authenticated_client_stores_org_extracted_from_cert():
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
+    manager = _make_manager()
     request = _make_request("site-a")
     fl_ctx = _make_fl_ctx(secure_mode=True, client_name="site-a")
     verifier = MagicMock()
@@ -76,7 +101,7 @@ def test_authenticated_client_stores_org_extracted_from_cert():
 
 
 def test_authenticated_client_sets_empty_org_when_secure_mode_is_disabled():
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
+    manager = _make_manager()
     request = _make_request("site-a")
     fl_ctx = _make_fl_ctx(secure_mode=False, client_name="site-a")
 
@@ -87,10 +112,8 @@ def test_authenticated_client_sets_empty_org_when_secure_mode_is_disabled():
     assert client.get_prop(ClientPropKey.ORG, "") == ""
 
 
-def test_disable_client_persists_and_removes_active_client(tmp_path):
-    disabled_file = tmp_path / "disabled_clients.json"
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
-    manager.set_disabled_clients_file(str(disabled_file))
+def test_disable_client_persists_to_state_store_and_removes_active_client():
+    manager = _make_manager()
     client = Client("site-a", "token-a")
     manager.clients[client.token] = client
     manager.name_to_clients[client.name] = client
@@ -101,121 +124,56 @@ def test_disable_client_persists_and_removes_active_client(tmp_path):
     assert "token-a" not in manager.clients
     assert "site-a" not in manager.name_to_clients
     assert manager.is_client_disabled("site-a")
-    assert json.loads(disabled_file.read_text()) == {"disabled_clients": ["site-a"]}
-
-    reloaded = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
-    reloaded.set_disabled_clients_file(str(disabled_file))
-    assert reloaded.is_client_disabled("site-a")
+    assert manager.state_store.get_disabled_client("site-a")["client_name"] == "site-a"
 
 
-def test_disabled_clients_file_load_failure_fails_closed(tmp_path):
-    disabled_file = tmp_path / "disabled_clients.json"
-    disabled_file.write_text("{broken-json", encoding="utf-8")
+def test_disabled_client_checks_require_state_store():
     manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
 
-    with pytest.raises(json.JSONDecodeError):
-        manager.set_disabled_clients_file(str(disabled_file))
+    try:
+        manager.is_client_disabled("site-a")
+    except AssertionError as e:
+        assert "state_store" in str(e)
+    else:
+        raise AssertionError("expected AssertionError")
 
 
-def test_disabled_clients_file_rejects_bare_list_schema(tmp_path):
-    disabled_file = tmp_path / "disabled_clients.json"
-    disabled_file.write_text(json.dumps(["site-a"]), encoding="utf-8")
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
-
-    with pytest.raises(ValueError, match="JSON object"):
-        manager.set_disabled_clients_file(str(disabled_file))
-
-
-def test_disable_client_restores_active_client_when_persist_fails():
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
+def test_disable_client_keeps_active_client_when_store_fails():
+    manager = _make_manager()
     client = Client("site-a", "token-a")
     manager.clients[client.token] = client
     manager.name_to_clients[client.name] = client
-    manager._save_disabled_clients = MagicMock(side_effect=OSError("disk full"))
+    manager.state_store.disable_error = RuntimeError("db write failed")
 
-    with pytest.raises(OSError):
+    try:
         manager.disable_client("site-a")
+    except RuntimeError as e:
+        assert str(e) == "db write failed"
+    else:
+        raise AssertionError("expected RuntimeError")
 
     assert not manager.is_client_disabled("site-a")
     assert manager.clients["token-a"] is client
     assert manager.name_to_clients["site-a"] is client
 
 
-def test_disable_enable_persist_while_holding_client_manager_lock():
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
-    lock_states = []
-
-    def fake_save(_snapshot):
-        lock_states.append(manager.lock.locked())
-
-    manager._save_disabled_clients = fake_save
-
-    manager.disable_client("site-a")
-    manager.enable_client("site-a")
-
-    assert lock_states == [True, True]
-
-
-def test_save_disabled_clients_removes_tmp_on_replace_failure(tmp_path):
-    disabled_file = tmp_path / "disabled_clients.json"
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
-    manager.set_disabled_clients_file(str(disabled_file))
-
-    with patch("nvflare.private.fed.server.client_manager.os.replace", side_effect=OSError("replace failed")):
-        with pytest.raises(OSError):
-            manager._save_disabled_clients({"site-a"})
-
-    assert list(tmp_path.glob("disabled_clients.json.*.tmp")) == []
-
-
 def test_remove_client_unknown_token_returns_none():
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
+    manager = _make_manager()
 
     assert manager.remove_client("unknown-token") is None
 
 
-def test_enable_client_persists_and_allows_client(tmp_path):
-    disabled_file = tmp_path / "disabled_clients.json"
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
-    manager.set_disabled_clients_file(str(disabled_file))
+def test_enable_client_persists_to_state_store_and_allows_client():
+    manager = _make_manager()
     manager.disable_client("site-a")
 
     assert manager.enable_client("site-a") is True
 
     assert not manager.is_client_disabled("site-a")
-    assert json.loads(disabled_file.read_text()) == {"disabled_clients": []}
-
-
-def test_disabled_clients_file_can_be_bare_filename(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
-    manager.set_disabled_clients_file("disabled_clients.json")
-
-    manager.disable_client("site-a")
-
-    assert json.loads((tmp_path / "disabled_clients.json").read_text()) == {"disabled_clients": ["site-a"]}
-
-
-def test_disabled_client_save_runs_under_manager_lock():
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
-    calls = []
-
-    def assert_unlocked_save(_disabled_clients):
-        acquired = manager.lock.acquire(blocking=False)
-        if acquired:
-            manager.lock.release()
-        calls.append(acquired)
-
-    manager._save_disabled_clients = assert_unlocked_save
-
-    manager.disable_client("site-a")
-    manager.enable_client("site-a")
-
-    assert calls == [False, False]
 
 
 def test_disabled_client_registration_is_rejected():
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
+    manager = _make_manager()
     manager.disable_client("site-a")
     request = _make_request("site-a")
     fl_ctx = _make_fl_ctx(secure_mode=False, client_name="site-a")
@@ -227,7 +185,7 @@ def test_disabled_client_registration_is_rejected():
 
 
 def test_disabled_client_heartbeat_does_not_reactivate():
-    manager = ClientManager(project_name="project", min_num_clients=1, max_num_clients=10)
+    manager = _make_manager()
     manager.disable_client("site-a")
     fl_ctx = MagicMock()
 

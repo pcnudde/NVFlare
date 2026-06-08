@@ -69,6 +69,10 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- with .Values.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           command:
             {{- toYaml .Values.command | nindent 12 }}
           args:

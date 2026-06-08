@@ -23,7 +23,7 @@ WORKDIR /opt/NVFlare
 COPY . .
 
 # Make the prefix install importable without relying on PYTHONPATH.
-RUN NVFL_RELEASE=1 python -m pip install --prefix=/opt/nvflare ".[K8S]" \
+RUN NVFL_RELEASE=1 python -m pip install --prefix=/opt/nvflare ".[K8S,STATE_STORE_POSTGRES,TRACKING]" \
     && PYTHONPATH="/opt/nvflare/lib/python${PYTHON_MINOR}/site-packages" python -m pip check \
     && mkdir -p "/usr/local/lib/python${PYTHON_MINOR}/site-packages" \
     && printf "/opt/nvflare/lib/python%s/site-packages\n" "${PYTHON_MINOR}" \

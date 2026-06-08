@@ -227,13 +227,12 @@ from an idempotent no-op.
 Use ``enable-client`` to remove the disabled flag. The client can rejoin on its
 next registration or heartbeat.
 
-The disabled-client policy is stored on the server in
-``<server_workspace>/disabled_clients.json`` and is loaded at server startup.
-Updates and persistence writes are serialized by the server client-manager lock
-and written with a temporary file followed by atomic replacement, so the policy
-survives server restart without partially written files. If the file exists but
-cannot be loaded, the server fails closed during startup instead of admitting
-previously disabled clients.
+The disabled-client policy is stored in the server State Store and survives
+server restart. During upgrade from an older filesystem-based deployment,
+``<server_workspace>/disabled_clients.json`` is imported by
+``nvflare-state-store-migrate`` before server startup. After migration, the
+JSON file is not used as runtime state. See :ref:`state_store` for database
+configuration and migration details.
 
 Client access arguments:
 

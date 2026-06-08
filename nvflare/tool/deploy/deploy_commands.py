@@ -488,7 +488,11 @@ def _prepare_k8s(kit_info: KitInfo, final_output: Path, config: dict[str, Any]) 
     _patch_comm_config_for_k8s(kit_info.kit_dir, kit_info.role, kit_info.name, parent_port, server_service_name)
     _ensure_study_data_template(kit_info.kit_dir)
     if kit_info.role == ROLE_SERVER:
-        _relocate_server_storage_to_workspace(kit_info.kit_dir, workspace_mount_path)
+        _relocate_server_storage_to_workspace(
+            kit_info.kit_dir,
+            workspace_mount_path,
+            state_store_config=parent.get("state_store") or {},
+        )
     _remove_start_scripts(kit_info.kit_dir, keep=set())
     _write_helm_chart(kit_info, config)
 
@@ -566,6 +570,8 @@ def _validate_runtime_config(runtime: str, config: dict[str, Any]) -> None:
                 "resources",
                 "pod_security_context",
                 "image_pull_secrets",
+                "env",
+                "state_store",
             },
             "parent",
         )
@@ -592,6 +598,11 @@ def _validate_runtime_config(runtime: str, config: dict[str, Any]) -> None:
         _optional_mapping(parent, "resources", "parent")
         _optional_mapping(parent, "pod_security_context", "parent")
         _optional_k8s_secret_name_list(parent, "image_pull_secrets", "parent image pull references")
+        _optional_k8s_env_list(parent, "env", "parent")
+        state_store = _optional_mapping(parent, "state_store", "parent")
+        if state_store is not None:
+            _validate_allowed_keys(state_store, {"db_url_env"}, "parent.state_store")
+            _optional_str(state_store, "db_url_env", "parent.state_store")
         _optional_str(job_launcher, "config_file_path", "job_launcher")
         _optional_str(job_launcher, "default_python_path", "job_launcher")
         _optional_non_negative_int(job_launcher, "pending_timeout", "job_launcher")
@@ -1042,6 +1053,7 @@ def _write_server_helm_chart(
         "serviceAccount": {"create": True, "annotations": {}, "automountServiceAccountToken": True},
         "podAnnotations": {},
         "rbac": {"create": True},
+        "env": parent.get("env") or [],
         "persistence": {
             "workspace": {
                 "claimName": workspace_pvc,
@@ -1061,6 +1073,17 @@ def _write_server_helm_chart(
         "hostPortEnabled": False,
         "tcpConfigMapEnabled": False,
         "service": {"type": "ClusterIP", "loadBalancerIP": None, "annotations": {}},
+        "migration": {
+            "enabled": True,
+            "command": [parent_python_path],
+            "args": [
+                "-u",
+                "-m",
+                "nvflare.app_common.state_store.state_store_migration",
+                "--server-root",
+                workspace_mount_path,
+            ],
+        },
         "command": [parent_python_path],
         "args": [
             "-u",
@@ -1112,6 +1135,7 @@ def _write_client_helm_chart(
         "serviceAccount": {"create": True, "annotations": {}, "automountServiceAccountToken": True},
         "podAnnotations": {},
         "rbac": {"create": True},
+        "env": parent.get("env") or [],
         "persistence": {
             "workspace": {
                 "claimName": workspace_pvc,
@@ -1181,7 +1205,9 @@ def _helm_src(role: str, filename: str) -> Path:
     return HELM_TEMPLATES_DIR / role / filename
 
 
-def _relocate_server_storage_to_workspace(kit_dir: Path, workspace_mount_path: str) -> None:
+def _relocate_server_storage_to_workspace(
+    kit_dir: Path, workspace_mount_path: str, state_store_config: dict[str, Any] | None = None
+) -> None:
     local_dir = kit_dir / "local"
     resources = _load_json_file(local_dir / RESOURCES_JSON_DEFAULT, RESOURCES_JSON_DEFAULT)
     if "snapshot_persistor" in resources:
@@ -1198,6 +1224,16 @@ def _relocate_server_storage_to_workspace(kit_dir: Path, workspace_mount_path: s
     for component in resources.get("components", []):
         if component.get("id") == "job_manager":
             component.setdefault("args", {})["uri_root"] = f"{workspace_mount_path}/jobs-storage"
+        elif component.get("id") == "state_store":
+            args = component.setdefault("args", {})
+            db_url_env = (state_store_config or {}).get("db_url_env")
+            if db_url_env:
+                args.pop("db_url", None)
+                args["db_url_env"] = db_url_env
+                continue
+            db_url = args.get("db_url")
+            if not args.get("db_url_env") and (not db_url or db_url.startswith("sqlite:")):
+                args["db_url"] = f"sqlite:///{workspace_mount_path}/state-store.db"
     _write_resources(local_dir, resources)
 
 
@@ -1420,6 +1456,24 @@ def _optional_k8s_secret_name_list(data: dict[str, Any], key: str, label: str) -
     for name in names:
         _validate_k8s_secret_name(name, label)
     return names
+
+
+def _optional_k8s_env_list(data: dict[str, Any], key: str, where: str) -> list[dict[str, Any]] | None:
+    if key not in data or data[key] is None:
+        return None
+    env = data[key]
+    if not isinstance(env, list):
+        _fail("INVALID_CONFIG", f"{where}.{key} must be a list of Kubernetes env entries.", "Fix the runtime config.")
+    for index, item in enumerate(env):
+        if not isinstance(item, dict):
+            _fail("INVALID_CONFIG", f"{where}.{key}[{index}] must be a mapping.", "Fix the runtime config.")
+        if not isinstance(item.get("name"), str) or not item.get("name"):
+            _fail(
+                "INVALID_CONFIG",
+                f"{where}.{key}[{index}].name must be a non-empty string.",
+                "Fix the runtime config.",
+            )
+    return env
 
 
 def _optional_str(data: dict[str, Any], key: str, where: str) -> str | None:

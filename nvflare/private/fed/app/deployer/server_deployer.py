@@ -15,10 +15,13 @@
 """FL Server deployer."""
 import threading
 
+from nvflare.apis import study_store
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_constant import FLContextKey, ReservedKey, SiteType, SystemComponents
 from nvflare.apis.signal import Signal
+from nvflare.apis.state_store import StateStore
 from nvflare.apis.workspace import Workspace
+from nvflare.app_common.state_store.legacy_migration import validate_state_store_migrated
 from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.private.fed.app.utils import component_security_check
 from nvflare.private.fed.server.fed_server import FederatedServer
@@ -101,11 +104,12 @@ class ServerDeployer:
         Returns: FL Server
 
         """
+        workspace = Workspace(args.workspace, SiteType.SERVER, args.config_folder)
         first_server, services = self.create_fl_server(args, secure_train=self.secure_train)
+        self._initialize_state_store(services)
         services.deploy(args, grpc_args=first_server, secure_train=self.secure_train)
 
         job_runner = JobRunner(workspace_root=args.workspace)
-        workspace = Workspace(args.workspace, SiteType.SERVER, args.config_folder)
         run_manager = RunManager(
             server_name=SiteType.SERVER,
             engine=services.engine,
@@ -140,6 +144,15 @@ class ServerDeployer:
             self.logger.info("deployed FLARE Server.")
 
         return services
+
+    def _initialize_state_store(self, services: FederatedServer):
+        store = self.components.get(SystemComponents.STATE_STORE)
+        assert store is not None, f"component '{SystemComponents.STATE_STORE}' must be configured"
+        if not isinstance(store, StateStore):
+            raise TypeError(f"component '{SystemComponents.STATE_STORE}' must be StateStore but got {type(store)}")
+        validate_state_store_migrated(store)
+        study_store.configure(store)
+        services.client_manager.set_state_store(store)
 
     def _start_job_runner(self, job_runner, fl_ctx):
         job_runner.run(fl_ctx)

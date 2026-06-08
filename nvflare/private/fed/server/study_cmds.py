@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-import os
-import tempfile
 from copy import deepcopy
 from typing import Dict, List, Tuple
 
+from nvflare.apis import study_store
 from nvflare.apis.client import ClientPropKey
 from nvflare.apis.fl_constant import AdminCommandNames
 from nvflare.apis.job_def import JobMetaKey
@@ -31,11 +29,8 @@ from nvflare.fuel.hci.server.constants import ConnProps
 from nvflare.fuel.sec.authz import AuthorizationService, AuthzContext, Person
 from nvflare.fuel.utils.argument_utils import SafeArgumentParser
 from nvflare.private.fed.server.server_engine import ServerEngine
-from nvflare.security.study_registry import StudyRegistry, StudyRegistryService
 
 from .cmd_utils import CommandUtil
-
-_LOCK_TIMEOUT_SECS = 30.0
 
 
 class _InvalidArgsError(ValueError):
@@ -247,30 +242,6 @@ class StudyCommandModule(CommandModule, CommandUtil):
         }
 
     @staticmethod
-    def _registry_path(engine: ServerEngine) -> str:
-        return engine.get_workspace().get_file_path_in_site_config("study_registry.json")
-
-    @staticmethod
-    def _load_registry_config(path: str) -> dict:
-        if not os.path.exists(path):
-            return {"format_version": StudyRegistry.FORMAT_VERSION, "studies": {}}
-        with open(path, "rt") as f:
-            return json.load(f)
-
-    @staticmethod
-    def _write_registry_config(path: str, config: dict):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd, temp_path = tempfile.mkstemp(prefix="study_registry.", suffix=".json", dir=os.path.dirname(path))
-        try:
-            with os.fdopen(fd, "wt") as f:
-                json.dump(config, f, indent=2, sort_keys=True)
-                f.write("\n")
-            os.replace(temp_path, path)
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-
-    @staticmethod
     def _caller_name(conn: Connection) -> str:
         return conn.get_prop(ConnProps.USER_NAME, "")
 
@@ -403,40 +374,22 @@ class StudyCommandModule(CommandModule, CommandUtil):
         payload["sites"] = sorted({s for org_sites in payload["site_orgs"].values() for s in org_sites})
         return payload
 
-    def _with_mutation(self, conn: Connection, mutation_cb):
-        if not StudyRegistryService.acquire_lock(_LOCK_TIMEOUT_SECS):
-            self._error(
-                conn,
-                "LOCK_TIMEOUT",
-                "Study registry is busy.",
-                hint="Another study mutation is in progress. Retry shortly.",
-                exit_code=3,
-            )
-            return
-
+    def _run_study_command(self, conn: Connection, command_cb):
         try:
             engine = conn.app_ctx
             if not isinstance(engine, ServerEngine):
                 raise TypeError(f"engine must be ServerEngine but got {type(engine)}")
 
-            path = self._registry_path(engine)
-            config = self._load_registry_config(path)
-            working = deepcopy(config)
-            payload = mutation_cb(engine, working)
+            payload = command_cb(engine)
             if payload is None:
-                self._error(conn, "INTERNAL_ERROR", "mutation callback returned no result", exit_code=5)
+                self._error(conn, "INTERNAL_ERROR", "study command returned no result", exit_code=5)
                 return
             if isinstance(payload, dict) and payload.get("error_code"):
                 self._reply(conn, payload)
                 return
-            new_registry = StudyRegistry(working)
-            self._write_registry_config(path, working)
-            StudyRegistryService.initialize(new_registry)
             self._reply(conn, payload)
         except Exception as e:
             self._error(conn, "INTERNAL_ERROR", f"study command failed: {e}", exit_code=5)
-        finally:
-            StudyRegistryService.release_lock()
 
     def _study_not_found(self, conn: Connection, study: str):
         self._error(
@@ -462,15 +415,14 @@ class StudyCommandModule(CommandModule, CommandUtil):
             self._error(conn, "INVALID_STUDY_NAME", str(e), exit_code=4)
             return
 
-        def _mutate(_engine, working):
-            studies = working.setdefault("studies", {})
-            study_def = studies.get(parsed.study)
+        def _run(_engine):
+            study_def = study_store.get_study(parsed.study)
+            is_new_study = study_def is None
             caller = self._caller_name(conn)
             caller_role = self._caller_role(conn)
             caller_org = self._caller_org(conn)
-            if study_def is None:
+            if is_new_study:
                 study_def = {"site_orgs": {}, "admins": []}
-                studies[parsed.study] = study_def
             elif caller_role == "org_admin" and caller_org not in self._normalize_site_orgs(study_def):
                 return {
                     "error_code": "STUDY_ALREADY_EXISTS",
@@ -489,20 +441,25 @@ class StudyCommandModule(CommandModule, CommandUtil):
                         "exit_code": 4,
                     }
 
-            site_orgs = self._normalize_site_orgs(study_def)
-            for org, sites in requested.items():
-                current = site_orgs.setdefault(org, [])
-                existing = set(current)
-                for site in sites:
-                    if site not in existing:
+            if is_new_study:
+                study_def = study_store.upsert_study(parsed.study, {"site_orgs": requested, "admins": [caller]})
+            else:
+                site_orgs = self._normalize_site_orgs(study_def)
+                all_existing = {site for org_sites in site_orgs.values() for site in org_sites}
+                for org, sites in requested.items():
+                    current = site_orgs.setdefault(org, [])
+                    for site in sites:
+                        if site in all_existing:
+                            continue
                         current.append(site)
-                        existing.add(site)
-            admins = self._normalize_admins(study_def)
-            if caller not in admins:
-                admins.append(caller)
+                        all_existing.add(site)
+                admins = self._normalize_admins(study_def)
+                if caller not in admins:
+                    admins.append(caller)
+                study_def = study_store.upsert_study(parsed.study, {"site_orgs": site_orgs, "admins": admins})
             return self._study_payload(parsed.study, study_def)
 
-        self._with_mutation(conn, _mutate)
+        self._run_study_command(conn, _run)
 
     def cmd_add_study_site(self, conn: Connection, args: List[str]):
         parser = _study_parser(AdminCommandNames.ADD_STUDY_SITE, include_sites=True, include_site_org=True)
@@ -520,8 +477,8 @@ class StudyCommandModule(CommandModule, CommandUtil):
             self._error(conn, "INVALID_STUDY_NAME", str(e), exit_code=4)
             return
 
-        def _mutate(_engine, working):
-            study_def = working.get("studies", {}).get(parsed.study)
+        def _run(_engine):
+            study_def = study_store.get_study(parsed.study)
             if not study_def or not self._is_visible_to_caller(conn, study_def):
                 return {
                     "error_code": "STUDY_NOT_FOUND",
@@ -541,19 +498,22 @@ class StudyCommandModule(CommandModule, CommandUtil):
             site_orgs = self._normalize_site_orgs(study_def)
             added = []
             already_enrolled = []
+            all_existing = {site for org_sites in site_orgs.values() for site in org_sites}
             for org, sites in requested.items():
                 current = site_orgs.setdefault(org, [])
                 existing = set(current)
                 for site in sites:
-                    if site in existing:
+                    if site in all_existing:
                         already_enrolled.append(site)
                     else:
                         current.append(site)
                         existing.add(site)
+                        all_existing.add(site)
                         added.append(site)
+            study_def = study_store.add_sites(parsed.study, requested)
             return self._site_mutation_payload(parsed.study, study_def, added=added, already_enrolled=already_enrolled)
 
-        self._with_mutation(conn, _mutate)
+        self._run_study_command(conn, _run)
 
     def cmd_remove_study_site(self, conn: Connection, args: List[str]):
         parser = _study_parser(AdminCommandNames.REMOVE_STUDY_SITE, include_sites=True, include_site_org=True)
@@ -571,8 +531,8 @@ class StudyCommandModule(CommandModule, CommandUtil):
             self._error(conn, "INVALID_STUDY_NAME", str(e), exit_code=4)
             return
 
-        def _mutate(_engine, working):
-            study_def = working.get("studies", {}).get(parsed.study)
+        def _run(_engine):
+            study_def = study_store.get_study(parsed.study)
             if not study_def or not self._is_visible_to_caller(conn, study_def):
                 return {
                     "error_code": "STUDY_NOT_FOUND",
@@ -602,9 +562,10 @@ class StudyCommandModule(CommandModule, CommandUtil):
                     if site not in current_set:
                         not_enrolled.append(site)
                 site_orgs[org] = new_current
+            study_def = study_store.remove_sites(parsed.study, requested)
             return self._site_mutation_payload(parsed.study, study_def, removed=removed, not_enrolled=not_enrolled)
 
-        self._with_mutation(conn, _mutate)
+        self._run_study_command(conn, _run)
 
     def cmd_remove_study(self, conn: Connection, args: List[str]):
         parser = _study_parser(AdminCommandNames.REMOVE_STUDY)
@@ -615,9 +576,9 @@ class StudyCommandModule(CommandModule, CommandUtil):
             self._error(conn, "INVALID_STUDY_NAME", str(e), exit_code=4)
             return
 
-        def _mutate(engine, working):
-            studies = working.get("studies", {})
-            if parsed.study not in studies:
+        def _run(engine):
+            study_def = study_store.get_study(parsed.study)
+            if study_def is None:
                 return {
                     "error_code": "STUDY_NOT_FOUND",
                     "message": f"Study '{parsed.study}' not found.",
@@ -639,23 +600,23 @@ class StudyCommandModule(CommandModule, CommandUtil):
                     "hint": "Archive or delete the associated jobs before retrying.",
                     "exit_code": 1,
                 }
-            del studies[parsed.study]
+            study_store.delete_study(parsed.study)
             return {"name": parsed.study, "removed": True}
 
-        self._with_mutation(conn, _mutate)
+        self._run_study_command(conn, _run)
 
     def cmd_list_studies(self, conn: Connection, args: List[str]):
         if len(args) != 1:
             self._error(conn, "INVALID_ARGS", "list_studies does not accept arguments", exit_code=4)
             return
-        registry = StudyRegistryService.get_registry()
         studies = []
         study_details = []
-        if registry:
-            for study_name, study_def in registry.get_studies().items():
-                if self._is_list_visible_to_caller(conn, study_def):
-                    studies.append(study_name)
-                    study_details.append(self._study_list_item(conn, study_name))
+        for row in study_store.list_studies():
+            study_name = row.get("name")
+            study_def = row.get("config_json")
+            if study_name and self._is_list_visible_to_caller(conn, study_def):
+                studies.append(study_name)
+                study_details.append(self._study_list_item(conn, study_name))
         self._reply(
             conn,
             {
@@ -673,8 +634,7 @@ class StudyCommandModule(CommandModule, CommandUtil):
         except Exception as e:
             self._error(conn, "INVALID_STUDY_NAME", str(e), exit_code=4)
             return
-        registry = StudyRegistryService.get_registry()
-        study_def = registry.get_study(parsed.study) if registry else None
+        study_def = study_store.get_study(parsed.study)
         if not study_def or not self._is_visible_to_caller(conn, study_def):
             self._study_not_found(conn, parsed.study)
             return
@@ -689,8 +649,8 @@ class StudyCommandModule(CommandModule, CommandUtil):
             self._error(conn, "INVALID_STUDY_NAME", str(e), exit_code=4)
             return
 
-        def _mutate(_engine, working):
-            study_def = working.get("studies", {}).get(parsed.study)
+        def _run(_engine):
+            study_def = study_store.get_study(parsed.study)
             if not study_def or not self._is_visible_to_caller(conn, study_def):
                 return {
                     "error_code": "STUDY_NOT_FOUND",
@@ -706,10 +666,10 @@ class StudyCommandModule(CommandModule, CommandUtil):
                     "hint": "Use a different user or remove the existing entry first.",
                     "exit_code": 1,
                 }
-            admins.append(parsed.user)
+            study_store.add_user(parsed.study, parsed.user)
             return {"study": parsed.study, "user": parsed.user}
 
-        self._with_mutation(conn, _mutate)
+        self._run_study_command(conn, _run)
 
     def cmd_remove_study_user(self, conn: Connection, args: List[str]):
         parser = _study_parser(AdminCommandNames.REMOVE_STUDY_USER, include_user=True)
@@ -720,8 +680,8 @@ class StudyCommandModule(CommandModule, CommandUtil):
             self._error(conn, "INVALID_STUDY_NAME", str(e), exit_code=4)
             return
 
-        def _mutate(_engine, working):
-            study_def = working.get("studies", {}).get(parsed.study)
+        def _run(_engine):
+            study_def = study_store.get_study(parsed.study)
             if not study_def or not self._is_visible_to_caller(conn, study_def):
                 return {
                     "error_code": "STUDY_NOT_FOUND",
@@ -737,7 +697,7 @@ class StudyCommandModule(CommandModule, CommandUtil):
                     "hint": "Use add-user to add the user first.",
                     "exit_code": 1,
                 }
-            admins.remove(parsed.user)
+            study_store.remove_user(parsed.study, parsed.user)
             return {"study": parsed.study, "user": parsed.user, "removed": True}
 
-        self._with_mutation(conn, _mutate)
+        self._run_study_command(conn, _run)

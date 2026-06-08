@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import threading
 from copy import deepcopy
 from typing import Dict, Optional
 
 
-class StudyRegistry:
+class LegacyStudyRegistry:
     FORMAT_VERSION = "1.0"
 
     def __init__(self, studies_config: dict):
@@ -108,28 +107,3 @@ class StudyRegistry:
     def get_study(self, study: str) -> Optional[dict]:
         study_def = self._studies.get(study)
         return deepcopy(study_def) if study_def is not None else None
-
-
-class StudyRegistryService:
-    _registry: Optional[StudyRegistry] = None
-    _mutation_lock = threading.Lock()
-
-    @staticmethod
-    def initialize(registry: Optional[StudyRegistry]):
-        StudyRegistryService._registry = registry
-
-    @staticmethod
-    def get_registry() -> Optional[StudyRegistry]:
-        return StudyRegistryService._registry
-
-    @staticmethod
-    def reset():
-        StudyRegistryService._registry = None
-
-    @staticmethod
-    def acquire_lock(timeout: float) -> bool:
-        return StudyRegistryService._mutation_lock.acquire(timeout=timeout)
-
-    @staticmethod
-    def release_lock():
-        StudyRegistryService._mutation_lock.release()

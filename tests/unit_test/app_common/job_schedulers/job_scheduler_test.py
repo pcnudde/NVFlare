@@ -165,20 +165,12 @@ class MockServerEngine(ServerEngineSpec):
         pass
 
 
-class _FakeStudyRegistry:
-    def __init__(self, sites=None):
-        self.sites = sites or {}
-
-    def get_sites(self, study):
-        return self.sites.get(study)
-
-
-class _FakeStudyRegistryService:
-    registry = None
+class _FakeStudyStore:
+    sites = {}
 
     @staticmethod
-    def get_registry():
-        return _FakeStudyRegistryService.registry
+    def get_sites(study):
+        return _FakeStudyStore.sites.get(study)
 
 
 def create_servers(server_num, sites: list[Site]):
@@ -524,11 +516,11 @@ class TestDefaultJobScheduler:
 
     def test_all_sites_are_narrowed_to_study_enrolled_sites(self, monkeypatch, setup_and_teardown):
         servers, scheduler, num_sites, job_manager = setup_and_teardown
-        monkeypatch.setattr(job_scheduler_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
+        monkeypatch.setattr(job_scheduler_module, "study_store", _FakeStudyStore, raising=False)
         monkeypatch.setattr(
-            _FakeStudyRegistryService,
-            "registry",
-            _FakeStudyRegistry(sites={"cancer-research": {"site0", "site2"}}),
+            _FakeStudyStore,
+            "sites",
+            {"cancer-research": {"site0", "site2"}},
             raising=False,
         )
 
@@ -550,11 +542,11 @@ class TestDefaultJobScheduler:
 
     def test_required_out_of_study_site_blocks_job(self, monkeypatch, setup_and_teardown):
         servers, scheduler, num_sites, job_manager = setup_and_teardown
-        monkeypatch.setattr(job_scheduler_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
+        monkeypatch.setattr(job_scheduler_module, "study_store", _FakeStudyStore, raising=False)
         monkeypatch.setattr(
-            _FakeStudyRegistryService,
-            "registry",
-            _FakeStudyRegistry(sites={"cancer-research": {"site0"}}),
+            _FakeStudyStore,
+            "sites",
+            {"cancer-research": {"site0"}},
             raising=False,
         )
 

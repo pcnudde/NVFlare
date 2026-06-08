@@ -20,7 +20,14 @@ import re
 import sys
 
 from nvflare.apis.fl_component import FLComponent
-from nvflare.apis.fl_constant import ConnectionSecurity, ConnPropKey, FilterKey, SiteType, SystemConfigs
+from nvflare.apis.fl_constant import (
+    ConnectionSecurity,
+    ConnPropKey,
+    FilterKey,
+    SiteType,
+    SystemComponents,
+    SystemConfigs,
+)
 from nvflare.apis.workspace import Workspace
 from nvflare.fuel.data_event.utils import set_scope_property
 from nvflare.fuel.f3.cellnet.fqcn import FQCN
@@ -148,7 +155,6 @@ class FLServerStarterConfiger(JsonConfigurator):
             return
 
         if re.search(r"^components\.#[0-9]+$", path):
-            c = self.build_component(element)
             cid = element.get("id", None)
             if not cid:
                 raise ConfigError("missing component id")
@@ -156,6 +162,10 @@ class FLServerStarterConfiger(JsonConfigurator):
             if not isinstance(cid, str):
                 raise ConfigError('"id" must be str but got {}'.format(type(cid)))
 
+            if self.args.job_id and cid == SystemComponents.STATE_STORE:
+                return
+
+            c = self.build_component(element)
             if cid in self.components:
                 raise ConfigError('duplicate component id "{}"'.format(cid))
 

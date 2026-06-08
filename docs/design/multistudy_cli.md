@@ -28,14 +28,14 @@
 - [Server-Side Operations](#server-side-operations)
   - [`StudyCommandModule`](#studycommandmodule)
   - [Mutation Flow](#mutation-flow)
-  - [`study_registry.json` format (extended)](#study_registryjson-format-extended)
+  - [Study config shape](#study-config-shape)
 - [Validation Rules](#validation-rules)
   - [Study Name](#study-name)
   - [Sites](#sites)
   - [Users](#users)
 - [Behavioral Constraints](#behavioral-constraints)
   - [Remove](#remove)
-  - [Hot-Reload](#hot-reload)
+  - [Runtime Visibility](#runtime-visibility)
   - [Admin Self-Removal](#admin-self-removal)
   - [Provisioning Boundary](#provisioning-boundary)
 - [Relationship to Distributed Provisioning](#relationship-to-distributed-provisioning)
@@ -51,19 +51,24 @@
 
 ## Introduction
 
-The shipped multi-study design stores named-study state in `study_registry.json`. In centralized provisioning, `project.yml` may bootstrap the initial contents of that file. This document defines the runtime CLI management surface that lets a running server accept ongoing study mutations without tying them to provisioning.
+The shipped multi-study design stores named-study state in the server State Store. In centralized provisioning,
+`project.yml` may bootstrap an initial `study_registry.json`; the State Store migration imports that file once before
+server startup. This document defines the runtime CLI management surface that lets a running server accept ongoing study
+mutations without tying them to provisioning.
 
-The backend for all mutations is the same `study_registry.json` file the server loads at startup. The server applies mutations through a serialized validate-write-publish flow so the runtime registry and the persisted file remain aligned under normal operation and fail closed on validation/write errors.
+The backend for all runtime mutations is the State Store. The server applies mutations through database transactions
+so runtime authorization and persisted state stay aligned under normal operation and fail closed on validation or write
+errors.
 
 ---
 
 ## Core Principles
 
-1. **Same file, same format** — mutations target the provisioned `study_registry.json` format used by multi-study, including `site_orgs` and `admins`.
-2. **Authoritative in-memory registry** — after a successful mutation the server hot-reloads the in-memory `StudyRegistry`; a server restart is not required.
-3. **Role-based lifecycle** — `remove` requires `project_admin`; `register`, `add-site`, `remove-site`, and study-user membership management are accessible to `project_admin` and `org_admin`, with `org_admin` visibility and authority scoped to studies where their org appears in `site_orgs`. `register` is a create-or-merge operation executed atomically under the mutation lock — see Validation Rules for the precise per-role behavior.
+1. **Same study shape** — mutations target the study shape used by multi-study, including `site_orgs` and `admins`.
+2. **Authoritative State Store** — after a successful mutation the database is authoritative; a server restart is not required.
+3. **Role-based lifecycle** — `remove` requires `project_admin`; `register`, `add-site`, `remove-site`, and study-user membership management are accessible to `project_admin` and `org_admin`, with `org_admin` visibility and authority scoped to studies where their org appears in `site_orgs`. `register` is a create-or-merge operation executed atomically in the State Store — see Validation Rules for the precise per-role behavior.
 4. **Cert role for lifecycle operations** — study lifecycle commands check the certificate-baked role (from distributed provisioning), consistent with the existing `must_be_project_admin` pattern for server-global operations.
-5. **Best-effort job-association guard** — `remove` queries the job store before applying the deletion and rejects with `STUDY_HAS_JOBS` if any associated jobs exist at that moment. This is a best-effort guard: the mutation lock prevents two concurrent `remove` calls from racing, but it does not gate job submission. A job submitted concurrently may arrive after the guard passes and before the registry is updated. Jobs are the permanent audit trail regardless of whether the study entry still exists.
+5. **Best-effort job-association guard** — `remove` queries job records before applying the deletion and rejects with `STUDY_HAS_JOBS` if any associated jobs exist at that moment. This is a best-effort guard: the study transaction does not gate job submission. A job submitted concurrently may arrive after the guard passes and before the study row is deleted. Jobs are the permanent audit trail regardless of whether the study entry still exists.
 6. **Agent-usable by design** — all commands follow the same output, error, exit-code, and flag conventions as the rest of the NVFlare CLI.
 
 ---
@@ -76,11 +81,11 @@ The backend for all mutations is the same `study_registry.json` file the server 
 
 ### Why the CLI Uses a Simpler Model
 
-The server can reliably know the caller's identity, role, and org from the presented admin certificate at session creation time. For client sites, the server derives `site -> org` ownership from authenticated client certificates when sites connect. The study registry therefore stores study membership as `site_orgs` instead of a flat `sites` list. That leads to the following model:
+The server can reliably know the caller's identity, role, and org from the presented admin certificate at session creation time. For client sites, the server derives `site -> org` ownership from authenticated client certificates when sites connect. The State Store therefore stores study membership as `site_orgs` instead of a flat `sites` list. That leads to the following model:
 
 - `org_admin` may supply `--sites` only; the server records those sites under the caller's cert org in `site_orgs`
 - `project_admin` must supply explicit org grouping for lifecycle mutations because the server must know which org owns each newly enrolled site
-- target users are treated as declarative registry inputs
+- target users are treated as declarative study-membership inputs
 
 ### What the System Validates
 
@@ -358,7 +363,7 @@ nvflare study remove-user cancer-research trainer@org_a.com --kit-id prod_admin
 
 ### `nvflare study show <name>`
 
-The `"users"` key in the response corresponds to the `"admins"` list in `study_registry.json`. The CLI response uses `"users"` to avoid exposing the internal file field name.
+The `"users"` key in the response corresponds to the stored `"admins"` list. The CLI response uses `"users"` to avoid exposing the internal field name.
 
 ```json
 {
@@ -575,7 +580,7 @@ The response returns per-site outcome lists. `site_orgs` is the authoritative gr
 
 | Error code | Exit | Meaning |
 |------------|------|---------|
-| `STUDY_NOT_FOUND` | 1 | Study name does not exist in the registry, or exists but is not visible to the caller (`org_admin`'s org not enrolled in the study's `site_orgs` mapping) — the same code is used for both cases intentionally to avoid leaking existence. Exception: `register` does NOT use this code (see `STUDY_ALREADY_EXISTS`). |
+| `STUDY_NOT_FOUND` | 1 | Study name does not exist in the State Store, or exists but is not visible to the caller (`org_admin`'s org not enrolled in the study's `site_orgs` mapping) — the same code is used for both cases intentionally to avoid leaking existence. Exception: `register` does NOT use this code (see `STUDY_ALREADY_EXISTS`). |
 | `STUDY_ALREADY_EXISTS` | 1 | Study name already registered. Returned by `register` when the study exists but the caller's org is not enrolled. `register` is not a join path — returning `STUDY_NOT_FOUND` on a create would be semantically backwards and confusing. The caller already knows the name; learning "it is taken" reveals nothing actionable. |
 | `STUDY_HAS_JOBS` | 1 | Study has associated jobs; `remove` rejected |
 | `INVALID_STUDY_NAME` | 4 | Study name fails the name-validation regex or is `"default"` |
@@ -677,7 +682,7 @@ Study users are membership only. There is no study-specific role. Two distinct a
 
 ### `StudyCommandModule`
 
-A new `StudyCommandModule` (parallel to `SystemCommandModule` and `JobCommandModule`) registers the study management commands. It embeds `CommandUtil` and holds a reference to the mutable registry service.
+A new `StudyCommandModule` (parallel to `SystemCommandModule` and `JobCommandModule`) registers the study management commands. It embeds `CommandUtil` and uses the configured State Store for runtime study state.
 
 ### Mutation Flow
 
@@ -685,20 +690,23 @@ All mutating commands follow the same serialized pattern:
 
 1. **Authorize** — check cert role; reject if insufficient.
 2. **Validate** — check that the study name, user, and sites are syntactically valid before modifying state.
-3. **Acquire mutation lock** — a process-local lock serializes all registry mutations so concurrent admin commands cannot lose updates. The acquire call has a 30-second timeout; if the lock is not acquired within that window, the command returns immediately with `LOCK_TIMEOUT` (exit 3). The lock is always released in a `finally` block — a failure during steps 4–9 cannot leave the lock permanently held.
-4. **Load current state** — read `study_registry.json` from disk into a working copy while holding the lock.
-5. **Guard** — for `remove_study`, query the job store (while holding the lock) for any job tagged with the study name; reject with `STUDY_HAS_JOBS` if any exist. Running inside the lock eliminates the TOCTOU window between two concurrent `remove` calls, but does not prevent a job submission that races in after this check — see the design limitation note below.
-6. **Apply mutation** — modify the working copy in memory. `register_study` auto-inserts the caller into `admins` if not already present; `add-user` and `remove-user` mutate `admins` explicitly. Study membership is stored in `site_orgs`: `org_admin` mutations affect only `site_orgs[caller_org]`; `project_admin` mutations may affect multiple org groups in one call.
-7. **Validate resulting config** — construct a new `StudyRegistry` from the updated working copy before touching the live registry pointer.
-8. **Write atomically** — write the validated config to a temp file in the same directory, then `os.replace()` to the final path.
-9. **Publish hot-reload** — call `StudyRegistryService.initialize(new_registry)` while still holding the lock.
-10. **Return result** — reply to the admin connection with the updated study state as a JSON envelope.
+3. **Start transaction** — perform the mutation through the State Store so concurrent admin commands cannot lose updates.
+4. **Load current state** — read the current study rows in the transaction.
+5. **Guard** — for `remove_study`, query the job records for any job tagged with the study name; reject with `STUDY_HAS_JOBS` if any exist. This does not prevent a job submission that races in after this check — see the design limitation note below.
+6. **Apply mutation** — update the study rows. `register_study` auto-inserts the caller into `admins` if not already present; `add-user` and `remove-user` mutate `admins` explicitly. Study membership is stored in `site_orgs`: `org_admin` mutations affect only `site_orgs[caller_org]`; `project_admin` mutations may affect multiple org groups in one call.
+7. **Validate resulting config** — normalize and validate the updated study shape before committing.
+8. **Commit transaction** — the updated study is persisted in the State Store.
+9. **Return result** — reply to the admin connection with the updated study state as a JSON envelope.
 
-If validation of the post-mutation config fails, nothing is written and the live registry remains unchanged. If the disk write fails, nothing is published to the live registry. This still does not make the file update and pointer swap literally atomic across all failure modes, but it avoids the main split-brain case of publishing an invalid registry and makes the rollback behavior explicit.
+If validation of the post-mutation config fails, the transaction is not committed and the previous study rows remain
+unchanged.
 
-**Design limitation:** The mutation lock serializes concurrent registry mutations (e.g., two `register` or `remove` calls at the same time). It does not gate job submissions — a job may be submitted to a study being concurrently removed if the submission races the `remove` mutation. The job-association guard (step 5) checks the job store at the time of the guard; any job submitted after that point is not prevented by the lock.
+**Design limitation:** The mutation transaction serializes the study change itself, but it does not gate job submissions
+outside that transaction. A job may be submitted to a study being concurrently removed if the submission races the
+`remove` mutation. The job-association guard (step 5) checks job records at the time of the guard; any job submitted
+after that point is not prevented by the study mutation.
 
-### `study_registry.json` format (extended)
+### Study config shape
 
 ```json
 {
@@ -715,7 +723,8 @@ If validation of the post-mutation config fails, nothing is written and the live
 }
 ```
 
-Mutations only add, modify, or remove entries under `"studies"`. The format is identical to what provisioning generates from `project.yml`. The `"format_version"` field is never changed.
+The shape is the same one imported from provisioning's `study_registry.json`. Runtime mutations update the State Store,
+not the legacy JSON file.
 
 ---
 
@@ -727,7 +736,7 @@ Mutations only add, modify, or remove entries under `"studies"`. The format is i
 - The regex is chosen to guarantee safe use as a filesystem path component: it excludes `/`, `.`, `..`, spaces, and all shell-special characters, so names can be safely joined into paths such as `/data/<study>/<dataset>` without sanitization
 - Dataset names must satisfy the same regex for the same reason — both appear as path components in the data mount path
 - `default` is reserved and always rejected with `INVALID_STUDY_NAME`
-- `register` is a **create-or-merge** operation, not a pure create. The entire check-then-mutate sequence runs under the mutation lock so two concurrent `register` calls on the same new study name cannot both pass the existence check and produce inconsistent state.
+- `register` is a **create-or-merge** operation, not a pure create. The entire check-then-mutate sequence runs in the State Store so two concurrent `register` calls on the same new study name cannot both pass the existence check and produce inconsistent state.
 
   `register` always applies **merge semantics** on an existing study: supplied sites that are not yet enrolled are added under the appropriate org group in `site_orgs`; already-enrolled sites are silently skipped. The caller is recorded in `admins` if not already present. `register` never removes sites or `admins` entries — removal requires explicit `remove-site` or `remove-user`.
 
@@ -773,9 +782,11 @@ Mutations only add, modify, or remove entries under `"studies"`. The format is i
 - Existing authenticated sessions continue to run with their session snapshot. New logins to the removed study are rejected immediately after the reload.
 - Session eviction is deferred unless a clean `SessionManager` integration is added; `remove` does not disconnect existing sessions.
 
-### Hot-Reload
+### Runtime Visibility
 
-After any successful mutation the in-memory `StudyRegistry` is replaced through the serialized publish step described above. Sessions that are already authenticated continue using their session-creation snapshot; the new registry takes effect for subsequent logins.
+After any successful mutation the State Store contains the new study state. Sessions that are already authenticated
+continue using their session-creation snapshot; the new state takes effect for subsequent logins and study-management
+commands.
 
 - A user added to a study can log in immediately without a server restart.
 - A user removed from a study cannot open a new session for that study, but an existing authenticated session is not forcibly terminated.
@@ -789,6 +800,7 @@ After any successful mutation the in-memory `StudyRegistry` is replaced through 
 These commands mutate runtime study state only.
 
 - centralized provisioning may bootstrap the initial `study_registry.json`
+- `nvflare-state-store-migrate` imports the bootstrap file once before server startup
 - dynamic provisioning manages participants and certificates only
 - dynamic provisioning does not create, update, or remove studies
 - ongoing study changes are made through `nvflare study ...`, not through provisioning
@@ -851,7 +863,11 @@ The distributed provisioning design already establishes the trust chain for cert
 - The server reads the client cert when a site connects and derives that site's org membership from the authenticated connection
 - The multi-study CLI uses the admin cert role to gate study lifecycle and study-user membership operations, and uses the connected-client cert org map to validate requested sites
 
-The cert is the gate for **who can call** study lifecycle and study-user membership commands — it establishes identity, cert role, and caller org at session creation time. Connected client certificates establish **which org each site belongs to** at runtime. The registry then determines **which studies** an `org_admin` can act on by checking whether that org appears in the study's `site_orgs` mapping. Centralized provisioning may bootstrap initial study contents, but the running server treats `study_registry.json` as runtime state thereafter.
+The cert is the gate for **who can call** study lifecycle and study-user membership commands — it establishes identity,
+cert role, and caller org at session creation time. Connected client certificates establish **which org each site belongs
+to** at runtime. The State Store then determines **which studies** an `org_admin` can act on by checking whether that
+org appears in the study's `site_orgs` mapping. Centralized provisioning may bootstrap initial study contents, but the
+running server treats the State Store as runtime state thereafter.
 
 ---
 
@@ -872,7 +888,7 @@ The cert is the gate for **who can call** study lifecycle and study-user members
 | `nvflare/cli.py` | Register `nvflare study` top-level subcommand |
 | `nvflare/private/fed/server/server_cmd_modules.py` | Register `StudyCommandModule` |
 | `nvflare/fuel/flare_api/flare_api.py` | Add `register_study`, `add_study_site`, `remove_study_site`, `remove_study`, `list_studies`, `show_study`, `add_study_user`, `remove_study_user` session methods |
-| `nvflare/security/study_registry.py` | Add mutation lock support or companion synchronization helper for serialized registry updates |
+| `nvflare/apis/study_store.py` | Study normalization and State Store access helpers |
 
 ### Session API
 
@@ -888,10 +904,10 @@ All handlers (`register`, `add-site`, `remove-site`, `remove`, `list`, `show`, `
 | User membership commands | `add-user`, `remove-user` under `nvflare study` |
 | Study lifecycle authorization | `remove`: `project_admin` only. `register`, `add-site`, `remove-site`: `project_admin` or `org_admin` (`org_admin` uses `--sites`; `project_admin` uses `--site-org`; `org_admin` scoped to studies where their org is enrolled). `list`/`show`: `project_admin` sees all; `org_admin` sees only studies where their org is enrolled |
 | User membership authorization | `project_admin` (any study); `org_admin` (studies where caller's org is enrolled) |
-| Backend file | `study_registry.json` with `site_orgs` plus `admins` |
+| Backend store | State Store study rows with `site_orgs` plus `admins` |
 | Dataset mapping | Out of scope for this design; deferred to a future iteration |
-| Persistence | Serialized mutation flow with lock, temp file, `os.replace()`, then registry publish |
-| In-memory reload | Hot-reload after each mutation; no server restart required |
+| Persistence | State Store transactions |
+| Runtime visibility | No in-memory registry reload required; commands read current database state |
 | Job-association guard | Best-effort: `remove` queries the job store at guard time and rejects with `STUDY_HAS_JOBS` if any tagged job exists; not atomic with concurrent job submission |
 | Active-session behavior | Existing authenticated sessions unaffected; forced session eviction deferred until a clean session-manager integration is designed |
 | Output format | JSON envelope (`schema_version`, `status`, `data`) via `--format json`; human text by default |

@@ -14,6 +14,7 @@
 
 from typing import List
 
+from nvflare.apis import study_store
 from nvflare.apis.job_def import DEFAULT_STUDY, JobMetaKey
 from nvflare.apis.server_engine_spec import ServerEngineSpec
 from nvflare.fuel.hci.conn import Connection
@@ -22,7 +23,6 @@ from nvflare.fuel.hci.server.authz import PreAuthzReturnCode
 from nvflare.fuel.hci.server.constants import ConnProps
 from nvflare.fuel.utils.admin_name_utils import is_valid_admin_client_name
 from nvflare.private.fed.server.admin import FedAdminServer
-from nvflare.security.study_registry import StudyRegistryService
 
 
 class CommandUtil(object):
@@ -40,10 +40,9 @@ class CommandUtil(object):
     JOB = "job"
 
     def _get_study_auth_context(self, conn: Connection):
-        registry = StudyRegistryService.get_registry()
         study = conn.get_prop(ConnProps.ACTIVE_STUDY, DEFAULT_STUDY)
-        if registry and study and study != DEFAULT_STUDY:
-            return registry, study
+        if study and study != DEFAULT_STUDY and study_store.has_study(study):
+            return True, study
         return None, None
 
     def _apply_study_role_for_authz(self, conn: Connection) -> bool:
@@ -142,15 +141,11 @@ class CommandUtil(object):
         conn.set_prop(self.TARGET_CLIENT_NAMES, client_names)
         conn.set_prop(self.TARGET_CLIENTS, all_clients)
 
-        registry = StudyRegistryService.get_registry()
-        if not registry:
-            return ""
-
         study = conn.get_prop(ConnProps.ACTIVE_STUDY, DEFAULT_STUDY)
         if study == DEFAULT_STUDY:
             return ""
 
-        enrolled_sites = registry.get_sites(study)
+        enrolled_sites = study_store.get_sites(study)
         if enrolled_sites is None:
             return ""
 

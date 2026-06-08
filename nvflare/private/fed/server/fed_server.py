@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import json
-import os
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -330,8 +329,6 @@ class FederatedServer(BaseServer):
         self.secure_train = secure_train
 
         self.workspace = args.workspace
-        if isinstance(self.workspace, str):
-            self.client_manager.set_disabled_clients_file(os.path.join(self.workspace, "disabled_clients.json"))
         self.snapshot_location = None
         self.server_state: ServerState = HotState()
         self.snapshot_persistor = snapshot_persistor

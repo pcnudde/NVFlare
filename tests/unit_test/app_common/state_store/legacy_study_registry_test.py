@@ -12,20 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib
-
-
-def _registry_module():
-    return importlib.import_module("nvflare.security.study_registry")
+from nvflare.app_common.state_store.legacy_study_registry import LegacyStudyRegistry
 
 
 def _make_registry_config(studies):
     return {"format_version": "1.0", "studies": studies}
 
 
-def test_study_registry_tracks_user_membership_for_study():
-    study_registry = _registry_module()
-    registry = study_registry.StudyRegistry(
+def test_legacy_study_registry_tracks_user_membership_for_study():
+    registry = LegacyStudyRegistry(
         _make_registry_config(
             {
                 "cancer-research": {
@@ -39,35 +34,30 @@ def test_study_registry_tracks_user_membership_for_study():
     assert registry.has_user("admin@nvidia.com", "cancer-research") is True
 
 
-def test_study_registry_rejects_missing_or_invalid_format_version():
-    study_registry = _registry_module()
-
+def test_legacy_study_registry_rejects_missing_or_invalid_format_version():
     try:
-        study_registry.StudyRegistry({"studies": {"cancer-research": {}}})
+        LegacyStudyRegistry({"studies": {"cancer-research": {}}})
         assert False, "expected ValueError for missing format_version"
     except ValueError as e:
         assert "format_version" in str(e)
 
     try:
-        study_registry.StudyRegistry({"format_version": "2.0", "studies": {"cancer-research": {}}})
+        LegacyStudyRegistry({"format_version": "2.0", "studies": {"cancer-research": {}}})
         assert False, "expected ValueError for invalid format_version"
     except ValueError as e:
         assert "format_version" in str(e)
 
 
-def test_study_registry_rejects_missing_studies_mapping():
-    study_registry = _registry_module()
-
+def test_legacy_study_registry_rejects_missing_studies_mapping():
     try:
-        study_registry.StudyRegistry({"format_version": "1.0"})
+        LegacyStudyRegistry({"format_version": "1.0"})
         assert False, "expected ValueError for missing studies mapping"
     except ValueError as e:
         assert "studies" in str(e)
 
 
-def test_study_registry_returns_false_for_missing_user_or_study():
-    study_registry = _registry_module()
-    registry = study_registry.StudyRegistry(
+def test_legacy_study_registry_returns_false_for_missing_user_or_study():
+    registry = LegacyStudyRegistry(
         _make_registry_config(
             {
                 "cancer-research": {
@@ -84,9 +74,8 @@ def test_study_registry_returns_false_for_missing_user_or_study():
     assert registry.has_study("unknown-study") is False
 
 
-def test_study_registry_returns_enrolled_sites_as_a_set():
-    study_registry = _registry_module()
-    registry = study_registry.StudyRegistry(
+def test_legacy_study_registry_returns_enrolled_sites_as_a_set():
+    registry = LegacyStudyRegistry(
         _make_registry_config(
             {
                 "cancer-research": {
@@ -101,44 +90,15 @@ def test_study_registry_returns_enrolled_sites_as_a_set():
     assert registry.has_study("cancer-research") is True
 
 
-def test_study_registry_service_returns_initialized_registry():
-    study_registry = _registry_module()
-    registry = study_registry.StudyRegistry(
-        _make_registry_config(
-            {
-                "cancer-research": {
-                    "site_orgs": {"org_a": ["site-a"]},
-                    "admins": ["admin@nvidia.com"],
-                }
-            }
-        )
-    )
-
-    study_registry.StudyRegistryService.initialize(registry)
-
-    assert study_registry.StudyRegistryService.get_registry() is registry
-
-
-def test_study_registry_service_reset_clears_registry():
-    study_registry = _registry_module()
-    study_registry.StudyRegistryService.initialize(study_registry.StudyRegistry(_make_registry_config({"study-a": {}})))
-
-    study_registry.StudyRegistryService.reset()
-
-    assert study_registry.StudyRegistryService.get_registry() is None
-
-
-def test_study_registry_rejects_duplicate_site_across_org_groups():
-    study_registry = _registry_module()
-
+def test_legacy_study_registry_rejects_duplicate_site_across_org_groups():
     try:
-        study_registry.StudyRegistry(
+        LegacyStudyRegistry(
             _make_registry_config(
                 {
                     "cancer-research": {
                         "site_orgs": {
                             "org_a": ["site-shared"],
-                            "org_b": ["site-shared"],  # duplicate
+                            "org_b": ["site-shared"],
                         },
                         "admins": [],
                     }
@@ -150,9 +110,8 @@ def test_study_registry_rejects_duplicate_site_across_org_groups():
         assert "duplicate" in str(e).lower()
 
 
-def test_study_registry_derived_flat_sites_union_of_all_org_groups():
-    study_registry = _registry_module()
-    registry = study_registry.StudyRegistry(
+def test_legacy_study_registry_derived_flat_sites_union_of_all_org_groups():
+    registry = LegacyStudyRegistry(
         _make_registry_config(
             {
                 "cancer-research": {
@@ -170,17 +129,14 @@ def test_study_registry_derived_flat_sites_union_of_all_org_groups():
     assert sites == {"site-a", "site-b", "site-c"}
 
 
-def test_study_registry_flat_sites_excludes_sites_from_removed_org():
-    study_registry = _registry_module()
-    # Simulate what happens after remove-site removes all sites from org_b:
-    # the flat sites set must not contain org_b's former sites.
-    registry = study_registry.StudyRegistry(
+def test_legacy_study_registry_flat_sites_excludes_sites_from_removed_org():
+    registry = LegacyStudyRegistry(
         _make_registry_config(
             {
                 "cancer-research": {
                     "site_orgs": {
                         "org_a": ["site-a"],
-                        "org_b": [],  # org_b enrolled but no sites left
+                        "org_b": [],
                     },
                     "admins": [],
                 }

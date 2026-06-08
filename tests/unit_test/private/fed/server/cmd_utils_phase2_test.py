@@ -61,33 +61,26 @@ class _FakeEngine:
         return clients, invalid
 
 
-class _FakeStudyRegistry:
-    def __init__(self, studies=None):
-        self.studies = studies or {}
+class _FakeStudyStore:
+    studies = {}
 
-    def has_study(self, study):
-        return study in self.studies
+    @classmethod
+    def has_study(cls, study):
+        return study in cls.studies
 
-    def get_sites(self, study):
-        return self.studies.get(study)
-
-
-class _FakeStudyRegistryService:
-    registry = None
-
-    @staticmethod
-    def get_registry():
-        return _FakeStudyRegistryService.registry
+    @classmethod
+    def get_sites(cls, study):
+        return cls.studies.get(study)
 
 
-def _install_registry(monkeypatch, registry):
-    monkeypatch.setattr(cmd_utils_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
+def _install_registry(monkeypatch, studies):
+    monkeypatch.setattr(cmd_utils_module, "study_store", _FakeStudyStore, raising=False)
     monkeypatch.setattr(cmd_utils_module, "ServerEngineSpec", object)
-    _FakeStudyRegistryService.registry = registry
+    _FakeStudyStore.studies = studies
 
 
 def test_command_authz_required_keeps_cert_role_for_named_study(monkeypatch):
-    _install_registry(monkeypatch, _FakeStudyRegistry(studies={"cancer-research": {"site-a"}}))
+    _install_registry(monkeypatch, {"cancer-research": {"site-a"}})
 
     conn = _FakeConnection(
         props={
@@ -104,7 +97,7 @@ def test_command_authz_required_keeps_cert_role_for_named_study(monkeypatch):
 
 
 def test_authorize_client_operation_keeps_cert_role_for_named_study(monkeypatch):
-    _install_registry(monkeypatch, _FakeStudyRegistry(studies={"cancer-research": {"site-a"}}))
+    _install_registry(monkeypatch, {"cancer-research": {"site-a"}})
 
     conn = _FakeConnection(
         props={
@@ -122,7 +115,7 @@ def test_authorize_client_operation_keeps_cert_role_for_named_study(monkeypatch)
 
 
 def test_authorize_server_operation_requires_authz_for_client_targets_when_registry_exists(monkeypatch):
-    _install_registry(monkeypatch, _FakeStudyRegistry(studies={"cancer-research": {"site-a"}}))
+    _install_registry(monkeypatch, {"cancer-research": {"site-a"}})
 
     conn = _FakeConnection(
         props={
@@ -140,7 +133,7 @@ def test_authorize_server_operation_requires_authz_for_client_targets_when_regis
 
 
 def test_authorize_server_operation_keeps_cert_role_for_all_targets(monkeypatch):
-    _install_registry(monkeypatch, _FakeStudyRegistry(studies={"cancer-research": {"site-a"}}))
+    _install_registry(monkeypatch, {"cancer-research": {"site-a"}})
 
     conn = _FakeConnection(
         props={
@@ -158,7 +151,7 @@ def test_authorize_server_operation_keeps_cert_role_for_all_targets(monkeypatch)
 
 
 def test_authorize_server_operation_preserves_ok_for_client_targets_without_registry(monkeypatch):
-    _install_registry(monkeypatch, None)
+    _install_registry(monkeypatch, {})
 
     conn = _FakeConnection(
         props={
@@ -176,7 +169,7 @@ def test_authorize_server_operation_preserves_ok_for_client_targets_without_regi
 
 
 def test_validate_command_targets_filters_clients_by_enrolled_study_sites(monkeypatch):
-    _install_registry(monkeypatch, _FakeStudyRegistry(studies={"cancer-research": {"site-a"}}))
+    _install_registry(monkeypatch, {"cancer-research": {"site-a"}})
 
     conn = _FakeConnection(
         props={ConnProps.ACTIVE_STUDY: "cancer-research"},
@@ -192,7 +185,7 @@ def test_validate_command_targets_filters_clients_by_enrolled_study_sites(monkey
 
 
 def test_validate_command_targets_errors_when_named_clients_are_outside_study(monkeypatch):
-    _install_registry(monkeypatch, _FakeStudyRegistry(studies={"cancer-research": {"site-a"}}))
+    _install_registry(monkeypatch, {"cancer-research": {"site-a"}})
 
     conn = _FakeConnection(
         props={ConnProps.ACTIVE_STUDY: "cancer-research"},
@@ -205,7 +198,7 @@ def test_validate_command_targets_errors_when_named_clients_are_outside_study(mo
 
 
 def test_validate_command_targets_keeps_default_sessions_unfiltered_with_registry(monkeypatch):
-    _install_registry(monkeypatch, _FakeStudyRegistry(studies={"cancer-research": {"site-a"}}))
+    _install_registry(monkeypatch, {"cancer-research": {"site-a"}})
 
     conn = _FakeConnection(
         props={ConnProps.ACTIVE_STUDY: DEFAULT_STUDY},
@@ -221,7 +214,7 @@ def test_validate_command_targets_keeps_default_sessions_unfiltered_with_registr
 
 
 def test_validate_command_targets_silently_narrows_all_targets_to_study(monkeypatch):
-    _install_registry(monkeypatch, _FakeStudyRegistry(studies={"cancer-research": {"site-a"}}))
+    _install_registry(monkeypatch, {"cancer-research": {"site-a"}})
 
     conn = _FakeConnection(
         props={ConnProps.ACTIVE_STUDY: "cancer-research"},

@@ -30,6 +30,22 @@ from nvflare.private.fed.server.fed_server import FederatedServer
 from nvflare.private.fed.server.server_state import DEFAULT_SERVICE_SESSION_ID, HotState
 
 
+class _FakeDisabledClientStore:
+    def __init__(self):
+        self.disabled = {}
+
+    def get_disabled_client(self, client_name):
+        return self.disabled.get(client_name)
+
+    def disable_client(self, client_name, disabled_by=None, reason=None):
+        row = {"client_name": client_name, "disabled_by": disabled_by, "reason": reason}
+        self.disabled[client_name] = row
+        return row
+
+    def enable_client(self, client_name):
+        return self.disabled.pop(client_name, None) is not None
+
+
 class TestFederatedServer:
     def test_resolve_client_fqcn_for_auth_fails_closed_for_registered_client_with_missing_fqcn(self):
         server = object.__new__(FederatedServer)
@@ -59,6 +75,7 @@ class TestFederatedServer:
             )
 
             server.server_state = server_state
+            server.client_manager.set_state_store(_FakeDisabledClientStore())
             request = new_cell_message(
                 {
                     CellMessageHeaderKeys.TOKEN: "token",
@@ -268,6 +285,7 @@ class TestFederatedServer:
                 snapshot_persistor=MagicMock(),
             )
             server.server_state = HotState()
+            server.client_manager.set_state_store(_FakeDisabledClientStore())
             server.client_manager.disable_client("client_name")
 
             request = new_cell_message(

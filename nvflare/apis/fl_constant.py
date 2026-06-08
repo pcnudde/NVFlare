@@ -392,6 +392,7 @@ class SystemComponents:
     JOB_MANAGER = "job_manager"
     JOB_RUNNER = "job_runner"
     SERVER_RUNNER = "server_runner"
+    STATE_STORE = "state_store"
     CLIENT_RUNNER = "client_runner"
     CHECK_RESOURCE_PROCESSOR = "check_resource_processor"
     CANCEL_RESOURCE_PROCESSOR = "cancel_resource_processor"

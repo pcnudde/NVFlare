@@ -1896,13 +1896,11 @@ client process, revoke credentials, or prevent reconnect.
 any active registry entry, and rejects subsequent registration or heartbeat from the same
 client name until `enable-client` clears the flag. This is not certificate revocation.
 
-Disabled client state is stored in the server workspace as `disabled_clients.json`.
-In-memory updates and persistence writes must be made under the client manager lock.
-The JSON write uses a temporary file plus atomic replace so registration/heartbeat
-handling cannot observe a partially written policy file. The file is loaded at server
-startup so disabled clients remain disabled across server restarts. If this file exists
-but cannot be loaded, the server must fail closed by raising during startup instead of
-admitting previously disabled clients.
+Disabled client state is stored in the server State Store. During upgrade from an
+older filesystem deployment, `disabled_clients.json` is imported by
+`nvflare-state-store-migrate` before server startup. After migration, the JSON file is
+not used as runtime state. If the State Store migration marker is missing, the server
+must fail closed during startup instead of admitting previously disabled clients.
 
 
 ## Output

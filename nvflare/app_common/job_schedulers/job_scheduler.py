@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
+from nvflare.apis import study_store
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_component import FLComponent
 from nvflare.apis.fl_constant import FLContextKey
@@ -26,7 +27,6 @@ from nvflare.apis.job_def_manager_spec import JobDefManagerSpec
 from nvflare.apis.job_scheduler_spec import DispatchInfo, JobSchedulerSpec
 from nvflare.apis.server_engine_spec import ServerEngineSpec
 from nvflare.private.fed.utils.fed_utils import extract_participants
-from nvflare.security.study_registry import StudyRegistryService
 from nvflare.utils.job_launcher_utils import get_site_launcher_spec
 
 SCHEDULE_RESULT_OK = 0  # the job is scheduled
@@ -104,9 +104,8 @@ class DefaultJobScheduler(JobSchedulerSpec, FLComponent):
         engine = fl_ctx.get_engine()
         online_clients = engine.get_clients()
         online_site_names = [x.name for x in online_clients]
-        registry = StudyRegistryService.get_registry()
         job_study = get_job_meta_study(job.meta)
-        enrolled_sites = registry.get_sites(job_study) if registry else None
+        enrolled_sites = study_store.get_sites(job_study)
         if enrolled_sites is not None:
             online_site_names = [site_name for site_name in online_site_names if site_name in enrolled_sites]
 

@@ -12,16 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import datetime
+import json
 import os
-import pathlib
 import shutil
 import tempfile
-import threading
 import time
-from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Union
 
 from nvflare.apis.client_engine_spec import ClientEngineSpec
+from nvflare.apis.fl_constant import SystemComponents
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.job_def import (
     Job,
@@ -34,94 +33,21 @@ from nvflare.apis.job_def import (
 )
 from nvflare.apis.job_def_manager_spec import JobDefManagerSpec, RunStatus
 from nvflare.apis.server_engine_spec import ServerEngineSpec
-from nvflare.apis.storage import WORKSPACE, StorageException, StorageSpec
+from nvflare.apis.state_store import StateStore
+from nvflare.apis.storage import META, WORKSPACE, StorageException, StorageSpec
 from nvflare.apis.utils.format_check import check_job_app_name, check_job_id
-from nvflare.apis.utils.job_submit_token import (
-    canonical_job_content_hash,
-    canonical_json_hash,
-    submit_record_scope_hashes,
-    submitter_to_dict,
-)
+from nvflare.apis.utils.job_submit_token import canonical_job_content_hash, submitter_to_dict
 from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.zip_utils import unzip_all_from_bytes, zip_directory_to_bytes
 
-_OBJ_TAG_SCHEDULED = "scheduled"
-_SUBMIT_RECORD_URI_ROOT = "job_submit_records"
-_SUBMIT_RECORD_JOB_INDEX_URI_ROOT = "job_submit_record_index"
-_SUBMIT_RECORD_URIS_KEY = "submit_record_uris"
-
-
-class JobInfo:
-    def __init__(self, meta: dict, job_id: str, uri: str):
-        self.meta = meta
-        self.job_id = job_id
-        self.uri = uri
-
-
-class _JobFilter(ABC):
-    @abstractmethod
-    def filter_job(self, info: JobInfo) -> bool:
-        pass
-
-
-class _StatusFilter(_JobFilter):
-    def __init__(self, status_to_check):
-        self.result = []
-        if not isinstance(status_to_check, list):
-            # turning to list
-            status_to_check = [status_to_check]
-        self.status_to_check = status_to_check
-
-    def filter_job(self, info: JobInfo):
-        status = info.meta.get(JobMetaKey.STATUS.value)
-        if status in self.status_to_check:
-            self.result.append(job_from_meta(info.meta))
-        return True
-
-
-class _AllJobsFilter(_JobFilter):
-    def __init__(self):
-        self.result = []
-
-    def filter_job(self, info: JobInfo):
-        self.result.append(job_from_meta(info.meta))
-        return True
-
-
-class _ReviewerFilter(_JobFilter):
-    def __init__(self, reviewer_name):
-        """Not used yet, for use in future implementations."""
-        self.result = []
-        self.reviewer_name = reviewer_name
-
-    def filter_job(self, info: JobInfo):
-        approvals = info.meta.get(JobMetaKey.APPROVALS)
-        if not approvals or self.reviewer_name not in approvals:
-            self.result.append(job_from_meta(info.meta))
-        return True
-
-
-class _ScheduleJobFilter(_JobFilter):
-    """
-    This filter is optimized for selecting jobs to schedule since it is used so frequently (every 1 sec).
-    """
-
-    def __init__(self, store):
-        self.store = store
-        self.result = []
-
-    def filter_job(self, info: JobInfo):
-        status = info.meta.get(JobMetaKey.STATUS.value)
-        if status == RunStatus.SUBMITTED.value:
-            self.result.append(job_from_meta(info.meta))
-        elif status:
-            # skip this job in all future calls (so the meta file of this job won't be read)
-            self.store.tag_object(uri=info.uri, tag=_OBJ_TAG_SCHEDULED)
-        return True
-
 
 class SimpleJobDefManager(JobDefManagerSpec):
-    def __init__(self, uri_root: str = "jobs", job_store_id: str = "job_store"):
+    def __init__(
+        self,
+        uri_root: str = "jobs",
+        job_store_id: str = "job_store",
+        state_store_id: str = SystemComponents.STATE_STORE,
+    ):
         super().__init__()
         self.uri_root = uri_root
 
@@ -132,14 +58,7 @@ class SimpleJobDefManager(JobDefManagerSpec):
 
         os.makedirs(uri_root, exist_ok=True)
         self.job_store_id = job_store_id
-        # Submit-token records are a sidecar namespace beside the job store so they are not
-        # enumerated as jobs by stores that scan uri_root directly.
-        uri_root = self.uri_root.rstrip(os.sep) or self.uri_root
-        self.submit_record_uri_root = os.path.join(os.path.dirname(uri_root), _SUBMIT_RECORD_URI_ROOT)
-        self.submit_record_job_index_uri_root = os.path.join(
-            os.path.dirname(uri_root), _SUBMIT_RECORD_JOB_INDEX_URI_ROOT
-        )
-        self._submit_record_lock = threading.Lock()
+        self.state_store_id = state_store_id
 
     def _get_job_store(self, fl_ctx):
         engine = fl_ctx.get_engine()
@@ -151,123 +70,61 @@ class SimpleJobDefManager(JobDefManagerSpec):
             raise TypeError(f"engine should have a job store component of type StorageSpec, but got {type(store)}")
         return store
 
+    def _get_state_store(self, fl_ctx) -> StateStore:
+        engine = fl_ctx.get_engine()
+        if not engine or not hasattr(engine, "get_component"):
+            raise TypeError("fl_ctx engine must provide get_component for job metadata")
+        store = engine.get_component(self.state_store_id)
+        if not isinstance(store, StateStore):
+            raise TypeError(
+                f"engine should have a state store component '{self.state_store_id}' "
+                f"of type StateStore, but got {type(store)}"
+            )
+        return store
+
     def job_uri(self, jid: str):
         check_job_id(jid)
         return os.path.join(self.uri_root, jid)
 
-    def submit_record_uri(self, study: str, submitter, submit_token: str):
-        study_hash, submitter_hash, submit_token_hash = submit_record_scope_hashes(study, submitter, submit_token)
-        return os.path.join(self.submit_record_uri_root, study_hash, submitter_hash, submit_token_hash)
+    @staticmethod
+    def _content_size(uploaded_content: Union[str, bytes]) -> Optional[int]:
+        if isinstance(uploaded_content, bytes):
+            return len(uploaded_content)
+        if isinstance(uploaded_content, str) and os.path.isfile(uploaded_content):
+            return os.path.getsize(uploaded_content)
+        return None
 
-    def _submit_record_uri_from_record(self, record: dict):
-        submitter = {
-            "name": record.get(SubmitRecordKey.SUBMITTER_NAME.value, ""),
-            "org": record.get(SubmitRecordKey.SUBMITTER_ORG.value, ""),
-            "role": record.get(SubmitRecordKey.SUBMITTER_ROLE.value, ""),
-        }
-        return self.submit_record_uri(
-            record.get(SubmitRecordKey.STUDY.value, ""),
-            submitter,
-            record.get(SubmitRecordKey.SUBMIT_TOKEN.value),
-        )
+    @staticmethod
+    def _job_from_state_row(row: dict) -> Optional[Job]:
+        if not row:
+            return None
+        return job_from_meta(row.get("meta_json") or {})
 
-    def _submit_record_job_index_uri(self, job_id: str) -> str:
-        return os.path.join(self.submit_record_job_index_uri_root, canonical_json_hash(job_id or ""))
+    @staticmethod
+    def _status_value(status):
+        return getattr(status, "value", status)
 
-    def _upsert_submit_record_job_index(self, store: StorageSpec, record: dict):
-        job_id = record.get(SubmitRecordKey.JOB_ID.value)
-        if not job_id:
-            return
-
-        index_uri = self._submit_record_job_index_uri(job_id)
-        record_uri = self._submit_record_uri_from_record(record)
-        try:
-            index_meta = store.get_meta(index_uri) or {}
-        except StorageException:
-            index_meta = {}
-        submit_record_uris = list(index_meta.get(_SUBMIT_RECORD_URIS_KEY, []))
-        if record_uri not in submit_record_uris:
-            submit_record_uris.append(record_uri)
-        updated_meta = {SubmitRecordKey.JOB_ID.value: job_id, _SUBMIT_RECORD_URIS_KEY: submit_record_uris}
-        if index_meta:
-            store.update_meta(index_uri, updated_meta, replace=True)
-            return
-
-        try:
-            store.create_object(index_uri, b"", updated_meta, overwrite_existing=False)
-        except StorageException:
-            existing_meta = store.get_meta(index_uri) or {}
-            existing_uris = list(existing_meta.get(_SUBMIT_RECORD_URIS_KEY, []))
-            if record_uri not in existing_uris:
-                existing_uris.append(record_uri)
-            store.update_meta(
-                index_uri,
-                {SubmitRecordKey.JOB_ID.value: job_id, _SUBMIT_RECORD_URIS_KEY: existing_uris},
-                replace=True,
-            )
+    @staticmethod
+    def _update_state_job_meta(state_store: StateStore, jid: str, meta: dict):
+        updated = state_store.update_job_meta(jid, meta)
+        if updated is None:
+            raise StorageException(f"job '{jid}' is missing from state store")
+        return updated
 
     def get_job_content_hash(self, uploaded_content: Union[str, bytes]) -> str:
         return canonical_job_content_hash(uploaded_content)
 
     def get_submit_record(self, study: str, submitter, submit_token: str, fl_ctx: FLContext) -> Optional[dict]:
-        store = self._get_job_store(fl_ctx)
-        try:
-            return store.get_meta(self.submit_record_uri(study, submitter, submit_token))
-        except StorageException:
-            return None
+        return self._get_state_store(fl_ctx).get_submit_record(study, submitter, submit_token)
 
     def create_submit_record(self, record: dict, fl_ctx: FLContext) -> bool:
-        store = self._get_job_store(fl_ctx)
-        uri = self._submit_record_uri_from_record(record)
-        with self._submit_record_lock:
-            try:
-                store.create_object(uri, b"", record, overwrite_existing=False)
-            except StorageException:
-                try:
-                    if store.get_meta(uri):
-                        return False
-                except StorageException:
-                    pass
-                raise
-            self._upsert_submit_record_job_index(store, record)
-            return True
+        return self._get_state_store(fl_ctx).create_submit_record(record)
 
     def update_submit_record(self, record: dict, fl_ctx: FLContext) -> dict:
-        store = self._get_job_store(fl_ctx)
-        uri = self._submit_record_uri_from_record(record)
-        with self._submit_record_lock:
-            store.update_meta(uri, record, replace=True)
-            self._upsert_submit_record_job_index(store, record)
-        return record
+        return self._get_state_store(fl_ctx).update_submit_record(record)
 
     def mark_submit_records_job_deleted(self, job_id: str, deleted_by, fl_ctx: FLContext) -> List[dict]:
-        store = self._get_job_store(fl_ctx)
-        index_uri = self._submit_record_job_index_uri(job_id)
-        deleted_by_info = submitter_to_dict(deleted_by)
-        deleted_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        updated_records = []
-
-        with self._submit_record_lock:
-            try:
-                index_meta = store.get_meta(index_uri) or {}
-            except StorageException:
-                return []
-
-            for record_uri in index_meta.get(_SUBMIT_RECORD_URIS_KEY, []):
-                try:
-                    record = store.get_meta(record_uri)
-                except StorageException:
-                    continue
-                if not record or record.get(SubmitRecordKey.JOB_ID.value) != job_id:
-                    continue
-                if record.get(SubmitRecordKey.STATE.value) == SubmitRecordState.JOB_DELETED.value:
-                    continue
-                record[SubmitRecordKey.STATE.value] = SubmitRecordState.JOB_DELETED.value
-                record[SubmitRecordKey.DELETED_TIME.value] = deleted_time
-                record[SubmitRecordKey.DELETED_BY.value] = deleted_by_info
-                store.update_meta(record_uri, record, replace=True)
-                updated_records.append(record)
-        return updated_records
+        return self._get_state_store(fl_ctx).mark_submit_records_job_deleted(job_id, deleted_by)
 
     def get_job_by_submit_token(self, study: str, submitter, submit_token: str, fl_ctx: FLContext) -> Optional[Job]:
         record = self.get_submit_record(study, submitter, submit_token, fl_ctx)
@@ -323,9 +180,15 @@ class SimpleJobDefManager(JobDefManagerSpec):
         meta[JobMetaKey.DATA_STORAGE_FORMAT.value] = 2
         meta[JobMetaKey.STATUS.value] = RunStatus.SUBMITTED.value
 
-        # write it to the store
+        state_store = self._get_state_store(fl_ctx)
         store = self._get_job_store(fl_ctx)
-        store.create_object(self.job_uri(jid), uploaded_content, meta, overwrite_existing=False)
+        job_uri = self.job_uri(jid)
+        store.create_object(job_uri, uploaded_content, meta, overwrite_existing=False)
+        try:
+            state_store.create_job(meta, content_uri=job_uri, content_size=self._content_size(uploaded_content))
+        except Exception:
+            store.delete_object(job_uri)
+            raise
         return meta
 
     def clone(self, from_jid: str, meta: dict, fl_ctx: FLContext) -> Dict[str, Any]:
@@ -346,14 +209,30 @@ class SimpleJobDefManager(JobDefManagerSpec):
 
         # write it to the store
         store = self._get_job_store(fl_ctx)
-        store.clone_object(
-            from_uri=self.job_uri(from_jid), to_uri=self.job_uri(jid), meta=meta, overwrite_existing=False
-        )
+        state_store = self._get_state_store(fl_ctx)
+        source_row = state_store.get_job(from_jid)
+        if not source_row:
+            raise RuntimeError(f"source job '{from_jid}' is missing from state store")
+
+        job_uri = self.job_uri(jid)
+        store.clone_object(from_uri=self.job_uri(from_jid), to_uri=job_uri, meta=meta, overwrite_existing=False)
+        try:
+            state_store.create_job(
+                meta,
+                content_uri=job_uri,
+                content_hash=source_row.get("content_hash"),
+                content_size=source_row.get("content_size"),
+            )
+        except Exception:
+            store.delete_object(job_uri)
+            raise
         return meta
 
     def delete(self, jid: str, fl_ctx: FLContext):
+        state_store = self._get_state_store(fl_ctx)
         store = self._get_job_store(fl_ctx)
         store.delete_object(self.job_uri(jid))
+        state_store.delete_job(jid)
 
     def _validate_meta(self, meta):
         """Validate meta
@@ -377,17 +256,11 @@ class SimpleJobDefManager(JobDefManagerSpec):
         pass
 
     def get_job(self, jid: str, fl_ctx: FLContext) -> Optional[Job]:
-        store = self._get_job_store(fl_ctx)
-        try:
-            job_meta = store.get_meta(self.job_uri(jid))
-            return job_from_meta(job_meta)
-        except StorageException:
-            return None
+        return self._job_from_state_row(self._get_state_store(fl_ctx).get_job(jid))
 
     def set_results_uri(self, jid: str, result_uri: str, fl_ctx: FLContext):
-        store = self._get_job_store(fl_ctx)
         updated_meta = {JobMetaKey.RESULT_LOCATION.value: result_uri}
-        store.update_meta(self.job_uri(jid), updated_meta, replace=False)
+        self.update_meta(jid, updated_meta, fl_ctx)
         return self.get_job(jid, fl_ctx)
 
     def get_app(self, job: Job, app_name: str, fl_ctx: FLContext) -> bytes:
@@ -457,27 +330,28 @@ class SimpleJobDefManager(JobDefManagerSpec):
         return store.list_components_of_object(self.job_uri(jid))
 
     def set_status(self, jid: str, status: RunStatus, fl_ctx: FLContext):
-        meta = {JobMetaKey.STATUS.value: status.value}
-        store = self._get_job_store(fl_ctx)
-        if status == RunStatus.RUNNING.value:
+        status_value = self._status_value(status)
+        meta = {JobMetaKey.STATUS.value: status_value}
+        state_store = self._get_state_store(fl_ctx)
+        if status_value == RunStatus.RUNNING.value:
             meta[JobMetaKey.START_TIME.value] = str(datetime.datetime.now())
-        elif status in [
+        elif status_value in [
             RunStatus.FINISHED_ABORTED.value,
             RunStatus.FINISHED_COMPLETED.value,
             RunStatus.FINISHED_EXECUTION_EXCEPTION.value,
             RunStatus.FINISHED_CANT_SCHEDULE.value,
         ]:
-            job_meta = store.get_meta(self.job_uri(jid))
-            if job_meta[JobMetaKey.START_TIME.value]:
+            row = state_store.get_job(jid)
+            job_meta = (row or {}).get("meta_json") or {}
+            if job_meta.get(JobMetaKey.START_TIME.value):
                 start_time = datetime.datetime.strptime(
                     job_meta.get(JobMetaKey.START_TIME.value), "%Y-%m-%d %H:%M:%S.%f"
                 )
                 meta[JobMetaKey.DURATION.value] = str(datetime.datetime.now() - start_time)
-        store.update_meta(uri=self.job_uri(jid), meta=meta, replace=False)
+        self._update_state_job_meta(state_store, jid, meta)
 
     def update_meta(self, jid: str, meta, fl_ctx: FLContext):
-        store = self._get_job_store(fl_ctx)
-        store.update_meta(uri=self.job_uri(jid), meta=meta, replace=False)
+        self._update_state_job_meta(self._get_state_store(fl_ctx), jid, meta)
 
     def refresh_meta(self, job: Job, meta_keys: list, fl_ctx: FLContext):
         """Refresh meta of the job as specified in the meta keys
@@ -500,30 +374,13 @@ class SimpleJobDefManager(JobDefManagerSpec):
             self.update_meta(job.job_id, meta, fl_ctx)
 
     def get_all_jobs(self, fl_ctx: FLContext) -> List[Job]:
-        job_filter = _AllJobsFilter()
-        self._scan(job_filter, fl_ctx)
-        return job_filter.result
+        return [self._job_from_state_row(row) for row in self._get_state_store(fl_ctx).list_jobs()]
 
     def get_jobs_to_schedule(self, fl_ctx: FLContext) -> List[Job]:
-        job_filter = _ScheduleJobFilter(self._get_job_store(fl_ctx))
-        self._scan(job_filter, fl_ctx, skip_tag=_OBJ_TAG_SCHEDULED)
-        return job_filter.result
-
-    def _scan(self, job_filter: _JobFilter, fl_ctx: FLContext, skip_tag=None):
-        store = self._get_job_store(fl_ctx)
-        obj_uris = store.list_objects(self.uri_root, without_tag=skip_tag)
-        self.log_debug(fl_ctx, f"objects to scan: {len(obj_uris)}")
-        if not obj_uris:
-            return
-
-        for uri in obj_uris:
-            jid = pathlib.PurePath(uri).name
-            job_uri = self.job_uri(jid)
-            meta = store.get_meta(job_uri)
-            if meta:
-                ok = job_filter.filter_job(JobInfo(meta, jid, job_uri))
-                if not ok:
-                    break
+        return [
+            self._job_from_state_row(row)
+            for row in self._get_state_store(fl_ctx).list_jobs(status=RunStatus.SUBMITTED.value)
+        ]
 
     def get_jobs_by_status(self, status: Union[RunStatus, List[RunStatus]], fl_ctx: FLContext) -> List[Job]:
         """Get jobs that are in the specified status
@@ -535,28 +392,36 @@ class SimpleJobDefManager(JobDefManagerSpec):
         Returns: list of jobs that are in specified status
 
         """
-        job_filter = _StatusFilter(status)
-        self._scan(job_filter, fl_ctx)
-        return job_filter.result
+        if not isinstance(status, list):
+            status = [status]
+        result = []
+        state_store = self._get_state_store(fl_ctx)
+        for run_status in status:
+            rows = state_store.list_jobs(status=self._status_value(run_status))
+            result.extend(self._job_from_state_row(row) for row in rows)
+        return result
 
     def get_jobs_waiting_for_review(self, reviewer_name: str, fl_ctx: FLContext) -> List[Job]:
-        job_filter = _ReviewerFilter(reviewer_name)
-        self._scan(job_filter, fl_ctx)
-        return job_filter.result
+        result = []
+        for row in self._get_state_store(fl_ctx).list_jobs():
+            meta = row.get("meta_json") or {}
+            approvals = meta.get(JobMetaKey.APPROVALS.value)
+            if not approvals or reviewer_name not in approvals:
+                result.append(job_from_meta(meta))
+        return result
 
     def set_approval(
         self, jid: str, reviewer_name: str, approved: bool, note: str, fl_ctx: FLContext
     ) -> Dict[str, Any]:
         meta = self.get_job(jid, fl_ctx).meta
         if meta:
-            approvals = meta.get(JobMetaKey.APPROVALS)
+            approvals = meta.get(JobMetaKey.APPROVALS.value)
             if not approvals:
                 approvals = {}
                 meta[JobMetaKey.APPROVALS.value] = approvals
             approvals[reviewer_name] = (approved, note)
             updated_meta = {JobMetaKey.APPROVALS.value: approvals}
-            store = self._get_job_store(fl_ctx)
-            store.update_meta(self.job_uri(jid), updated_meta, replace=False)
+            self.update_meta(jid, updated_meta, fl_ctx)
         return meta
 
     def save_workspace(self, jid: str, data: Union[bytes, str, List[str]], fl_ctx: FLContext):
@@ -585,4 +450,11 @@ class SimpleJobDefManager(JobDefManagerSpec):
         job_uri = self.job_uri(jid)
         os.makedirs(os.path.join(download_dir, jid), exist_ok=True)
         destination_file = os.path.join(download_dir, jid, download_file)
+        if component == META:
+            row = self._get_state_store(fl_ctx).get_job(jid)
+            if not row:
+                raise StorageException(f"job '{jid}' is missing from state store")
+            with open(destination_file, "wt", encoding="utf-8") as f:
+                json.dump(row.get("meta_json") or {}, f, indent=2, sort_keys=True)
+            return
         store.get_data_for_download(job_uri, component, destination_file)

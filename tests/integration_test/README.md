@@ -41,6 +41,15 @@ python -m pytest -v --log-cli-level=INFO --capture=no slow/recipe_system_test.py
 python -m pytest -v --log-cli-level=INFO --capture=no slow/xgb_histogram_recipe_test.py slow/xgb_vertical_recipe_test.py
 ```
 
+The State Store PostgreSQL integration test is a standalone integration mode. It requires a disposable PostgreSQL
+database URL, and CI should provide that database with whatever mechanism is supported by the integration-test
+environment, such as a service container, a sidecar, or an externally managed test database:
+
+```bash
+NVFLARE_TEST_STATE_STORE_DB_URL=postgresql+psycopg://user:password@localhost:5432/nvflare_state_store \
+  ../../ci/run_integration.sh state_store_postgres
+```
+
 Run config-driven system tests by selecting a `test_configs.yml` group:
 
 ```bash

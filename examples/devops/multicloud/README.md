@@ -151,6 +151,8 @@ participant workspace PVC, uninstalls any existing Helm release for each
 participant, then installs the prepared chart. The cloud IP name is
 deterministic from the config `name`, for example `all-clouds` uses
 `nvflare-all-clouds`. If an IP with that name already exists, `up` reuses it.
+The generated server chart runs the State Store migration in an init
+container before the server starts.
 
 The server is deployed first and must become available before clients are
 started. Clients are deployed in parallel. `down` tears down clients in

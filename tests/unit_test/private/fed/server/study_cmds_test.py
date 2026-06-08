@@ -16,13 +16,13 @@ from contextlib import contextmanager
 from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
+from nvflare.apis import study_store
 from nvflare.apis.client import Client, ClientPropKey
 from nvflare.apis.job_def import JobMetaKey
 from nvflare.apis.job_def_manager_spec import JobDefManagerSpec
 from nvflare.fuel.hci.server.authz import PreAuthzReturnCode
 from nvflare.fuel.hci.server.constants import ConnProps
 from nvflare.private.fed.server.study_cmds import StudyCommandModule
-from nvflare.security.study_registry import StudyRegistry
 
 _EMPTY_REGISTRY = {"format_version": "1.0", "studies": {}}
 
@@ -88,22 +88,98 @@ def _make_engine(site_map: dict):
     return engine
 
 
+class _FakeStateStore:
+    def __init__(self, config=None):
+        if config is None:
+            config = _EMPTY_REGISTRY
+        self.studies = deepcopy(config.get("studies", {}))
+        self.write_count = 0
+
+    def initialize(self):
+        pass
+
+    def list_studies(self):
+        return [{"name": name, "config_json": deepcopy(study_def)} for name, study_def in self.studies.items()]
+
+    def get_study(self, name: str):
+        study_def = self.studies.get(name)
+        if study_def is None:
+            return None
+        return {"name": name, "config_json": deepcopy(study_def)}
+
+    def upsert_study(self, name: str, config: dict):
+        self.studies[name] = deepcopy(config)
+        self.write_count += 1
+        return {"name": name, "config_json": deepcopy(config), "version": self.write_count}
+
+    def delete_study(self, name: str):
+        existed = name in self.studies
+        self.studies.pop(name, None)
+        self.write_count += 1
+        return existed
+
+    def add_study_sites(self, name: str, site_orgs: dict):
+        study = self.studies.setdefault(name, {"site_orgs": {}, "admins": []})
+        existing = {site for org_sites in study.get("site_orgs", {}).values() for site in org_sites}
+        for org, sites in site_orgs.items():
+            current = study.setdefault("site_orgs", {}).setdefault(org, [])
+            for site in sites:
+                if site not in existing:
+                    current.append(site)
+                    existing.add(site)
+        self.write_count += 1
+        return self.get_study(name)
+
+    def remove_study_sites(self, name: str, site_orgs: dict):
+        study = self.studies.get(name)
+        if not study:
+            return None
+        for org, sites in site_orgs.items():
+            if org not in study.get("site_orgs", {}):
+                continue
+            current = study["site_orgs"][org]
+            study["site_orgs"][org] = [site for site in current if site not in sites]
+        self.write_count += 1
+        return self.get_study(name)
+
+    def add_study_admin(self, name: str, user: str):
+        study = self.studies.setdefault(name, {"site_orgs": {}, "admins": []})
+        if user not in study.setdefault("admins", []):
+            study["admins"].append(user)
+        self.write_count += 1
+        return self.get_study(name)
+
+    def remove_study_admin(self, name: str, user: str):
+        study = self.studies.get(name)
+        if not study:
+            return None
+        if user in study.setdefault("admins", []):
+            study["admins"].remove(user)
+        self.write_count += 1
+        return self.get_study(name)
+
+
+@contextmanager
+def _state_store_ctx(store):
+    study_store.set_state_store(store)
+    try:
+        yield
+    finally:
+        study_store.reset()
+
+
 @contextmanager
 def _mutation_ctx(initial_config=None):
-    """Patches all I/O and locking so _with_mutation runs without disk access."""
+    """Provides an in-memory StateStore."""
     if initial_config is None:
         initial_config = _EMPTY_REGISTRY
+    store = _FakeStateStore(initial_config)
     with (
-        patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.acquire_lock", return_value=True),
-        patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.release_lock"),
-        patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.initialize"),
+        _state_store_ctx(store),
         # Make isinstance(engine, ServerEngine) pass for MagicMock engines
         patch("nvflare.private.fed.server.study_cmds.ServerEngine", MagicMock),
-        patch.object(StudyCommandModule, "_registry_path", return_value="/fake/path"),
-        patch.object(StudyCommandModule, "_load_registry_config", side_effect=lambda _: deepcopy(initial_config)),
-        patch.object(StudyCommandModule, "_write_registry_config"),
     ):
-        yield
+        yield store
 
 
 # ---------------------------------------------------------------------------
@@ -402,21 +478,9 @@ class TestRemoveStudySiteOrgValidation:
         # create a phantom {"org_b": []} entry that would grant org_b visibility.
         engine = _make_engine({})
         conn = _FakeConnection(role="project_admin", org="project", engine=engine)
-        written = {}
-
-        def capture_write(_path, config):
-            written.update(config)
-
-        with _mutation_ctx(_REGISTRY_WITH_STUDY):
-            import nvflare.private.fed.server.study_cmds as sc_mod
-
-            with __import__("unittest.mock", fromlist=["patch"]).patch.object(
-                sc_mod.StudyCommandModule, "_write_registry_config", side_effect=capture_write
-            ):
-                self._module().cmd_remove_study_site(
-                    conn, ["remove_study_site", "study1", "--site-org", "org_b:site-b"]
-                )
-        assert "org_b" not in written.get("studies", {}).get("study1", {}).get("site_orgs", {})
+        with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
+            self._module().cmd_remove_study_site(conn, ["remove_study_site", "study1", "--site-org", "org_b:site-b"])
+        assert "org_b" not in store.studies.get("study1", {}).get("site_orgs", {})
 
 
 # ---------------------------------------------------------------------------
@@ -580,15 +644,16 @@ class TestRemoveStudy:
 # ---------------------------------------------------------------------------
 
 
-def _make_registry(studies_dict):
-    config = {
-        "format_version": "1.0",
-        "studies": {
-            name: {"site_orgs": def_["site_orgs"], "admins": def_.get("admins", [])}
-            for name, def_ in studies_dict.items()
-        },
-    }
-    return StudyRegistry(config)
+def _make_store(studies_dict):
+    return _FakeStateStore(
+        {
+            "format_version": "1.0",
+            "studies": {
+                name: {"site_orgs": def_["site_orgs"], "admins": def_.get("admins", [])}
+                for name, def_ in studies_dict.items()
+            },
+        }
+    )
 
 
 class TestListStudiesVisibility:
@@ -610,7 +675,7 @@ class TestListStudiesVisibility:
         assert self._module().authorize_list_studies(conn, ["list_studies"]) == PreAuthzReturnCode.OK
 
     def test_project_admin_sees_all_studies(self):
-        registry = _make_registry(
+        store = _make_store(
             {
                 "study-alpha": {"site_orgs": {"org_a": ["site-a"]}},
                 "study-beta": {"site_orgs": {"org_b": ["site-b"]}},
@@ -618,7 +683,7 @@ class TestListStudiesVisibility:
         )
         conn = _FakeConnection(role="project_admin", org="project")
         with (
-            patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry),
+            _state_store_ctx(store),
             patch(
                 "nvflare.private.fed.server.study_cmds.AuthorizationService.authorize",
                 side_effect=self._authorize_submit_for_roles("project_admin", "lead"),
@@ -647,7 +712,7 @@ class TestListStudiesVisibility:
         ]
 
     def test_org_admin_sees_only_enrolled_studies(self):
-        registry = _make_registry(
+        store = _make_store(
             {
                 "study-alpha": {"site_orgs": {"org_a": ["site-a"]}},
                 "study-beta": {"site_orgs": {"org_b": ["site-b"]}},
@@ -655,7 +720,7 @@ class TestListStudiesVisibility:
         )
         conn = _FakeConnection(role="org_admin", org="org_a")
         with (
-            patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry),
+            _state_store_ctx(store),
             patch(
                 "nvflare.private.fed.server.study_cmds.AuthorizationService.authorize",
                 side_effect=self._authorize_submit_for_roles("project_admin", "lead"),
@@ -672,15 +737,15 @@ class TestListStudiesVisibility:
         )
 
     def test_org_admin_with_no_enrollment_sees_empty_list(self):
-        registry = _make_registry({"study-alpha": {"site_orgs": {"org_b": ["site-b"]}}})
+        store = _make_store({"study-alpha": {"site_orgs": {"org_b": ["site-b"]}}})
         conn = _FakeConnection(role="org_admin", org="org_a")
-        with patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry):
+        with _state_store_ctx(store):
             self._module().cmd_list_studies(conn, ["list_studies"])
         assert conn.last_reply["studies"] == []
         assert conn.last_reply["study_details"] == []
 
     def test_lead_sees_only_mapped_studies(self):
-        registry = _make_registry(
+        store = _make_store(
             {
                 "study-alpha": {
                     "site_orgs": {"org_a": ["site-a"]},
@@ -694,7 +759,7 @@ class TestListStudiesVisibility:
         )
         conn = _FakeConnection(role="lead", org="org_a", user="lead@example.com")
         with (
-            patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry),
+            _state_store_ctx(store),
             patch(
                 "nvflare.private.fed.server.study_cmds.AuthorizationService.authorize",
                 side_effect=self._authorize_submit_for_roles("project_admin", "lead"),
@@ -713,7 +778,7 @@ class TestListStudiesVisibility:
         ]
 
     def test_member_visible_study_cannot_submit(self):
-        registry = _make_registry(
+        store = _make_store(
             {
                 "study-alpha": {
                     "site_orgs": {"org_a": ["site-a"]},
@@ -723,7 +788,7 @@ class TestListStudiesVisibility:
         )
         conn = _FakeConnection(role="member", org="org_a", user="member@example.com")
         with (
-            patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry),
+            _state_store_ctx(store),
             patch(
                 "nvflare.private.fed.server.study_cmds.AuthorizationService.authorize",
                 side_effect=self._authorize_submit_for_roles("project_admin", "lead"),
@@ -753,38 +818,38 @@ class TestShowStudy:
         return StudyCommandModule()
 
     def test_project_admin_can_show_any_study(self):
-        registry = _make_registry({"study1": {"site_orgs": {"org_a": ["site-a"]}, "admins": ["u@x.com"]}})
+        store = _make_store({"study1": {"site_orgs": {"org_a": ["site-a"]}, "admins": ["u@x.com"]}})
         conn = _FakeConnection(role="project_admin", org="project")
-        with patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry):
+        with _state_store_ctx(store):
             self._module().cmd_show_study(conn, ["show_study", "study1"])
         assert conn.last_reply.get("name") == "study1"
         assert "error_code" not in conn.last_reply
 
     def test_org_admin_can_show_enrolled_study(self):
-        registry = _make_registry({"study1": {"site_orgs": {"org_a": ["site-a"]}}})
+        store = _make_store({"study1": {"site_orgs": {"org_a": ["site-a"]}}})
         conn = _FakeConnection(role="org_admin", org="org_a")
-        with patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry):
+        with _state_store_ctx(store):
             self._module().cmd_show_study(conn, ["show_study", "study1"])
         assert conn.last_reply.get("name") == "study1"
 
     def test_org_admin_cannot_show_hidden_study(self):
-        registry = _make_registry({"study1": {"site_orgs": {"org_b": ["site-b"]}}})
+        store = _make_store({"study1": {"site_orgs": {"org_b": ["site-b"]}}})
         conn = _FakeConnection(role="org_admin", org="org_a")
-        with patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry):
+        with _state_store_ctx(store):
             self._module().cmd_show_study(conn, ["show_study", "study1"])
         assert conn.last_reply["error_code"] == "STUDY_NOT_FOUND"
 
     def test_lead_cannot_show_org_study_without_user_mapping(self):
-        registry = _make_registry({"study1": {"site_orgs": {"org_a": ["site-a"]}, "admins": ["other@example.com"]}})
+        store = _make_store({"study1": {"site_orgs": {"org_a": ["site-a"]}, "admins": ["other@example.com"]}})
         conn = _FakeConnection(role="lead", org="org_a", user="lead@example.com")
-        with patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry):
+        with _state_store_ctx(store):
             self._module().cmd_show_study(conn, ["show_study", "study1"])
         assert conn.last_reply["error_code"] == "STUDY_NOT_FOUND"
 
     def test_show_nonexistent_study_returns_not_found(self):
-        registry = _make_registry({})
+        store = _make_store({})
         conn = _FakeConnection(role="project_admin", org="project")
-        with patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry):
+        with _state_store_ctx(store):
             self._module().cmd_show_study(conn, ["show_study", "ghost"])
         assert conn.last_reply["error_code"] == "STUDY_NOT_FOUND"
 
@@ -838,28 +903,7 @@ class TestUserMembership:
 
 
 # ---------------------------------------------------------------------------
-# Section 11: LOCK_TIMEOUT
-# ---------------------------------------------------------------------------
-
-
-class TestLockTimeout:
-    def _module(self):
-        return StudyCommandModule()
-
-    def test_lock_timeout_returns_lock_timeout_error(self):
-        engine = _make_engine({"site-a": "org_a"})
-        conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
-        with (
-            patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.acquire_lock", return_value=False),
-            patch("nvflare.private.fed.server.study_cmds.ServerEngine", MagicMock),
-        ):
-            self._module().cmd_register_study(conn, ["register_study", "study1", "--sites", "site-a"])
-        assert conn.last_reply["error_code"] == "LOCK_TIMEOUT"
-        assert conn.last_reply["exit_code"] == 3
-
-
-# ---------------------------------------------------------------------------
-# Section 12: atomicity — no write on validation failure
+# Section 11: atomicity — no write on validation failure
 # ---------------------------------------------------------------------------
 
 
@@ -867,16 +911,12 @@ class TestLockTimeout:
 def _mutation_ctx_with_write_tracker(initial_config=None):
     if initial_config is None:
         initial_config = _EMPTY_REGISTRY
+    store = _FakeStateStore(initial_config)
     with (
-        patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.acquire_lock", return_value=True),
-        patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.release_lock"),
-        patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.initialize"),
+        _state_store_ctx(store),
         patch("nvflare.private.fed.server.study_cmds.ServerEngine", MagicMock),
-        patch.object(StudyCommandModule, "_registry_path", return_value="/fake/path"),
-        patch.object(StudyCommandModule, "_load_registry_config", side_effect=lambda _: deepcopy(initial_config)),
-        patch.object(StudyCommandModule, "_write_registry_config") as mock_write,
     ):
-        yield mock_write
+        yield store
 
 
 class TestAtomicityGuarantee:
@@ -886,26 +926,26 @@ class TestAtomicityGuarantee:
     def test_invalid_site_prevents_registry_write(self):
         engine = _make_engine({"site-a": "org_b"})  # wrong org
         conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
-        with _mutation_ctx_with_write_tracker() as mock_write:
+        with _mutation_ctx_with_write_tracker() as store:
             self._module().cmd_register_study(conn, ["register_study", "study1", "--sites", "site-a"])
         assert conn.last_reply["error_code"] == "INVALID_SITE"
-        mock_write.assert_not_called()
+        assert store.write_count == 0
 
     def test_partial_invalid_site_org_group_prevents_registry_write(self):
         engine = _make_engine({"site-a": "org_a", "site-b": "org_c"})  # org_b:site-b is wrong
         conn = _FakeConnection(role="project_admin", org="project", engine=engine)
-        with _mutation_ctx_with_write_tracker() as mock_write:
+        with _mutation_ctx_with_write_tracker() as store:
             self._module().cmd_register_study(
                 conn,
                 ["register_study", "study1", "--site-org", "org_a:site-a", "--site-org", "org_b:site-b"],
             )
         assert conn.last_reply["error_code"] == "INVALID_SITE"
-        mock_write.assert_not_called()
+        assert store.write_count == 0
 
     def test_study_not_found_prevents_registry_write_on_add_site(self):
         engine = _make_engine({"site-new": "org_a"})
         conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
-        with _mutation_ctx_with_write_tracker(_EMPTY_REGISTRY) as mock_write:
+        with _mutation_ctx_with_write_tracker(_EMPTY_REGISTRY) as store:
             self._module().cmd_add_study_site(conn, ["add_study_site", "ghost", "--sites", "site-new"])
         assert conn.last_reply["error_code"] == "STUDY_NOT_FOUND"
-        mock_write.assert_not_called()
+        assert store.write_count == 0

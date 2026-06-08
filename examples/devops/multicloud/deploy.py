@@ -910,6 +910,7 @@ def deploy_participant(
     kubectl(p.kubeconfig, "-n", p.namespace, "exec", pod_name, "--", "rm", "-rf", "/ws/startup", "/ws/local")
     kubectl(p.kubeconfig, "-n", p.namespace, "cp", str(kit_dir / "startup"), f"{pod_name}:/ws/startup")
     kubectl(p.kubeconfig, "-n", p.namespace, "cp", str(kit_dir / "local"), f"{pod_name}:/ws/local")
+    kubectl(p.kubeconfig, "-n", p.namespace, "exec", pod_name, "--", "chmod", "-R", "a+rX", "/ws/startup", "/ws/local")
     kubectl(p.kubeconfig, "-n", p.namespace, "delete", "pod", pod_name, "--timeout=60s")
 
     # 5. Helm install

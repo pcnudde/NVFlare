@@ -17,6 +17,9 @@ import os
 import shutil
 import tempfile
 
+from nvflare.apis.fl_constant import SiteType, SystemComponents
+from nvflare.app_common.state_store.legacy_migration import migrate_legacy_state_store
+from nvflare.app_common.state_store.sql_store import SqlStateStore, migrate_database
 from nvflare.fuel.f3.cellnet.cell import Cell
 from nvflare.fuel.f3.mpm import MainProcessMonitor as mpm
 from nvflare.fuel.utils.dict_utils import augment
@@ -39,6 +42,7 @@ class SimulatorDeployer(ServerDeployer):
         self.admin_storage = tempfile.mkdtemp()
 
     def create_fl_server(self, args, secure_train=False):
+        self._ensure_state_store(args)
         simulator_server = self._create_simulator_server_config(self.admin_storage, args.max_clients)
 
         heart_beat_timeout = simulator_server.get("heart_beat_timeout", 600)
@@ -53,6 +57,7 @@ class SimulatorDeployer(ServerDeployer):
             heart_beat_timeout=heart_beat_timeout,
         )
         services.deploy(args, grpc_args=simulator_server)
+        self._initialize_state_store(services)
 
         admin_server = create_admin_server(
             services,
@@ -65,6 +70,18 @@ class SimulatorDeployer(ServerDeployer):
         # mpm.add_cleanup_cb(admin_server.stop)
 
         return simulator_server, services
+
+    def _ensure_state_store(self, args):
+        if self.components is None:
+            self.components = {}
+        if SystemComponents.STATE_STORE in self.components:
+            return
+
+        db_path = os.path.join(args.workspace, SiteType.SERVER, "state-store.db")
+        store = SqlStateStore.sqlite(db_path)
+        migrate_database(store.db_url)
+        migrate_legacy_state_store(store)
+        self.components[SystemComponents.STATE_STORE] = store
 
     def create_fl_client(self, client_name, args):
         client_config, build_ctx = self._create_simulator_client_config(client_name, args)

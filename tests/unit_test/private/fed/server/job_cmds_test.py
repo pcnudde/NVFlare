@@ -436,26 +436,16 @@ class _FakeClient:
         self.token = token
 
 
-class _FakeStudyRegistry:
-    def __init__(self, sites=None):
-        self.sites = sites or {}
-
-    def has_study(self, study):
-        return study in self.sites
-
-    def get_sites(self, study):
-        return self.sites.get(study)
-
-    def get_studies(self):
-        return {study: {"site_orgs": {"org": sorted(sites)}} for study, sites in self.sites.items()}
-
-
-class _FakeStudyRegistryService:
-    registry = None
+class _FakeStudyStore:
+    sites = {}
 
     @staticmethod
-    def get_registry():
-        return _FakeStudyRegistryService.registry
+    def has_study(study):
+        return study in _FakeStudyStore.sites
+
+    @staticmethod
+    def get_sites(study):
+        return _FakeStudyStore.sites.get(study)
 
 
 class _FakeJobMetaValidatorWithMeta:
@@ -1703,11 +1693,11 @@ def test_configure_job_log_specific_client_target_is_honored(tmp_path, monkeypat
 
 def test_authorize_job_id_hides_jobs_from_other_studies(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
-    monkeypatch.setattr(job_cmds_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
+    monkeypatch.setattr(job_cmds_module, "study_store", _FakeStudyStore, raising=False)
     monkeypatch.setattr(
-        _FakeStudyRegistryService,
-        "registry",
-        _FakeStudyRegistry(sites={"cancer-research": {"site1"}}),
+        _FakeStudyStore,
+        "sites",
+        {"cancer-research": {"site1"}},
         raising=False,
     )
 
@@ -1737,8 +1727,8 @@ def test_authorize_job_id_hides_jobs_from_other_studies(monkeypatch):
 
 def test_authorize_job_id_hides_non_default_jobs_from_default_session_without_registry(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
-    monkeypatch.setattr(job_cmds_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
-    monkeypatch.setattr(_FakeStudyRegistryService, "registry", None, raising=False)
+    monkeypatch.setattr(job_cmds_module, "study_store", _FakeStudyStore, raising=False)
+    monkeypatch.setattr(_FakeStudyStore, "sites", {}, raising=False)
 
     job_id = "123e4567-e89b-42d3-a456-426614174002"
     study_job = _FakeListedJob(
@@ -1766,12 +1756,12 @@ def test_authorize_job_id_hides_non_default_jobs_from_default_session_without_re
 
 def test_authorize_job_id_keeps_cert_role_before_authz(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
-    monkeypatch.setattr(job_cmds_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
-    monkeypatch.setattr(cmd_utils_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
+    monkeypatch.setattr(job_cmds_module, "study_store", _FakeStudyStore, raising=False)
+    monkeypatch.setattr(cmd_utils_module, "study_store", _FakeStudyStore, raising=False)
     monkeypatch.setattr(
-        _FakeStudyRegistryService,
-        "registry",
-        _FakeStudyRegistry(sites={"cancer-research": {"site1"}}),
+        _FakeStudyStore,
+        "sites",
+        {"cancer-research": {"site1"}},
         raising=False,
     )
 
@@ -1840,12 +1830,12 @@ def test_abort_job_handles_missing_status_without_attribute_error(monkeypatch):
 
 def test_submit_job_persists_cert_submitter_role(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
-    monkeypatch.setattr(job_cmds_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
-    monkeypatch.setattr(cmd_utils_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
+    monkeypatch.setattr(job_cmds_module, "study_store", _FakeStudyStore, raising=False)
+    monkeypatch.setattr(cmd_utils_module, "study_store", _FakeStudyStore, raising=False)
     monkeypatch.setattr(
-        _FakeStudyRegistryService,
-        "registry",
-        _FakeStudyRegistry(sites={"cancer-research": {"site1"}}),
+        _FakeStudyStore,
+        "sites",
+        {"cancer-research": {"site1"}},
         raising=False,
     )
     monkeypatch.setattr(
@@ -1883,11 +1873,11 @@ def test_submit_job_persists_cert_submitter_role(monkeypatch):
 
 def test_submit_job_rejects_deploy_map_sites_outside_study(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
-    monkeypatch.setattr(job_cmds_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
+    monkeypatch.setattr(job_cmds_module, "study_store", _FakeStudyStore, raising=False)
     monkeypatch.setattr(
-        _FakeStudyRegistryService,
-        "registry",
-        _FakeStudyRegistry(sites={"cancer-research": {"site1", "site2"}}),
+        _FakeStudyStore,
+        "sites",
+        {"cancer-research": {"site1", "site2"}},
         raising=False,
     )
     monkeypatch.setattr(
@@ -2085,11 +2075,11 @@ def test_get_job_log_accepts_same_job_id_with_different_case(monkeypatch, tmp_pa
 
 def test_submit_job_reports_all_deploy_map_sites_outside_study(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
-    monkeypatch.setattr(job_cmds_module, "StudyRegistryService", _FakeStudyRegistryService, raising=False)
+    monkeypatch.setattr(job_cmds_module, "study_store", _FakeStudyStore, raising=False)
     monkeypatch.setattr(
-        _FakeStudyRegistryService,
-        "registry",
-        _FakeStudyRegistry(sites={"cancer-research": {"site1"}}),
+        _FakeStudyStore,
+        "sites",
+        {"cancer-research": {"site1"}},
         raising=False,
     )
     monkeypatch.setattr(

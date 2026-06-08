@@ -14,6 +14,7 @@
 import traceback
 from typing import List
 
+from nvflare.apis import study_store
 from nvflare.apis.job_def import DEFAULT_STUDY
 from nvflare.apis.utils.format_check import name_check
 from nvflare.fuel.f3.cellnet.defs import MessageHeaderKey
@@ -26,7 +27,6 @@ from nvflare.fuel.hci.server.constants import ConnProps
 from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.lighter.utils import cert_to_dict, load_crt_bytes
 from nvflare.security.logging import secure_format_exception
-from nvflare.security.study_registry import StudyRegistryService
 
 from .reg import CommandFilter
 from .sess import Session, SessionManager
@@ -118,17 +118,16 @@ class LoginModule(CommandModule, CommandFilter):
             _reject(f"invalid study name '{study}'", code="AUTH_INVALID_STUDY_NAME")
             return
 
-        registry = StudyRegistryService.get_registry()
         if study != DEFAULT_STUDY:
-            if not registry:
+            if not study_store.get_state_store():
                 self.logger.warning(f"rejecting login for user '{user_name}': no study registry for study '{study}'")
                 _reject(f"study '{study}' is not configured on the server", code="AUTH_STUDY_NOT_CONFIGURED")
                 return
-            if not registry.has_study(study):
+            if not study_store.has_study(study):
                 self.logger.warning(f"rejecting login for user '{user_name}': unknown study '{study}'")
                 _reject(f"unknown study '{study}'", code="AUTH_UNKNOWN_STUDY")
                 return
-            if not registry.has_user(user_name, study):
+            if not study_store.has_user(user_name, study):
                 self.logger.warning(f"rejecting login for user '{user_name}': no mapping for study '{study}'")
                 _reject(
                     f"user '{user_name}' is not mapped to study '{study}'",

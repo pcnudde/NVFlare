@@ -87,27 +87,21 @@ class _FakeCell:
         return None
 
 
-class _FakeStudyRegistry:
-    def __init__(self, users=None, studies=None):
-        self.users = users or {}
-        self.studies = studies or {}
-
-    def has_study(self, study):
-        return study in self.studies
-
-    def has_user(self, user_name, study):
-        return (user_name, study) in self.users
-
-    def get_sites(self, study):
-        return self.studies.get(study)
-
-
-class _FakeStudyRegistryService:
-    registry = None
+class _FakeStudyStore:
+    studies = None
+    users = {}
 
     @staticmethod
-    def get_registry():
-        return _FakeStudyRegistryService.registry
+    def get_state_store():
+        return object() if _FakeStudyStore.studies is not None else None
+
+    @staticmethod
+    def has_study(study):
+        return _FakeStudyStore.studies is not None and study in _FakeStudyStore.studies
+
+    @staticmethod
+    def has_user(user_name, study):
+        return (user_name, study) in _FakeStudyStore.users
 
 
 def _make_conn(study=None):
@@ -133,8 +127,9 @@ def test_handle_cert_login_rejects_unknown_study_when_registry_exists(monkeypatc
         "nvflare.fuel.hci.server.login.get_identity_info",
         lambda _cert_dict: {IdentityKey.ORG: "nvidia", IdentityKey.ROLE: "project_admin"},
     )
-    monkeypatch.setattr("nvflare.fuel.hci.server.login.StudyRegistryService", _FakeStudyRegistryService, raising=False)
-    _FakeStudyRegistryService.registry = _FakeStudyRegistry(studies={"cancer-research": {"site-a"}})
+    monkeypatch.setattr("nvflare.fuel.hci.server.login.study_store", _FakeStudyStore, raising=False)
+    _FakeStudyStore.studies = {"cancer-research": {"site-a"}}
+    _FakeStudyStore.users = {}
 
     session_mgr = SessionManager(_FakeCell(), idle_timeout=3600, monitor_interval=3600)
     login = LoginModule(session_mgr)
@@ -160,11 +155,9 @@ def test_handle_cert_login_rejects_unmapped_user_when_registry_exists(monkeypatc
         "nvflare.fuel.hci.server.login.get_identity_info",
         lambda _cert_dict: {IdentityKey.ORG: "nvidia", IdentityKey.ROLE: "project_admin"},
     )
-    monkeypatch.setattr("nvflare.fuel.hci.server.login.StudyRegistryService", _FakeStudyRegistryService, raising=False)
-    _FakeStudyRegistryService.registry = _FakeStudyRegistry(
-        studies={"cancer-research": {"site-a"}},
-        users={("other-admin@nvidia.com", "cancer-research"): True},
-    )
+    monkeypatch.setattr("nvflare.fuel.hci.server.login.study_store", _FakeStudyStore, raising=False)
+    _FakeStudyStore.studies = {"cancer-research": {"site-a"}}
+    _FakeStudyStore.users = {("other-admin@nvidia.com", "cancer-research"): True}
 
     session_mgr = SessionManager(_FakeCell(), idle_timeout=3600, monitor_interval=3600)
     login = LoginModule(session_mgr)
@@ -195,11 +188,9 @@ def test_handle_cert_login_accepts_mapped_user_for_valid_study(monkeypatch):
         "nvflare.fuel.hci.server.login.get_identity_info",
         lambda _cert_dict: {IdentityKey.ORG: "nvidia", IdentityKey.ROLE: "project_admin"},
     )
-    monkeypatch.setattr("nvflare.fuel.hci.server.login.StudyRegistryService", _FakeStudyRegistryService, raising=False)
-    _FakeStudyRegistryService.registry = _FakeStudyRegistry(
-        studies={"cancer-research": {"site-a"}},
-        users={("admin@nvidia.com", "cancer-research"): True},
-    )
+    monkeypatch.setattr("nvflare.fuel.hci.server.login.study_store", _FakeStudyStore, raising=False)
+    _FakeStudyStore.studies = {"cancer-research": {"site-a"}}
+    _FakeStudyStore.users = {("admin@nvidia.com", "cancer-research"): True}
 
     session_mgr = SessionManager(_FakeCell(), idle_timeout=3600, monitor_interval=3600)
     login = LoginModule(session_mgr)
@@ -228,8 +219,9 @@ def test_handle_cert_login_defaults_to_default_study_without_registry(monkeypatc
         "nvflare.fuel.hci.server.login.get_identity_info",
         lambda _cert_dict: {IdentityKey.ORG: "nvidia", IdentityKey.ROLE: "project_admin"},
     )
-    monkeypatch.setattr("nvflare.fuel.hci.server.login.StudyRegistryService", _FakeStudyRegistryService, raising=False)
-    _FakeStudyRegistryService.registry = None
+    monkeypatch.setattr("nvflare.fuel.hci.server.login.study_store", _FakeStudyStore, raising=False)
+    _FakeStudyStore.studies = None
+    _FakeStudyStore.users = {}
 
     session_mgr = SessionManager(_FakeCell(), idle_timeout=3600, monitor_interval=3600)
     login = LoginModule(session_mgr)
@@ -255,8 +247,9 @@ def test_handle_cert_login_rejects_non_default_study_without_registry(monkeypatc
         "nvflare.fuel.hci.server.login.get_identity_info",
         lambda _cert_dict: {IdentityKey.ORG: "nvidia", IdentityKey.ROLE: "project_admin"},
     )
-    monkeypatch.setattr("nvflare.fuel.hci.server.login.StudyRegistryService", _FakeStudyRegistryService, raising=False)
-    _FakeStudyRegistryService.registry = None
+    monkeypatch.setattr("nvflare.fuel.hci.server.login.study_store", _FakeStudyStore, raising=False)
+    _FakeStudyStore.studies = None
+    _FakeStudyStore.users = {}
 
     session_mgr = SessionManager(_FakeCell(), idle_timeout=3600, monitor_interval=3600)
     login = LoginModule(session_mgr)
