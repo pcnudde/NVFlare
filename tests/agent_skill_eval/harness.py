@@ -23,7 +23,6 @@ asks Codex to grade the final workspace from the same Markdown rubric.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import re
@@ -33,28 +32,27 @@ import subprocess
 import sys
 import threading
 import time
-import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml  # type: ignore[import-untyped]
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TESTCASE = REPO_ROOT / "agent_skill_eval/testcases/nvflare_basic_pytorch_to_sim"
-DEFAULT_OUT_DIR = REPO_ROOT / "agent_skill_eval/runs"
-DEFAULT_AGENTS_FILE = REPO_ROOT / "agent_skill_eval/agents.yaml"
-DEFAULT_MODEL_COSTS_FILE = REPO_ROOT / "agent_skill_eval/model_costs.yaml"
-GRADER_OUTPUT_SCHEMA = REPO_ROOT / "agent_skill_eval/grader_output_schema.json"
-ANALYSIS_OUTPUT_SCHEMA = REPO_ROOT / "agent_skill_eval/analysis_output_schema.json"
+EVAL_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = EVAL_ROOT.parents[1]
+DEFAULT_TESTCASE = EVAL_ROOT / "testcases/nvflare_basic_pytorch_to_sim"
+DEFAULT_OUT_DIR = EVAL_ROOT / "runs"
+DEFAULT_AGENTS_FILE = EVAL_ROOT / "agents.yaml"
+GRADER_OUTPUT_SCHEMA = EVAL_ROOT / "grader_output_schema.json"
+ANALYSIS_OUTPUT_SCHEMA = EVAL_ROOT / "analysis_output_schema.json"
 EVIDENCE_TIMEOUT_SECONDS = 600
 GRADER_TIMEOUT_SECONDS = 600
 DOCKER_AGENT_NETWORK = "bridge"
 DOCKER_SECURITY_OPTS = ("seccomp=unconfined",)
 DOCKER_CONTAINER_WORKDIR = "/workspace"
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code"
-HERMES_NVIDIA_KEYCHAIN_SERVICE = "nvidia-inference-hub-api-key"
 
 GRADER_COMMAND = [
     "codex",
@@ -94,15 +92,8 @@ TOKEN_KEYS = {
     "reasoning_tokens",
 }
 COST_KEYS = {"cost_usd", "total_cost_usd"}
-HERMES_SESSION_USAGE_FIELDS = {
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "reasoning_tokens",
-    "estimated_cost_usd",
-    "api_call_count",
-}
+
+
 @dataclass
 class CommandResult:
     command: list[str]
@@ -154,12 +145,6 @@ def main() -> int:
     )
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR, help="Directory for run artifacts.")
     parser.add_argument("--agents-file", type=Path, default=DEFAULT_AGENTS_FILE, help="YAML file with agents to run.")
-    parser.add_argument(
-        "--model-costs-file",
-        type=Path,
-        default=DEFAULT_MODEL_COSTS_FILE,
-        help="YAML file with per-model token prices. Use /dev/null to disable configured cost estimates.",
-    )
     parser.add_argument("--agent", action="append", help="Agent id to run. Repeatable. Defaults to all.")
     parser.add_argument(
         "--runs-per-agent",
@@ -182,7 +167,7 @@ def main() -> int:
     parser.add_argument(
         "--docker-oauth",
         action="append",
-        choices=["codex", "claude", "hermes", "all"],
+        choices=["codex", "claude", "all"],
         default=[],
         help="Mount local OAuth auth state for selected agent CLI into the container. Repeatable.",
     )
@@ -206,7 +191,6 @@ def main() -> int:
     if args.runs_per_agent < 1:
         raise SystemExit("--runs-per-agent must be >= 1")
 
-    args.model_costs = load_model_costs(args.model_costs_file.resolve())
     configure_keychain_env(args)
     testcases = load_testcases(args)
 
@@ -231,15 +215,8 @@ def main() -> int:
         for agent in agents
         for run_index in range(1, args.runs_per_agent + 1)
     ]
-    summaries = run_eval_tasks(tasks, out_dir, args)
-
-    if not args.dry_run:
-        aggregate_rows = build_aggregate_rows(summaries)
-        write_summary_csv(out_dir / "summary.csv", summaries)
-        write_aggregate_csv(out_dir / "aggregate.csv", aggregate_rows)
-        print(f"Wrote {out_dir / 'summary.csv'}")
-        print(f"Wrote {out_dir / 'aggregate.csv'}")
-        print_aggregate_table(aggregate_rows)
+    run_eval_tasks(tasks, out_dir, args)
+    print(f"Wrote runs under {out_dir}")
     return 0
 
 
@@ -249,13 +226,7 @@ def load_testcases(args: argparse.Namespace) -> list[TestcaseConfig]:
     used_ids: dict[str, int] = {}
     for testcase_path in testcase_paths:
         testcase_dir = testcase_path.resolve()
-        testcase_md = testcase_dir / "testcase.md"
-        initial_dir = testcase_dir / "initial"
-        if not testcase_md.exists():
-            raise SystemExit(f"Missing testcase.md: {testcase_md}")
-        if not initial_dir.exists():
-            raise SystemExit(f"Missing initial fixture directory: {initial_dir}")
-        testcase_text = testcase_md.read_text()
+        testcase_text = (testcase_dir / "testcase.md").read_text()
         testcase_id = slugify(testcase_dir.name) or "testcase"
         if testcase_id in used_ids:
             used_ids[testcase_id] += 1
@@ -278,23 +249,20 @@ def run_eval_tasks(
     tasks: list[tuple[TestcaseConfig, dict[str, Any], int]],
     out_dir: Path,
     args: argparse.Namespace,
-) -> list[dict[str, Any]]:
+) -> None:
     if args.parallel == 1:
-        return [
+        for testcase, agent, run_index in tasks:
             run_agent_eval(
                 agent=agent,
                 testcase=testcase,
                 run_index=run_index,
                 out_dir=out_dir,
                 agent_timeout=testcase.agent_timeout_seconds,
-                model_costs=args.model_costs,
             )
-            for testcase, agent, run_index in tasks
-        ]
+        return
 
-    summaries = []
     with ThreadPoolExecutor(max_workers=args.parallel) as executor:
-        future_to_task = {
+        futures = [
             executor.submit(
                 run_agent_eval,
                 agent=agent,
@@ -302,110 +270,34 @@ def run_eval_tasks(
                 run_index=run_index,
                 out_dir=out_dir,
                 agent_timeout=testcase.agent_timeout_seconds,
-                model_costs=args.model_costs,
-            ): (testcase, agent, run_index)
+            )
             for testcase, agent, run_index in tasks
-        }
-        for future in as_completed(future_to_task):
-            testcase, agent, run_index = future_to_task[future]
-            try:
-                summaries.append(future.result())
-            except Exception as e:  # noqa: BLE001
-                summaries.append(harness_error_summary(testcase, agent, run_index, e))
-    return sorted(summaries, key=lambda row: (row["testcase_id"], row["agent_id"], row["run_index"]))
-
-
-def harness_error_summary(
-    testcase: TestcaseConfig,
-    agent: dict[str, Any],
-    run_index: int,
-    error: Exception,
-) -> dict[str, Any]:
-    return {
-        "testcase_id": testcase.id,
-        "agent_id": agent["id"],
-        "agent_label": agent["label"],
-        "run_index": run_index,
-        "score": None,
-        "score_before_caps": None,
-        "agent_returncode": None,
-        "agent_timed_out": None,
-        "agent_duration_seconds": None,
-        "total_duration_seconds": None,
-        "agent_tokens": None,
-        "grader_tokens": None,
-        "agent_cost_usd": None,
-        "grader_cost_usd": None,
-        "agent_cost_source": None,
-        "grader_cost_source": None,
-        "summary": f"harness error: {error}",
-        "flare_version_used": None,
-        "achieved_accuracy": None,
-        "run_summary_bullets": "[]",
-        "testcase_improvement_recommendations": "[]",
-        "interesting_observations": "[]",
-        "process_observations": "[]",
-        "skill_improvement_suggestions": "[]",
-    }
+        ]
+        for future in as_completed(futures):
+            future.result()
 
 
 def load_agents(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        raise SystemExit(f"Missing agents file: {path}")
-    try:
-        import yaml  # type: ignore[import-untyped]
-    except ModuleNotFoundError:
-        raise SystemExit("PyYAML is required to read agent_skill_eval/agents.yaml. Install it with `pip install PyYAML`.") from None
-    data = yaml.safe_load(path.read_text())
-    if not isinstance(data, dict) or not isinstance(data.get("agents"), list):
-        raise SystemExit(f"Invalid agents file, expected top-level 'agents' list: {path}")
-    return validate_agents(data["agents"], path)
-
-
-def load_model_costs(path: Path) -> dict[str, Any]:
-    if str(path) == "/dev/null":
-        return {}
-    if not path.exists():
-        raise SystemExit(f"Missing model costs file: {path}")
-    try:
-        import yaml  # type: ignore[import-untyped]
-    except ModuleNotFoundError:
-        raise SystemExit(
-            "PyYAML is required to read agent_skill_eval/model_costs.yaml. Install it with `pip install PyYAML`."
-        ) from None
-    data = yaml.safe_load(path.read_text()) or {}
-    if not isinstance(data, dict):
-        raise SystemExit(f"Invalid model costs file, expected mapping: {path}")
-    models = data.get("models", {})
-    if models is None:
-        data["models"] = {}
-    elif not isinstance(models, dict):
-        raise SystemExit(f"Invalid model costs file, expected top-level 'models' mapping: {path}")
-    return data
+    return validate_agents(yaml.safe_load(path.read_text())["agents"], path)
 
 
 def validate_agents(agents: list[Any], path: Path) -> list[dict[str, Any]]:
     validated = []
     seen = set()
-    for index, agent in enumerate(agents, start=1):
-        if not isinstance(agent, dict):
-            raise SystemExit(f"Invalid agent #{index} in {path}: expected mapping")
-        agent_id = agent.get("id")
-        label = agent.get("label")
-        command = agent.get("command")
-        if not isinstance(agent_id, str) or not agent_id:
-            raise SystemExit(f"Invalid agent #{index} in {path}: missing string id")
+    for agent in agents:
+        agent_id = agent["id"]
         if agent_id in seen:
             raise SystemExit(f"Duplicate agent id in {path}: {agent_id}")
-        if not isinstance(label, str) or not label:
-            raise SystemExit(f"Invalid agent {agent_id} in {path}: missing string label")
-        if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
-            raise SystemExit(f"Invalid agent {agent_id} in {path}: command must be a non-empty string list")
-        agent_type = agent.get("agent_type") or infer_agent_type(agent_id, command)
-        if not isinstance(agent_type, str) or not agent_type:
-            raise SystemExit(f"Invalid agent {agent_id} in {path}: missing string agent_type")
         seen.add(agent_id)
-        validated.append({"id": agent_id, "label": label, "agent_type": agent_type, "command": command})
+        command = agent["command"]
+        validated.append(
+            {
+                "id": agent_id,
+                "label": agent["label"],
+                "agent_type": agent.get("agent_type") or infer_agent_type(agent_id, command),
+                "command": command,
+            }
+        )
     return validated
 
 
@@ -436,13 +328,13 @@ def run_agent_eval(
     run_index: int,
     out_dir: Path,
     agent_timeout: int,
-    model_costs: dict[str, Any],
-) -> dict[str, Any]:
+) -> None:
     agent_dir = out_dir / testcase.id / agent["id"] / f"run_{run_index:02d}"
     workspace_dir = agent_dir / "workspace"
     logs_dir = agent_dir / "logs"
     logs_dir.mkdir(parents=True)
     shutil.copytree(testcase.path / "initial", workspace_dir)
+    make_workspace_writable(workspace_dir)
     workdir = infer_workdir(workspace_dir)
     env = build_run_env(agent_dir)
 
@@ -498,9 +390,6 @@ def run_agent_eval(
         )
     agent_duration = time.monotonic() - started
     agent_token_usage = agent_result.to_record()["token_usage"]
-    hermes_usage_collection = collect_hermes_usage(agent, agent_container_name, logs_dir, env, agent_result)
-    if hermes_usage_collection.get("usage"):
-        agent_token_usage = merge_usage(agent_token_usage, hermes_usage_collection["usage"])
 
     agent_public_context = build_agent_public_context(agent_result, last_message_host)
     if agent_result.timed_out:
@@ -549,7 +438,6 @@ def run_agent_eval(
         )
 
     container_remove_result = remove_container(agent_container_name, logs_dir, env)
-    archive_path = agent_dir.with_suffix(".zip")
     total_duration = time.monotonic() - started
     result = {
         "agent": {
@@ -577,11 +465,6 @@ def run_agent_eval(
                 logs_dir / "container_remove_stderr.txt",
             ),
         },
-        "artifact_archive": {
-            "path": str(archive_path),
-            "created": True,
-            "contains": "run directory files, including logs, result metadata, and final workspace output",
-        },
         "testcase_id": testcase.id,
         "run_index": run_index,
         "testcase": str(testcase.path),
@@ -589,7 +472,6 @@ def run_agent_eval(
         "duration_seconds": round(total_duration, 3),
         "agent_duration_seconds": round(agent_duration, 3),
         "agent_result": agent_result.to_record(agent_stdout, agent_stderr),
-        "agent_usage_collection": hermes_usage_collection,
         "evidence": evidence,
         "grade": grade,
         "analysis": analysis,
@@ -599,12 +481,11 @@ def run_agent_eval(
             "analysis": analysis.get("analysis_result", {}).get("token_usage", {}),
         },
     }
-    apply_cost_estimates(result, model_costs)
+    archive_path = agent_dir.with_suffix(".zip")
+    result["artifact_archive"] = {"path": str(archive_path)}
     write_json(agent_dir / "result.json", result)
-    archive_result = create_run_archive(agent_dir, archive_path)
-    result["artifact_archive"].update(archive_result)
-    write_json(agent_dir / "result.json", result)
-    return flatten_summary(result)
+    shutil.make_archive(str(agent_dir), "zip", root_dir=agent_dir.parent, base_dir=agent_dir.name)
+    return None
 
 
 def infer_workdir(workspace_dir: Path) -> Path:
@@ -612,6 +493,21 @@ def infer_workdir(workspace_dir: Path) -> Path:
     if len(children) == 1:
         return children[0]
     return workspace_dir
+
+
+def make_workspace_writable(workspace_dir: Path) -> None:
+    """Make disposable run fixtures writable by the container user."""
+    for path in [workspace_dir, *workspace_dir.rglob("*")]:
+        if path.is_symlink():
+            continue
+        try:
+            mode = path.stat().st_mode
+            if path.is_dir():
+                path.chmod(mode | 0o777)
+            else:
+                path.chmod(mode | 0o666)
+        except OSError:
+            continue
 
 
 def build_docker_config(args: argparse.Namespace, testcase_text: str) -> DockerConfig:
@@ -695,14 +591,6 @@ def configure_keychain_env(args: argparse.Namespace) -> None:
             env_name="ANTHROPIC_API_KEY",
             docker_env=args.docker_env,
             required=args.docker_claude_keychain,
-        )
-
-    if "hermes" in requested:
-        configure_secret_from_keychain(
-            service=HERMES_NVIDIA_KEYCHAIN_SERVICE,
-            env_name="NVIDIA_API_KEY",
-            docker_env=args.docker_env,
-            required=True,
         )
 
 
@@ -808,16 +696,7 @@ def build_agent_prompt(testcase_text: str, agent: dict[str, Any]) -> str:
     prompt = extract_section_code_block(testcase_text, "Prompt") or ""
     if not prompt:
         raise SystemExit("Could not find a prompt code block in testcase.md")
-    prompt = render_prompt_template(prompt, agent)
-    return (
-        "You are being evaluated on an agent skill testcase.\n"
-        "Work only in the current project folder. Implement the user's request. "
-        "Do not ask clarifying questions; make reasonable assumptions and finish the task.\n"
-        "Before finishing, write AGENT_EVAL_NOTES.md with concise public notes on your approach, "
-        "assumptions, blockers, and any skill improvements that would have helped. Do not include hidden "
-        "chain-of-thought; write only a brief engineering summary.\n\n"
-        f"User prompt:\n{prompt.strip()}\n"
-    )
+    return render_prompt_template(prompt, agent).strip()
 
 
 def render_prompt_template(prompt: str, agent: dict[str, Any]) -> str:
@@ -961,7 +840,11 @@ def prepare_agent_container(
             stdout="",
             stderr="",
         )
-    command = ["docker", "exec", "-i", container_name, "sh", "-lc", docker_config.oauth_setup_script]
+    setup_script = (
+        docker_config.oauth_setup_script
+        + "\nchown -R dev:dev /home/dev/.codex /home/dev/.claude /home/dev/.claude.json 2>/dev/null || true"
+    )
+    command = ["docker", "exec", "-i", "-u", "root", "-e", "HOME=/home/dev", container_name, "sh", "-lc", setup_script]
     return run_command(command, cwd=REPO_ROOT, stdin=None, timeout_seconds=60, env=env)
 
 
@@ -981,10 +864,7 @@ def failed_container_agent_result(
         f"container_start_stdout:\n{start_result.stdout}\n"
         f"container_prepare_stdout:\n{prepare_result.stdout}\n"
     )
-    stderr = (
-        f"container_start_stderr:\n{start_result.stderr}\n"
-        f"container_prepare_stderr:\n{prepare_result.stderr}\n"
-    )
+    stderr = f"container_start_stderr:\n{start_result.stderr}\n" f"container_prepare_stderr:\n{prepare_result.stderr}\n"
     write_text(stdout_path, stdout)
     write_text(stderr_path, stderr)
     return CommandResult(
@@ -994,110 +874,6 @@ def failed_container_agent_result(
         stdout=stdout,
         stderr=stderr,
     )
-
-
-def collect_hermes_usage(
-    agent: dict[str, Any],
-    container_name: str,
-    logs_dir: Path,
-    env: dict[str, str],
-    agent_result: CommandResult,
-) -> dict[str, Any]:
-    if agent.get("agent_type") != "hermes":
-        return {}
-    if agent_result.timed_out:
-        return {"source": "hermes_sessions_export", "skipped": "agent_timed_out", "usage": {}}
-    if agent_result.returncode is not None and agent_result.returncode < 0:
-        return {"source": "hermes_sessions_export", "skipped": "agent_not_run", "usage": {}}
-    if docker_container_is_running(container_name, env) is False:
-        return {"source": "hermes_sessions_export", "skipped": "container_not_running", "usage": {}}
-
-    stdout_path = logs_dir / "hermes_sessions.jsonl"
-    stderr_path = logs_dir / "hermes_sessions_stderr.txt"
-    command = docker_exec_command(container_name, ["hermes", "sessions", "export", "-", "--source", "cli"])
-    result = run_command(command, cwd=REPO_ROOT, stdin=None, timeout_seconds=120, env=env)
-    write_text(stdout_path, result.stdout)
-    write_text(stderr_path, result.stderr)
-
-    usage = parse_hermes_session_usage(result.stdout) if result.returncode == 0 else {}
-    return {
-        "source": "hermes_sessions_export",
-        "session_export_path": str(stdout_path),
-        "usage": usage,
-        "export_result": result.to_record(stdout_path, stderr_path),
-    }
-
-
-def parse_hermes_session_usage(jsonl_text: str) -> dict[str, Any]:
-    totals = {field: 0.0 for field in HERMES_SESSION_USAGE_FIELDS}
-    row_count = 0
-    for line in jsonl_text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        rows = value if isinstance(value, list) else [value]
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            row_count += 1
-            for field in HERMES_SESSION_USAGE_FIELDS:
-                item = hermes_session_metric(row, field)
-                if isinstance(item, bool) or not isinstance(item, (int, float)):
-                    continue
-                totals[field] += float(item)
-
-    usage: dict[str, Any] = {}
-    field_map = {
-        "input_tokens": "input_tokens",
-        "output_tokens": "output_tokens",
-        "cache_read_tokens": "cache_read_input_tokens",
-        "cache_write_tokens": "cache_creation_input_tokens",
-        "reasoning_tokens": "reasoning_tokens",
-        "api_call_count": "api_call_count",
-    }
-    for hermes_field, normalized_field in field_map.items():
-        value = totals[hermes_field]
-        if value:
-            usage[normalized_field] = int(value) if value.is_integer() else value
-
-    total_tokens = (
-        totals["input_tokens"]
-        + totals["output_tokens"]
-        + totals["cache_read_tokens"]
-        + totals["cache_write_tokens"]
-    )
-    if total_tokens:
-        usage["total_tokens_estimate"] = int(total_tokens) if total_tokens.is_integer() else total_tokens
-
-    estimated_cost = totals["estimated_cost_usd"]
-    if estimated_cost:
-        usage["total_cost_usd"] = round(estimated_cost, 8)
-        usage["cost_source"] = "reported"
-
-    if row_count:
-        usage["session_rows"] = row_count
-        usage["usage_source"] = "hermes_sessions_export"
-    return usage
-
-
-def hermes_session_metric(row: dict[str, Any], field: str) -> Any:
-    for container_key in [None, "usage", "metrics", "totals", "token_usage"]:
-        source = row if container_key is None else row.get(container_key)
-        if isinstance(source, dict) and field in source:
-            return source[field]
-    return None
-
-
-def merge_usage(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    for key, value in override.items():
-        if value is not None:
-            merged[key] = value
-    return merged
 
 
 def runs_job_py(command: list[str]) -> bool:
@@ -1380,8 +1156,8 @@ def build_grader_prompt(
         f"You are running with read-only access to the final workspace at: {workdir}\n"
         "Inspect the final workspace files directly before assigning partial credit. "
         "The harness has already executed the evidence commands; use those command results for runtime behavior.\n"
-        "For process notes, use only public artifacts such as AGENT_EVAL_NOTES.md, the agent final message, "
-        "and stdout/stderr. Do not request or infer hidden chain-of-thought.\n\n"
+        "For process notes, use only public files, the agent final message, and stdout/stderr. "
+        "Do not request or infer hidden chain-of-thought.\n\n"
         "Testcase:\n"
         f"{testcase_text}\n\n"
         "Collected evidence:\n"
@@ -1404,8 +1180,8 @@ def build_analysis_prompt(
         "Return JSON only, matching the provided schema.\n"
         f"You are running with read-only access to the final workspace at: {workdir}\n"
         "Inspect the final workspace files directly. Summarize what the agent did in exactly five concise "
-        "bullet strings. Use only public artifacts such as files, AGENT_EVAL_NOTES.md, the agent final message, "
-        "and stdout/stderr; do not request or infer hidden chain-of-thought.\n"
+        "bullet strings. Use only public files, the agent final message, and stdout/stderr; do not request "
+        "or infer hidden chain-of-thought.\n"
         "For flare_version_used, use only the nvflare_version_probe evidence collected from the run container; "
         "if the probe failed or is absent, report 'unknown' and mention the error in interesting_observations. "
         "For achieved_accuracy, report the best final-round or final validation accuracy "
@@ -1732,423 +1508,8 @@ def collect_usage_metrics(value: Any, metrics: dict[str, float]) -> None:
             collect_usage_metrics(item, metrics)
 
 
-def apply_cost_estimates(result: dict[str, Any], model_costs: dict[str, Any]) -> None:
-    usage_by_role = result.get("token_usage", {})
-    if not isinstance(usage_by_role, dict):
-        return
-
-    agent = result.get("agent", {})
-    if isinstance(agent, dict):
-        enrich_usage_cost(
-            usage_by_role.get("agent"),
-            model_name=model_from_command(agent.get("command", [])),
-            agent_id=agent.get("id"),
-            model_costs=model_costs,
-        )
-
-    grade = result.get("grade", {})
-    if isinstance(grade, dict):
-        enrich_usage_cost(
-            usage_by_role.get("grader"),
-            model_name=model_from_command(grade.get("grader_run_command", [])),
-            agent_id="grader",
-            model_costs=model_costs,
-        )
-
-    analysis = result.get("analysis", {})
-    if isinstance(analysis, dict):
-        enrich_usage_cost(
-            usage_by_role.get("analysis"),
-            model_name=model_from_command(analysis.get("analysis_run_command", [])),
-            agent_id="analysis",
-            model_costs=model_costs,
-        )
-
-
-def enrich_usage_cost(
-    usage: Any,
-    model_name: str | None,
-    agent_id: str | None,
-    model_costs: dict[str, Any],
-) -> None:
-    if not isinstance(usage, dict) or not usage:
-        return
-    if model_name:
-        usage.setdefault("cost_model", model_name)
-
-    prefer_reported = bool(model_costs.get("prefer_reported_cost", True))
-    if prefer_reported and reported_cost_value(usage) is not None:
-        usage["cost_source"] = "reported"
-        return
-
-    pricing = find_model_pricing(model_costs, model_name, agent_id)
-    estimate = calculate_configured_cost(usage, pricing)
-    if estimate is None:
-        usage.setdefault("cost_source", "unpriced")
-        return
-
-    usage["total_cost_usd"] = round(estimate, 8)
-    usage["cost_source"] = "model_costs"
-
-
-def model_from_command(command: Any) -> str | None:
-    if not isinstance(command, list):
-        return None
-    for index, part in enumerate(command):
-        if part == "--model" and index + 1 < len(command):
-            return command[index + 1]
-        if isinstance(part, str) and part.startswith("--model="):
-            return part.split("=", 1)[1]
-    return None
-
-
-def find_model_pricing(model_costs: dict[str, Any], model_name: str | None, agent_id: str | None) -> dict[str, Any] | None:
-    models = model_costs.get("models")
-    if not isinstance(models, dict):
-        return None
-    if model_name in models and isinstance(models[model_name], dict):
-        return models[model_name]
-    for name, config in models.items():
-        if not isinstance(config, dict):
-            continue
-        aliases = config.get("aliases", [])
-        if isinstance(aliases, list) and (model_name in aliases or agent_id in aliases):
-            config = dict(config)
-            config.setdefault("model", name)
-            return config
-    return None
-
-
-def calculate_configured_cost(usage: dict[str, Any], pricing: dict[str, Any] | None) -> float | None:
-    if not pricing:
-        return None
-    rates = pricing.get("rates")
-    if not isinstance(rates, dict):
-        return None
-
-    input_tokens = numeric_usage_value(usage, "input_tokens", "prompt_tokens") or 0
-    output_tokens = numeric_usage_value(usage, "output_tokens", "completion_tokens") or 0
-    cached_tokens = numeric_usage_value(usage, "cached_input_tokens", "cached_tokens") or 0
-    cache_creation_tokens = numeric_usage_value(usage, "cache_creation_input_tokens") or 0
-    cache_read_tokens = numeric_usage_value(usage, "cache_read_input_tokens") or 0
-
-    cost = 0.0
-    priced = False
-
-    cached_input_rate = rate_value(rates, "cached_input_tokens")
-    input_rate = rate_value(rates, "input_tokens", "prompt_tokens")
-    if cached_input_rate is not None and cached_tokens:
-        uncached_input_tokens = max(input_tokens - cached_tokens, 0)
-        if input_rate is not None:
-            cost += uncached_input_tokens * input_rate / 1_000_000
-            priced = True
-        cost += cached_tokens * cached_input_rate / 1_000_000
-        priced = True
-    elif input_rate is not None and input_tokens:
-        cost += input_tokens * input_rate / 1_000_000
-        priced = True
-
-    for token_count, *rate_keys in [
-        (output_tokens, "output_tokens", "completion_tokens"),
-        (cache_creation_tokens, "cache_creation_input_tokens"),
-        (cache_read_tokens, "cache_read_input_tokens"),
-    ]:
-        rate = rate_value(rates, *rate_keys)
-        if rate is not None and token_count:
-            cost += token_count * rate / 1_000_000
-            priced = True
-
-    return cost if priced else None
-
-
-def rate_value(rates: dict[str, Any], *keys: str) -> float | None:
-    for key in keys:
-        value = rates.get(key)
-        if isinstance(value, bool) or value is None:
-            continue
-        if isinstance(value, (int, float)):
-            return float(value)
-    return None
-
-
-def flatten_summary(result: dict[str, Any]) -> dict[str, Any]:
-    grade = result.get("grade", {}).get("parsed") or {}
-    analysis = result.get("analysis", {}).get("parsed") or {}
-    agent_usage = result.get("token_usage", {}).get("agent", {})
-    grader_usage = result.get("token_usage", {}).get("grader", {})
-    return {
-        "testcase_id": result["testcase_id"],
-        "agent_id": result["agent"]["id"],
-        "agent_label": result["agent"]["label"],
-        "run_index": result["run_index"],
-        "score": grade.get("score"),
-        "score_before_caps": grade.get("score_before_caps"),
-        "agent_returncode": result["agent_result"]["returncode"],
-        "agent_timed_out": result["agent_result"]["timed_out"],
-        "agent_duration_seconds": result["agent_duration_seconds"],
-        "total_duration_seconds": result["duration_seconds"],
-        "agent_tokens": token_total(agent_usage),
-        "grader_tokens": token_total(grader_usage),
-        "agent_cost_usd": cost_value(agent_usage),
-        "grader_cost_usd": cost_value(grader_usage),
-        "agent_cost_source": agent_usage.get("cost_source"),
-        "grader_cost_source": grader_usage.get("cost_source"),
-        "summary": grade.get("summary"),
-        "flare_version_used": analysis.get("flare_version_used"),
-        "achieved_accuracy": analysis.get("achieved_accuracy"),
-        "run_summary_bullets": json.dumps(analysis.get("run_summary_bullets", [])),
-        "testcase_improvement_recommendations": json.dumps(
-            analysis.get("testcase_improvement_recommendations", [])
-        ),
-        "interesting_observations": json.dumps(analysis.get("interesting_observations", [])),
-        "process_observations": json.dumps(grade.get("process_observations", [])),
-        "skill_improvement_suggestions": json.dumps(grade.get("skill_improvement_suggestions", [])),
-    }
-
-
-def token_total(usage: dict[str, Any]) -> int | None:
-    for key in ["total_tokens", "total_tokens_estimate"]:
-        value = usage.get(key)
-        if isinstance(value, int):
-            return value
-    return None
-
-
-def cost_value(usage: dict[str, Any]) -> float | None:
-    for key in ["total_cost_usd", "cost_usd", "cost_usd_estimate"]:
-        value = usage.get(key)
-        if isinstance(value, (int, float)):
-            return float(value)
-    return None
-
-
-def reported_cost_value(usage: dict[str, Any]) -> float | None:
-    for key in ["total_cost_usd", "cost_usd"]:
-        value = usage.get(key)
-        if isinstance(value, (int, float)):
-            return float(value)
-    return None
-
-
-def write_summary_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    fieldnames = [
-        "testcase_id",
-        "agent_id",
-        "agent_label",
-        "run_index",
-        "score",
-        "score_before_caps",
-        "agent_returncode",
-        "agent_timed_out",
-        "agent_duration_seconds",
-        "total_duration_seconds",
-        "agent_tokens",
-        "grader_tokens",
-        "agent_cost_usd",
-        "grader_cost_usd",
-        "agent_cost_source",
-        "grader_cost_source",
-        "summary",
-        "flare_version_used",
-        "achieved_accuracy",
-        "run_summary_bullets",
-        "testcase_improvement_recommendations",
-        "interesting_observations",
-        "process_observations",
-        "skill_improvement_suggestions",
-    ]
-    with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-
-
-def build_aggregate_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
-    for row in rows:
-        key = (row["testcase_id"], row["agent_id"], row["agent_label"])
-        grouped.setdefault(key, []).append(row)
-
-    aggregate_rows = []
-    for (testcase_id, agent_id, agent_label), group_rows in sorted(grouped.items()):
-        row: dict[str, Any] = {
-            "testcase_id": testcase_id,
-            "agent_id": agent_id,
-            "agent_label": agent_label,
-            "runs": len(group_rows),
-            "scored_runs": len(numeric_values(group_rows, "score")),
-            "agent_failed_runs": sum(
-                1
-                for item in group_rows
-                if item.get("score") is None
-                or item.get("agent_timed_out")
-                or item.get("agent_returncode") not in (0, None)
-            ),
-        }
-        for field in [
-            "score",
-            "score_before_caps",
-            "agent_duration_seconds",
-            "total_duration_seconds",
-            "agent_tokens",
-            "grader_tokens",
-            "agent_cost_usd",
-            "grader_cost_usd",
-        ]:
-            add_aggregate_stats(row, field, numeric_values(group_rows, field))
-        aggregate_rows.append(row)
-    return aggregate_rows
-
-
-def add_aggregate_stats(row: dict[str, Any], field: str, values: list[float]) -> None:
-    if not values:
-        row[f"{field}_avg"] = None
-        row[f"{field}_min"] = None
-        row[f"{field}_max"] = None
-        return
-    row[f"{field}_avg"] = round(sum(values) / len(values), 3)
-    row[f"{field}_min"] = round(min(values), 3)
-    row[f"{field}_max"] = round(max(values), 3)
-
-
-def numeric_values(rows: list[dict[str, Any]], field: str) -> list[float]:
-    values = []
-    for row in rows:
-        value = row.get(field)
-        if isinstance(value, bool) or value is None or value == "":
-            continue
-        if isinstance(value, (int, float)):
-            values.append(float(value))
-            continue
-        try:
-            values.append(float(value))
-        except (TypeError, ValueError):
-            continue
-    return values
-
-
-def write_aggregate_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    fieldnames = [
-        "testcase_id",
-        "agent_id",
-        "agent_label",
-        "runs",
-        "scored_runs",
-        "agent_failed_runs",
-        "score_avg",
-        "score_min",
-        "score_max",
-        "score_before_caps_avg",
-        "score_before_caps_min",
-        "score_before_caps_max",
-        "agent_duration_seconds_avg",
-        "agent_duration_seconds_min",
-        "agent_duration_seconds_max",
-        "total_duration_seconds_avg",
-        "total_duration_seconds_min",
-        "total_duration_seconds_max",
-        "agent_tokens_avg",
-        "agent_tokens_min",
-        "agent_tokens_max",
-        "grader_tokens_avg",
-        "grader_tokens_min",
-        "grader_tokens_max",
-        "agent_cost_usd_avg",
-        "agent_cost_usd_min",
-        "agent_cost_usd_max",
-        "grader_cost_usd_avg",
-        "grader_cost_usd_min",
-        "grader_cost_usd_max",
-    ]
-    with path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
-
-
-def print_aggregate_table(rows: list[dict[str, Any]]) -> None:
-    if not rows:
-        return
-    headers = [
-        "testcase",
-        "agent",
-        "runs",
-        "score avg/min/max",
-        "agent sec avg/min/max",
-        "tokens avg/min/max",
-    ]
-    table = [
-        [
-            row["testcase_id"],
-            row["agent_id"],
-            str(row["runs"]),
-            format_triplet(row, "score"),
-            format_triplet(row, "agent_duration_seconds"),
-            format_triplet(row, "agent_tokens"),
-        ]
-        for row in rows
-    ]
-    widths = [
-        max(len(headers[index]), *(len(item[index]) for item in table))
-        for index in range(len(headers))
-    ]
-    print("\nAggregate results:")
-    print("  ".join(headers[index].ljust(widths[index]) for index in range(len(headers))))
-    print("  ".join("-" * width for width in widths))
-    for item in table:
-        print("  ".join(item[index].ljust(widths[index]) for index in range(len(item))))
-
-
-def format_triplet(row: dict[str, Any], field: str) -> str:
-    values = [row.get(f"{field}_avg"), row.get(f"{field}_min"), row.get(f"{field}_max")]
-    if all(value is None for value in values):
-        return ""
-    return "/".join("" if value is None else format_number(value) for value in values)
-
-
-def format_number(value: Any) -> str:
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value)
-
-
 def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True))
-
-
-def create_run_archive(run_dir: Path, archive_path: Path) -> dict[str, Any]:
-    started = time.monotonic()
-    temp_path = archive_path.with_name(f"{archive_path.name}.tmp")
-    file_count = 0
-    try:
-        if temp_path.exists():
-            temp_path.unlink()
-        with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            for path in sorted(run_dir.rglob("*")):
-                if not path.is_file():
-                    continue
-                archive.write(path, Path(run_dir.name) / path.relative_to(run_dir))
-                file_count += 1
-        temp_path.replace(archive_path)
-        return {
-            "path": str(archive_path),
-            "created": True,
-            "file_count": file_count,
-            "size_bytes": archive_path.stat().st_size,
-            "duration_seconds": round(time.monotonic() - started, 3),
-        }
-    except Exception as e:  # noqa: BLE001
-        if temp_path.exists():
-            temp_path.unlink()
-        return {
-            "path": str(archive_path),
-            "created": False,
-            "file_count": file_count,
-            "duration_seconds": round(time.monotonic() - started, 3),
-            "error": f"{type(e).__name__}: {e}",
-        }
 
 
 def write_text(path: Path, text: str) -> None:

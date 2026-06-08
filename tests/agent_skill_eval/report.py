@@ -28,6 +28,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+import yaml  # type: ignore[import-untyped]
 
 MPLCONFIGDIR = Path(os.environ.get("TMPDIR", "/tmp")) / "agent_skill_eval_matplotlib"
 MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
@@ -59,7 +60,7 @@ def main() -> int:
         "run_dirs",
         nargs="+",
         type=Path,
-        help="Run directory or directories, for example agent_skill_eval/runs/<timestamp>.",
+        help="Run directory or directories, for example tests/agent_skill_eval/runs/<timestamp>.",
     )
     parser.add_argument("--output", type=Path, help="Output HTML path.")
     args = parser.parse_args()
@@ -89,7 +90,9 @@ def load_runs(run_dirs: list[Path]) -> list[dict[str, Any]]:
     for run_dir in run_dirs:
         for result_path in sorted(run_dir.glob("*/*/run_*/result.json")):
             result = read_json(result_path)
-            analysis = read_nested_json(result, "analysis", "analysis_file") or result.get("analysis", {}).get("parsed") or {}
+            analysis = (
+                read_nested_json(result, "analysis", "analysis_file") or result.get("analysis", {}).get("parsed") or {}
+            )
             grade = read_nested_json(result, "grade", "grade_file") or result.get("grade", {}).get("parsed") or {}
             evidence = result.get("evidence", [])
             agent_usage = merged_agent_usage(result, result_path)
@@ -109,9 +112,7 @@ def load_runs(run_dirs: list[Path]) -> list[dict[str, Any]]:
                 "flare_version_used": active_flare_version(evidence),
                 "achieved_accuracy": analysis.get("achieved_accuracy", ""),
                 "run_summary_bullets": analysis.get("run_summary_bullets", []),
-                "testcase_improvement_recommendations": analysis.get(
-                    "testcase_improvement_recommendations", []
-                ),
+                "testcase_improvement_recommendations": analysis.get("testcase_improvement_recommendations", []),
                 "interesting_observations": analysis.get("interesting_observations", []),
                 "agent_duration_seconds": result.get("agent_duration_seconds", ""),
                 "total_duration_seconds": result.get("duration_seconds", ""),
@@ -189,10 +190,6 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def load_model_costs() -> dict[str, Any]:
     if not MODEL_COSTS_FILE.exists():
-        return {}
-    try:
-        import yaml  # type: ignore[import-untyped]
-    except ModuleNotFoundError:
         return {}
     data = yaml.safe_load(MODEL_COSTS_FILE.read_text()) or {}
     return data if isinstance(data, dict) else {}
@@ -298,20 +295,6 @@ def cost_value(usage: dict[str, Any]) -> float | str:
     return ""
 
 
-def total_cost(result: dict[str, Any]) -> float | str:
-    total = 0.0
-    found = False
-    usage_by_role = result.get("token_usage", {})
-    if not isinstance(usage_by_role, dict):
-        return ""
-    for usage in usage_by_role.values():
-        value = cost_value(usage)
-        if isinstance(value, (int, float)):
-            total += float(value)
-            found = True
-    return total if found else ""
-
-
 def agent_cost_value(result: dict[str, Any], agent_usage: dict[str, Any], model_costs: dict[str, Any]) -> float | str:
     reported = cost_value(agent_usage)
     if isinstance(reported, (int, float)) and agent_usage.get("cost_source") == "reported":
@@ -339,7 +322,9 @@ def model_from_command(command: Any) -> str | None:
     return None
 
 
-def find_model_pricing(model_costs: dict[str, Any], model_name: str | None, agent_id: str | None) -> dict[str, Any] | None:
+def find_model_pricing(
+    model_costs: dict[str, Any], model_name: str | None, agent_id: str | None
+) -> dict[str, Any] | None:
     models = model_costs.get("models")
     if not isinstance(models, dict):
         return None
@@ -534,7 +519,6 @@ def render_report(run_dirs: list[Path], rows: list[dict[str, Any]], aggregates: 
   <main>
     {render_cards(rows, aggregates)}
     {render_sources(run_dirs)}
-    {render_comparison(rows, aggregates)}
     {chart}
     {render_aggregate_table(aggregates)}
     {render_run_cards(rows)}
@@ -556,7 +540,6 @@ def styles() -> str:
       --accent: #2563eb;
       --soft: #eef2f7;
       --good: #087443;
-      --warn: #a15c00;
     }
     * { box-sizing: border-box; }
     body {
@@ -601,8 +584,6 @@ def styles() -> str:
     tr:last-child td { border-bottom: 0; }
     .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
     .score { color: var(--accent); font-weight: 750; }
-    .delta-good { color: var(--good); font-weight: 700; }
-    .delta-bad { color: #b42318; font-weight: 700; }
     .muted { color: var(--muted); }
     .sources { font-size: 12px; color: var(--muted); }
     .sources code, code {
@@ -668,206 +649,6 @@ def render_chart(aggregates: list[dict[str, Any]]) -> str:
     return f'<section class="panel chart"><img alt="Score, duration, and token charts" src="data:image/png;base64,{image}"></section>'
 
 
-def render_comparison(rows: list[dict[str, Any]], aggregates: list[dict[str, Any]]) -> str:
-    cohort_order = []
-    for row in rows:
-        cohort = row.get("cohort_label")
-        if cohort and cohort not in cohort_order:
-            cohort_order.append(cohort)
-    if len(cohort_order) < 2:
-        return ""
-
-    baseline, candidate = cohort_order[:2]
-    by_key = {(row["cohort_label"], row["testcase_id"], row["agent_id"]): row for row in aggregates}
-    testcase_ids = sorted({row["testcase_id"] for row in aggregates})
-    agent_ids = sorted({row["agent_id"] for row in aggregates})
-    compare_rows = []
-    for testcase_id in testcase_ids:
-        for agent_id in agent_ids:
-            left = by_key.get((baseline, testcase_id, agent_id))
-            right = by_key.get((candidate, testcase_id, agent_id))
-            if not left or not right:
-                continue
-            label = agent_id if len(testcase_ids) == 1 else f"{agent_id} / {testcase_id}"
-            compare_rows.append((label, left, right))
-    if not compare_rows:
-        return ""
-
-    chart = comparison_chart_png_base64(baseline, candidate, compare_rows)
-    body = "\n".join(render_comparison_row(agent_id, left, right) for agent_id, left, right in compare_rows)
-    chart_html = (
-        f'<div class="chart"><img alt="Original versus skills score, duration, and token comparison charts" src="data:image/png;base64,{chart}"></div>'
-        if chart
-        else ""
-    )
-    return f"""
-    <h2>Run Comparison</h2>
-    <section class="panel">
-      <div class="muted">Baseline <code>{escape(baseline)}</code> compared with <code>{escape(candidate)}</code>.</div>
-      {chart_html}
-      <table>
-        <thead>
-          <tr>
-            <th>Agent</th>
-            <th>Score avg</th>
-            <th>Score delta</th>
-            <th>Duration avg</th>
-            <th>Duration delta</th>
-            <th>Tokens avg</th>
-            <th>Tokens delta</th>
-            <th>Agent cost avg</th>
-            <th>Agent cost delta</th>
-          </tr>
-        </thead>
-        <tbody>{body}</tbody>
-      </table>
-    </section>
-"""
-
-
-def render_comparison_row(label: str, left: dict[str, Any], right: dict[str, Any]) -> str:
-    left_score = left["score"]["avg"]
-    right_score = right["score"]["avg"]
-    left_duration = left["duration"]["avg"]
-    right_duration = right["duration"]["avg"]
-    left_tokens = left["tokens"]["avg"]
-    right_tokens = right["tokens"]["avg"]
-    left_cost = left["total_cost"]["avg"]
-    right_cost = right["total_cost"]["avg"]
-    return f"""
-        <tr>
-          <td><b>{escape(label)}</b></td>
-          <td class="num">{format_stat(left_score)} -> <span class="score">{format_stat(right_score)}</span></td>
-          <td class="num {delta_class(delta(left_score, right_score))}">{format_delta(delta(left_score, right_score))}</td>
-          <td class="num">{format_stat(left_duration)} -> {format_stat(right_duration)}</td>
-          <td class="num {delta_class(delta(left_duration, right_duration), lower_is_better=True)}">{format_delta(delta(left_duration, right_duration), suffix='s')}</td>
-          <td class="num">{format_int(left_tokens)} -> {format_int(right_tokens)}</td>
-          <td class="num {delta_class(delta(left_tokens, right_tokens), lower_is_better=True)}">{format_delta(delta(left_tokens, right_tokens), compact=True)}</td>
-          <td class="num">{format_money(left_cost)} -> {format_money(right_cost)}</td>
-          <td class="num {delta_class(delta(left_cost, right_cost), lower_is_better=True)}">{format_money_delta(delta(left_cost, right_cost))}</td>
-        </tr>
-"""
-
-
-def comparison_chart_png_base64(
-    baseline: str, candidate: str, compare_rows: list[tuple[str, dict[str, Any], dict[str, Any]]]
-) -> str:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.ticker import FuncFormatter
-
-    labels = [agent_id for agent_id, _left, _right in compare_rows]
-    x = list(range(len(labels)))
-    width = 0.36
-
-    fig, axes = plt.subplots(1, 4, figsize=(18, 5.2), dpi=180)
-    left_positions = [value - width / 2 for value in x]
-    right_positions = [value + width / 2 for value in x]
-    metrics = [
-        ("score", "Average Score", (0, 100), lambda value, _pos: f"{value:.0f}"),
-        ("duration", "Average Agent Duration (s)", None, lambda value, _pos: f"{value:.0f}"),
-        ("total_cost", "Average Agent Cost (USD)", None, lambda value, _pos: money_tick(value)),
-    ]
-
-    for axis, (field, title, ylim, formatter) in zip(axes[:3], metrics):
-        baseline_values = [left[field]["avg"] or 0 for _agent_id, left, _right in compare_rows]
-        candidate_values = [right[field]["avg"] or 0 for _agent_id, _left, right in compare_rows]
-        bars_left = axis.bar(left_positions, baseline_values, width, label=baseline, color="#64748b", alpha=0.86)
-        bars_right = axis.bar(right_positions, candidate_values, width, label=candidate, color="#2563eb", alpha=0.9)
-        axis.set_title(title, fontsize=11, fontweight="bold")
-        axis.set_xticks(x)
-        axis.set_xticklabels(labels, rotation=34, ha="right")
-        axis.grid(axis="y", alpha=0.22)
-        axis.spines[["top", "right"]].set_visible(False)
-        axis.tick_params(axis="both", labelsize=8)
-        axis.yaxis.set_major_formatter(FuncFormatter(formatter))
-        if ylim:
-            axis.set_ylim(*ylim)
-        else:
-            max_value = max(baseline_values + candidate_values) if baseline_values or candidate_values else 0
-            axis.set_ylim(0, max(max_value * 1.18, 1))
-        axis.bar_label(bars_left, labels=[formatter(value, None) for value in baseline_values], padding=3, fontsize=7)
-        axis.bar_label(bars_right, labels=[formatter(value, None) for value in candidate_values], padding=3, fontsize=7)
-
-    axes[0].legend(frameon=False, fontsize=8)
-    draw_grouped_stacked_tokens(
-        axes[3],
-        labels,
-        compare_rows,
-        baseline,
-        candidate,
-        left_positions,
-        right_positions,
-        width,
-    )
-    fig.suptitle("Original vs Skills: average columns by agent", fontsize=13, fontweight="bold", y=0.99)
-    fig.tight_layout(rect=(0, 0.02, 1, 0.94))
-    buffer = BytesIO()
-    fig.savefig(buffer, format="png", bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
-
-
-def draw_grouped_stacked_tokens(
-    axis: Any,
-    labels: list[str],
-    compare_rows: list[tuple[str, dict[str, Any], dict[str, Any]]],
-    baseline: str,
-    candidate: str,
-    left_positions: list[float],
-    right_positions: list[float],
-    width: float,
-) -> None:
-    import matplotlib.pyplot as plt
-    from matplotlib.ticker import FuncFormatter
-
-    colors = {
-        "input": "#64748b",
-        "output": "#2563eb",
-        "cache": "#f59e0b",
-    }
-    stacks = [
-        ("input", "Input", "input_tokens"),
-        ("output", "Output", "output_tokens"),
-        ("cache", "Cache", "cache_tokens"),
-    ]
-    max_total = 0.0
-    for positions, side, alpha in [(left_positions, 1, 0.72), (right_positions, 2, 0.92)]:
-        bottoms = [0.0] * len(compare_rows)
-        for key, label, field in stacks:
-            values = []
-            for _agent_id, left, right in compare_rows:
-                aggregate = left if side == 1 else right
-                values.append(aggregate[field]["avg"] or 0)
-            axis.bar(
-                positions,
-                values,
-                width,
-                bottom=bottoms,
-                color=colors[key],
-                alpha=alpha,
-                label=f"{label} ({baseline if side == 1 else candidate})" if key == "input" else None,
-            )
-            bottoms = [bottom + value for bottom, value in zip(bottoms, values)]
-        max_total = max(max_total, max(bottoms) if bottoms else 0)
-    axis.set_title("Average Agent Tokens", fontsize=11, fontweight="bold")
-    axis.set_xticks(list(range(len(labels))))
-    axis.set_xticklabels(labels, rotation=34, ha="right")
-    axis.grid(axis="y", alpha=0.22)
-    axis.spines[["top", "right"]].set_visible(False)
-    axis.tick_params(axis="both", labelsize=8)
-    axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: compact_number(value)))
-    axis.set_ylim(0, max(max_total * 1.18, 1))
-    legend_handles = [
-        plt.Rectangle((0, 0), 1, 1, color=colors["input"], alpha=0.88),
-        plt.Rectangle((0, 0), 1, 1, color=colors["output"], alpha=0.88),
-        plt.Rectangle((0, 0), 1, 1, color=colors["cache"], alpha=0.88),
-    ]
-    axis.legend(legend_handles, ["Input", "Output", "Cache"], frameon=False, fontsize=7, loc="upper right")
-
-
 def chart_png_base64(aggregates: list[dict[str, Any]]) -> str:
     chart_rows = [row for row in aggregates if row["score"]["avg"] is not None]
     if not chart_rows:
@@ -890,8 +671,12 @@ def chart_png_base64(aggregates: list[dict[str, Any]]) -> str:
 
     for axis, (field, title, color, xlim, formatter) in zip([axes[0], axes[1], axes[3]], metrics):
         avg_values = [row[field]["avg"] or 0 for row in chart_rows]
-        min_values = [row[field]["min"] if row[field]["min"] is not None else row[field]["avg"] or 0 for row in chart_rows]
-        max_values = [row[field]["max"] if row[field]["max"] is not None else row[field]["avg"] or 0 for row in chart_rows]
+        min_values = [
+            row[field]["min"] if row[field]["min"] is not None else row[field]["avg"] or 0 for row in chart_rows
+        ]
+        max_values = [
+            row[field]["max"] if row[field]["max"] is not None else row[field]["avg"] or 0 for row in chart_rows
+        ]
         yerr = [
             [max(avg - min_value, 0) for avg, min_value in zip(avg_values, min_values)],
             [max(max_value - avg, 0) for avg, max_value in zip(avg_values, max_values)],
@@ -923,8 +708,6 @@ def chart_png_base64(aggregates: list[dict[str, Any]]) -> str:
 def draw_stacked_tokens(axis: Any, labels: list[str], rows: list[dict[str, Any]], x: list[int]) -> None:
     from matplotlib.ticker import FuncFormatter
 
-    from matplotlib.ticker import FuncFormatter
-
     colors = {
         "input_tokens": "#64748b",
         "output_tokens": "#2563eb",
@@ -937,11 +720,34 @@ def draw_stacked_tokens(axis: Any, labels: list[str], rows: list[dict[str, Any]]
     ]
     bottoms = [0.0] * len(rows)
     max_total = 0.0
+    top_bar_container = None
     for field, label in stacks:
         values = [row[field]["avg"] or 0 for row in rows]
-        axis.bar(x, values, bottom=bottoms, color=colors[field], alpha=0.88, width=0.68, label=label)
+        top_bar_container = axis.bar(
+            x,
+            values,
+            bottom=bottoms,
+            color=colors[field],
+            alpha=0.88,
+            width=0.68,
+            label=label,
+        )
         bottoms = [bottom + value for bottom, value in zip(bottoms, values)]
         max_total = max(max_total, max(bottoms) if bottoms else 0)
+    totals = [total_token_stat(row, "avg") for row in rows]
+    yerr = total_token_yerr(rows)
+    axis.errorbar(
+        x,
+        totals,
+        yerr=yerr,
+        fmt="none",
+        ecolor="#111827",
+        elinewidth=1,
+        capsize=3,
+        capthick=1,
+        alpha=0.72,
+    )
+    max_total = max(max_total, max((total_token_stat(row, "max") for row in rows), default=0))
     axis.set_title("Agent Tokens", fontsize=11, fontweight="bold")
     axis.set_xticks(x)
     axis.set_xticklabels(labels, rotation=34, ha="right")
@@ -950,14 +756,33 @@ def draw_stacked_tokens(axis: Any, labels: list[str], rows: list[dict[str, Any]]
     axis.tick_params(axis="both", labelsize=8)
     axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _pos: compact_number(value)))
     axis.set_ylim(0, max(max_total * 1.18, 1))
-    if len(labels) <= 8:
+    if len(labels) <= 8 and top_bar_container is not None:
         axis.bar_label(
-            axis.containers[-1],
+            top_bar_container,
             labels=[compact_number(value) if value else "" for value in bottoms],
             padding=3,
             fontsize=7,
         )
     axis.legend(frameon=False, fontsize=7, loc="upper right")
+
+
+def total_token_stat(row: dict[str, Any], key: str) -> float:
+    total = 0.0
+    for field in ["input_tokens", "output_tokens", "cache_tokens"]:
+        value = row[field].get(key)
+        if value is not None:
+            total += float(value)
+    return total
+
+
+def total_token_yerr(rows: list[dict[str, Any]]) -> list[list[float]]:
+    avg_values = [total_token_stat(row, "avg") for row in rows]
+    min_values = [total_token_stat(row, "min") for row in rows]
+    max_values = [total_token_stat(row, "max") for row in rows]
+    return [
+        [max(avg - min_value, 0) for avg, min_value in zip(avg_values, min_values)],
+        [max(max_value - avg, 0) for avg, max_value in zip(avg_values, max_values)],
+    ]
 
 
 def render_aggregate_table(aggregates: list[dict[str, Any]]) -> str:
@@ -1093,28 +918,6 @@ def format_triplet(values: dict[str, float | None], integer: bool = False, money
     return " / ".join(format_stat(item) for item in items)
 
 
-def delta(left: float | None, right: float | None) -> float | None:
-    if left is None or right is None:
-        return None
-    return right - left
-
-
-def delta_class(value: float | None, lower_is_better: bool = False) -> str:
-    if value is None or value == 0:
-        return ""
-    good = value < 0 if lower_is_better else value > 0
-    return "delta-good" if good else "delta-bad"
-
-
-def format_delta(value: float | None, suffix: str = "", compact: bool = False) -> str:
-    if value is None:
-        return ""
-    sign = "+" if value > 0 else ""
-    if compact:
-        return f"{sign}{compact_number(value)}"
-    return f"{sign}{format_stat(value)}{suffix}"
-
-
 def format_money(value: float | None) -> str:
     if value is None:
         return ""
@@ -1123,13 +926,6 @@ def format_money(value: float | None) -> str:
     if abs(value) < 0.01:
         return f"{prefix}${value:.4f}"
     return f"{prefix}${value:.2f}"
-
-
-def format_money_delta(value: float | None) -> str:
-    if value is None:
-        return ""
-    sign = "+" if value > 0 else ""
-    return f"{sign}{format_money(value)}"
 
 
 def money_tick(value: float) -> str:

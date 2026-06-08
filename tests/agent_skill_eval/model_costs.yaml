@@ -1,0 +1,39 @@
+schema_version: agent-skill-model-costs/v1
+currency: USD
+unit: per_1m_tokens
+prefer_reported_cost: true
+source:
+  title: Public model pricing references
+  note: >
+    Fallback estimates only. The harness prefers agent CLI-reported cost when
+    available. These rates are limited to the public pricing pages for the
+    configured agents and grader/analyzer models.
+
+models:
+  gpt-5.5:
+    source: https://developers.openai.com/api/docs/models/gpt-5.5
+    aliases:
+      - codex-5.5-xhigh
+      - codex-5.5-low
+      - grader
+      - analysis
+      - GPT-5.5
+    rates:
+      input_tokens: 5.00
+      output_tokens: 30.00
+      cached_input_tokens: 0.50
+      cache_creation_input_tokens: null
+      cache_read_input_tokens: null
+
+  claude-opus-4-8:
+    source: https://platform.claude.com/docs/en/about-claude/pricing
+    aliases:
+      - claude-opus-4.8-xhigh
+      - claude-opus-4-8
+      - Opus 4.8
+    rates:
+      input_tokens: 5.00
+      output_tokens: 25.00
+      cached_input_tokens: 0.50
+      cache_creation_input_tokens: 6.25
+      cache_read_input_tokens: 0.50

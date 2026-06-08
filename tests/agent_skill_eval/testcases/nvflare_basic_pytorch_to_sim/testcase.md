@@ -21,7 +21,7 @@ Environment:
 - Docker image: `nvflare-agent-eval:basic`.
 - Version comparison runs may override this with `nvflare-agent-eval:2.8` or
   `nvflare-agent-eval:2.9-skills`.
-- Agent timeout: 20 minutes.
+- Agent timeout: 15 minutes.
 - Python 3.12 with `torch` installed.
 - NVFlare availability and version are determined by the selected Docker image.
   If NVFlare is already installed, use that installed package instead of
