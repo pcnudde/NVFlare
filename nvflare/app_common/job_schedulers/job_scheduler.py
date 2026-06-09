@@ -100,12 +100,27 @@ class DefaultJobScheduler(JobSchedulerSpec, FLComponent):
         self.log_debug(fl_ctx, f"cancel client resources using check results: {resource_check_results}")
         return False, None
 
-    def _try_job(self, job: Job, fl_ctx: FLContext) -> (int, Optional[Dict[str, DispatchInfo]], str):
+    def _try_job(
+        self, job: Job, fl_ctx: FLContext, enrolled_sites_by_study: Dict[str, Optional[set]]
+    ) -> (int, Optional[Dict[str, DispatchInfo]], str):
         engine = fl_ctx.get_engine()
         online_clients = engine.get_clients()
         online_site_names = [x.name for x in online_clients]
         job_study = get_job_meta_study(job.meta)
-        enrolled_sites = study_store.get_sites(job_study)
+        # Study sites are fetched at most once per study per scheduling pass (no cross-pass
+        # caching, to avoid acting on stale study membership).
+        if job_study not in enrolled_sites_by_study:
+            enrolled_sites_by_study[job_study] = study_store.get_sites(job_study)
+        enrolled_sites = enrolled_sites_by_study[job_study]
+        if enrolled_sites is not None and not enrolled_sites and not study_store.has_study(job_study):
+            # Fail closed, but with a distinct error: the job references a study that no longer
+            # exists (e.g. removed after submit), not a generic lack of resources.
+            self.log_error(
+                fl_ctx,
+                f"Job {job.job_id} references study '{job_study}' which does not exist in the study store; "
+                f"it cannot be scheduled.",
+            )
+            return SCHEDULE_RESULT_NO_RESOURCE, None, f"study '{job_study}' not found"
         if enrolled_sites is not None:
             online_site_names = [site_name for site_name in online_site_names if site_name in enrolled_sites]
 
@@ -326,6 +341,9 @@ class DefaultJobScheduler(JobSchedulerSpec, FLComponent):
         # sort by submitted time
         job_candidates.sort(key=lambda j: j.meta.get(JobMetaKey.SUBMIT_TIME.value, 0.0))
         engine = fl_ctx.get_engine()
+        # Per-pass memo of {study: enrolled sites}: candidates often share studies, so each
+        # distinct study is fetched from the store at most once per scheduling pass.
+        enrolled_sites_by_study: Dict[str, Optional[set]] = {}
         for job in job_candidates:
             schedule_count = job.meta.get(JobMetaKey.SCHEDULE_COUNT.value, 0)
             if schedule_count >= self.max_schedule_count:
@@ -345,7 +363,7 @@ class DefaultJobScheduler(JobSchedulerSpec, FLComponent):
                 continue
 
             with engine.new_context() as ctx:
-                rc, sites_dispatch_info, result = self._try_job(job, ctx)
+                rc, sites_dispatch_info, result = self._try_job(job, ctx, enrolled_sites_by_study)
                 self.log_debug(ctx, f"Try to schedule job {job.job_id}, get result: {rc}, {sites_dispatch_info}.")
                 if not result:
                     result = "scheduled"

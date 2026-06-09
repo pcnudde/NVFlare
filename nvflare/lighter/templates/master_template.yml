@@ -56,12 +56,20 @@ readme_fs: |
   stop_fl.sh
   signature.json
 
-  Before the first start after installing or upgrading this server package, run:
-  nvflare-state-store-migrate --server-root <path-to-this-server-package>
+  On a fresh installation the server initializes its StateStore database automatically at startup; just run start.sh.
+  Relative SQLite db_url paths in the state_store component resolve against this server workspace directory.
 
-  This imports legacy job metadata, study_registry.json, and disabled_clients.json into the StateStore database and
-  records the migration marker required by server startup. After the migration succeeds, run start.sh to start the
-  server.
+  A freshly provisioned package whose project.yml defines studies includes local/study_registry.json; the server
+  imports those studies automatically at first startup, so it also just runs start.sh.
+
+  Only when upgrading a server workspace that contains legacy runtime state (existing jobs or
+  disabled_clients.json), run the following before the first start to import that state into the StateStore
+  database, then run start.sh:
+  nvflare-state-store-migrate --server-root <server-runtime-workspace>
+  The --server-root must be the RUNTIME workspace the server actually uses, which is not always this package
+  directory: if NVFL_WORKSPACE is set, sub_start.sh runs the server in $NVFL_WORKSPACE (vault-mode deployments
+  that mount this package under /user_config run in /vault/workspace), so pass that directory as --server-root.
+  Only when neither applies does the server run in this package directory itself.
 
   The rootCA.pem file is pointed by "ssl_root_cert" in fed_server.json.  If you plan to move/copy it to a different place,
   you will need to modify fed_server.json.  The same applies to the other two files, server.crt and server.key.
@@ -402,7 +410,7 @@ local_server_resources: |
               "id": "state_store",
               "path": "nvflare.app_common.state_store.sql_store.SqlStateStore",
               "args": {
-                  "db_url": "sqlite:////tmp/nvflare/state-store.db"
+                  "db_url": "sqlite:///state-store.db"
               }
           },
           {

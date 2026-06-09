@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 class StateStore(ABC):
@@ -46,6 +46,22 @@ class StateStore(ABC):
         pass
 
     @abstractmethod
+    def delete_study_if_no_jobs(self, name: str) -> dict:
+        """Atomically delete the study iff no jobs reference it.
+
+        The implementation MUST perform the job count and the delete in one atomic unit
+        (e.g. a single database transaction with the study row locked), so a concurrent
+        job submission cannot interleave between the count and the delete. Member records
+        (admins, orgs, sites) are removed together with the study, as in delete_study.
+
+        Returns:
+            {"deleted": True} if the study was deleted;
+            {"deleted": False, "not_found": True} if the study does not exist;
+            {"deleted": False, "job_count": n} if n jobs still reference the study.
+        """
+        pass
+
+    @abstractmethod
     def add_study_sites(self, name: str, site_orgs: Dict[str, List[str]]) -> dict:
         pass
 
@@ -74,15 +90,11 @@ class StateStore(ABC):
         pass
 
     @abstractmethod
-    def list_jobs(self, status: str = None, study: str = None) -> List[dict]:
+    def list_jobs(self, status: Union[str, List[str]] = None, study: str = None) -> List[dict]:
         pass
 
     @abstractmethod
     def update_job_meta(self, job_id: str, meta: dict) -> dict:
-        pass
-
-    @abstractmethod
-    def set_job_status(self, job_id: str, status: str) -> dict:
         pass
 
     @abstractmethod
@@ -111,12 +123,4 @@ class StateStore(ABC):
 
     @abstractmethod
     def enable_client(self, client_name: str) -> bool:
-        pass
-
-    @abstractmethod
-    def list_disabled_clients(self) -> List[dict]:
-        pass
-
-    @abstractmethod
-    def get_migration_marker(self, name: str) -> Optional[dict]:
         pass

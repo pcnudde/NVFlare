@@ -31,6 +31,31 @@ app.kubernetes.io/name: {{ include "nvflare-server.name" . }}
 {{- end }}
 {{- end }}
 
+{{/*
+Workspace volume mounts shared by the main server container and the
+state-store migration init container.
+*/}}
+{{- define "nvflare-server.workspaceVolumeMounts" -}}
+- name: {{ .Values.persistence.workspace.volumeName }}
+  mountPath: {{ .Values.persistence.workspace.mountPath }}
+{{- with .Values.workspaceConfig }}
+{{- with .local }}
+{{- if .configMapName }}
+- name: workspace-local
+  mountPath: {{ $.Values.persistence.workspace.mountPath }}/local
+  readOnly: true
+{{- end }}
+{{- end }}
+{{- with .startup }}
+{{- if .secretName }}
+- name: workspace-startup
+  mountPath: {{ $.Values.persistence.workspace.mountPath }}/startup
+  readOnly: true
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
 {{- define "nvflare-server.tcpConfigMapEnabled" -}}
 {{- if hasKey .Values "tcpConfigMapEnabled" }}
 {{- .Values.tcpConfigMapEnabled | toString }}

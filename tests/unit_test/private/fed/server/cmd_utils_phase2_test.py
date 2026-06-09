@@ -228,3 +228,20 @@ def test_validate_command_targets_silently_narrows_all_targets_to_study(monkeypa
     assert conn.get_prop(CommandUtil.TARGET_CLIENT_NAMES) == ["site-a"]
     assert conn.get_prop(CommandUtil.TARGET_CLIENT_TOKENS) == ["token-a"]
     assert conn.get_prop(CommandUtil.TARGET_CLIENTS) == {"token-a": "site-a"}
+
+
+def test_study_requires_authz_is_plain_boolean(monkeypatch):
+    _install_registry(monkeypatch, {"cancer-research": {"site-a"}})
+    util = CommandUtil()
+
+    active = _FakeConnection(props={ConnProps.ACTIVE_STUDY: "cancer-research"})
+    assert util._study_requires_authz(active) is True
+
+    default = _FakeConnection(props={ConnProps.ACTIVE_STUDY: DEFAULT_STUDY})
+    assert util._study_requires_authz(default) is False
+
+    deleted = _FakeConnection(props={ConnProps.ACTIVE_STUDY: "deleted-study"})
+    assert util._study_requires_authz(deleted) is False
+
+    missing = _FakeConnection(props={})
+    assert util._study_requires_authz(missing) is False

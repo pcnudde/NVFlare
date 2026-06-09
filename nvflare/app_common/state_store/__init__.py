@@ -12,6 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nvflare.app_common.state_store.sql_store import SqlStateStore, migrate_database, sqlite_url, validate_database
+from nvflare.app_common.state_store.legacy_migration import (
+    bootstrap_fresh_state_store,
+    classify_legacy_state,
+    has_legacy_state,
+)
+from nvflare.app_common.state_store.sql_store import (
+    SqlStateStore,
+    default_state_store_db_url,
+    migrate_database,
+    resolve_relative_db_url,
+    sqlite_url,
+    validate_database,
+)
 
-__all__ = ["SqlStateStore", "migrate_database", "sqlite_url", "validate_database"]
+__all__ = [
+    "SqlStateStore",
+    "bootstrap_fresh_state_store",
+    "classify_legacy_state",
+    "default_state_store_db_url",
+    "has_legacy_state",
+    "migrate_database",
+    "resolve_relative_db_url",
+    "sqlite_url",
+    "validate_database",
+]

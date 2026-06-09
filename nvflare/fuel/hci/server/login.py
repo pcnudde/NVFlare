@@ -123,11 +123,13 @@ class LoginModule(CommandModule, CommandFilter):
                 self.logger.warning(f"rejecting login for user '{user_name}': no study registry for study '{study}'")
                 _reject(f"study '{study}' is not configured on the server", code="AUTH_STUDY_NOT_CONFIGURED")
                 return
-            if not study_store.has_study(study):
+            # One get_study answers both "does the study exist" and "is the user mapped to it".
+            study_def = study_store.get_study(study)
+            if study_def is None:
                 self.logger.warning(f"rejecting login for user '{user_name}': unknown study '{study}'")
                 _reject(f"unknown study '{study}'", code="AUTH_UNKNOWN_STUDY")
                 return
-            if not study_store.has_user(user_name, study):
+            if user_name not in set(study_def.get("admins", [])):
                 self.logger.warning(f"rejecting login for user '{user_name}': no mapping for study '{study}'")
                 _reject(
                     f"user '{user_name}' is not mapped to study '{study}'",

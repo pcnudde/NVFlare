@@ -35,6 +35,12 @@ class _FakeStudyStore:
     def list_studies(self):
         return [{"name": name, "config_json": study_def} for name, study_def in self.studies.items()]
 
+    def delete_study_if_no_jobs(self, name):
+        if name not in self.studies:
+            return {"deleted": False, "not_found": True}
+        self.studies.pop(name)
+        return {"deleted": True}
+
 
 def setup_function():
     study_store.reset()
@@ -85,6 +91,39 @@ def test_list_studies_returns_normalized_rows():
 def test_study_row_requires_name():
     with pytest.raises(ValueError, match="missing name"):
         study_store.study_from_row({"config_json": {"site_orgs": {}, "admins": []}})
+
+
+def test_sites_from_study_def_flattens_all_orgs():
+    study_def = {"site_orgs": {"org_a": ["site-a", "site-b"], "org_b": ["site-c"], "org_c": []}, "admins": []}
+
+    assert study_store.sites_from_study_def(study_def) == {"site-a", "site-b", "site-c"}
+    assert study_store.sites_from_study_def({}) == set()
+    assert study_store.sites_from_study_def(None) == set()
+
+
+def test_zero_site_org_study_exists_with_empty_sites():
+    # An org enrolled with zero sites keeps the study alive: has_study is True and
+    # get_sites returns an empty set (fail closed), not "study missing".
+    store = _FakeStudyStore({"cancer-research": {"site_orgs": {"org_a": []}, "admins": ["admin@nvidia.com"]}})
+    study_store.configure(store)
+
+    assert study_store.has_study("cancer-research") is True
+    assert study_store.get_sites("cancer-research") == set()
+    assert study_store.get_study("cancer-research")["site_orgs"] == {"org_a": []}
+
+
+def test_delete_study_if_no_jobs_delegates_to_state_store():
+    store = _FakeStudyStore({"cancer-research": {"site_orgs": {}, "admins": []}})
+    study_store.configure(store)
+
+    assert study_store.delete_study_if_no_jobs("cancer-research") == {"deleted": True}
+    assert study_store.has_study("cancer-research") is False
+    assert study_store.delete_study_if_no_jobs("cancer-research") == {"deleted": False, "not_found": True}
+
+
+def test_delete_study_if_no_jobs_requires_state_store():
+    with pytest.raises(AssertionError):
+        study_store.delete_study_if_no_jobs("cancer-research")
 
 
 def test_reset_clears_state_store():

@@ -14,42 +14,31 @@
 
 import json
 import os
+import sys
 from pathlib import Path, PurePath
-from typing import Optional
+from typing import List, Optional
 
-from sqlalchemy import insert, select, update
-from sqlalchemy.exc import IntegrityError
-
-import nvflare
 from nvflare.apis import study_store
 from nvflare.apis.job_def import JobMetaKey
-from nvflare.apis.state_store import StateStore
 from nvflare.apis.storage import StorageException, StorageSpec
 from nvflare.app_common.state_store.legacy_study_registry import LegacyStudyRegistry
-from nvflare.app_common.state_store.sql_store import (
-    SqlStateStore,
-    _job_columns_from_meta,
-    _json_safe,
-    _now,
-    _study_member_values,
-    _submit_record_values,
-    disabled_clients,
-    jobs,
-    state_store_migrations,
-    studies,
-    study_admins,
-    study_sites,
-    submit_records,
-)
+from nvflare.app_common.state_store.sql_store import SqlStateStore, migrate_database
 
 LEGACY_MIGRATION_MARKER = "legacy_filesystem_migration_v1"
 LEGACY_SOURCE_FORMAT = "legacy-filesystem"
+FRESH_INSTALL_SOURCE_FORMAT = "fresh-install"
 _SUBMIT_RECORD_URI_ROOT = "job_submit_records"
 _SUBMIT_RECORD_JOB_INDEX_URI_ROOT = "job_submit_record_index"
 _SUBMIT_RECORD_URIS_KEY = "submit_record_uris"
 
 
-def validate_state_store_migrated(state_store: StateStore, marker_name: str = LEGACY_MIGRATION_MARKER) -> dict:
+class MigrationSkipError(RuntimeError):
+    """Raised in --strict mode for conditions that are otherwise skip-with-warning."""
+
+    pass
+
+
+def validate_state_store_migrated(state_store: SqlStateStore, marker_name: str = LEGACY_MIGRATION_MARKER) -> dict:
     state_store.initialize()
     marker = state_store.get_migration_marker(marker_name)
     if marker is None:
@@ -60,39 +49,117 @@ def validate_state_store_migrated(state_store: StateStore, marker_name: str = LE
     return marker
 
 
+def classify_legacy_state(server_root: str, jobs_dir: Optional[str]) -> dict:
+    """Classify legacy filesystem state under a server workspace root.
+
+    Args:
+        server_root: server workspace root containing local/ and startup/.
+        jobs_dir: the FULLY RESOLVED legacy jobs directory (computed by the caller from the
+            job store's root_dir + uri_root, exactly as the migrate CLI resolves it). Pass
+            None when it cannot be determined; that is treated as "no legacy jobs".
+
+    Returns:
+        {
+            "jobs": bool,                          # jobs_dir exists and is non-empty
+            "study_registry": Optional[str],       # path to local/study_registry.json, or None
+            "disabled_clients": bool,              # disabled_clients.json exists under the root
+        }
+    """
+    root = Path(server_root).expanduser()
+    registry = root / "local" / "study_registry.json"
+    jobs_path = Path(jobs_dir).expanduser() if jobs_dir else None
+    return {
+        "jobs": bool(jobs_path and jobs_path.is_dir() and any(jobs_path.iterdir())),
+        "study_registry": str(registry) if registry.exists() else None,
+        "disabled_clients": (root / "disabled_clients.json").exists(),
+    }
+
+
+def has_legacy_state(server_root: str, jobs_dir_name: str = "jobs") -> bool:
+    """Detect legacy filesystem state under a server workspace root.
+
+    Used by deployers to decide between bootstrap_fresh_state_store (fresh install) and the
+    full nvflare-state-store-migrate flow (legacy upgrade).
+
+    jobs_dir_name is resolved against server_root (an absolute jobs_dir_name is used as is).
+    Callers that know the job store's actual location should prefer classify_legacy_state
+    with the fully resolved jobs directory.
+    """
+    jobs_dir = str(Path(server_root).expanduser() / jobs_dir_name)
+    state = classify_legacy_state(server_root, jobs_dir)
+    return bool(state["jobs"] or state["study_registry"] or state["disabled_clients"])
+
+
+def bootstrap_fresh_state_store(store: SqlStateStore, marker_name: str = LEGACY_MIGRATION_MARKER) -> dict:
+    """Prepare a state store for a fresh install (no legacy data to import).
+
+    Applies the schema if absent and writes a fresh-install migration marker (the same
+    marker validate_state_store_migrated checks), so server startup can proceed without
+    running nvflare-state-store-migrate.
+
+    Refuses to stamp a populated database: if state rows already exist without a marker
+    (renamed marker, partial restore, shared database), declaring it "fresh" would be a
+    silent lie, so a RuntimeError is raised instead.
+    """
+    try:
+        store.initialize()
+    except RuntimeError:
+        migrate_database(store.db_url)
+        store.initialize()
+    marker = store.get_migration_marker(marker_name)
+    if marker:
+        return {"bootstrapped": False, "marker": marker}
+    summary = {"status": "complete", "source_format": FRESH_INSTALL_SOURCE_FORMAT}
+    with store._begin_write() as conn:
+        inserted = store._insert_migration_marker(conn, marker_name, FRESH_INSTALL_SOURCE_FORMAT, summary)
+        if inserted:
+            # Same transaction as the marker insert: the check and the stamp are atomic.
+            existing = store._state_tables_with_rows(conn)
+            if existing:
+                raise RuntimeError(
+                    f"refusing to bootstrap a fresh state store: migration marker '{marker_name}' is "
+                    "missing but state data already exists in tables: " + ", ".join(existing) + ". "
+                    "If this database was migrated before, restore its marker; otherwise investigate "
+                    "where the data came from before stamping it as a fresh install."
+                )
+    return {"bootstrapped": inserted, "marker": store.get_migration_marker(marker_name)}
+
+
 def migrate_legacy_state_store(
-    state_store: StateStore,
+    state_store: SqlStateStore,
     job_storage: Optional[StorageSpec] = None,
     jobs_uri_root: str = "jobs",
     study_registry_path: str = None,
     disabled_clients_path: str = None,
     marker_name: str = LEGACY_MIGRATION_MARKER,
+    strict: bool = False,
+    warnings: Optional[List[str]] = None,
 ) -> dict:
-    """Import legacy filesystem state exactly once and write the migration marker."""
+    """Import legacy filesystem state exactly once and write the migration marker.
+
+    Per-item problems (dangling submit-record index entries, unreadable or status-less job
+    metas, invalid study definitions) are skipped with a warning recorded in the marker
+    summary, unless strict=True which turns them into errors that abort the migration.
+    """
     state_store.initialize()
     marker = state_store.get_migration_marker(marker_name)
     if marker:
         return {"migrated": False, "marker": marker}
 
-    if not isinstance(state_store, SqlStateStore):
-        raise TypeError(f"legacy migration requires SqlStateStore but got {type(state_store)}")
+    notes = _WarningLog(strict=strict, warnings=list(warnings or []))
 
-    try:
-        with state_store.engine.begin() as conn:
-            if conn.execute(select(state_store_migrations).where(state_store_migrations.c.name == marker_name)).first():
-                return {"migrated": False, "marker": state_store.get_migration_marker(marker_name)}
-
-            now = _now()
-            conn.execute(
-                insert(state_store_migrations).values(
-                    name=marker_name,
-                    source_format=LEGACY_SOURCE_FORMAT,
-                    applied_at=now,
-                    nvflare_version=getattr(nvflare, "__version__", None),
-                    summary_json={"status": "in_progress"},
-                )
-            )
-            _ensure_no_existing_state_data(conn)
+    # NOTE: everything inside this transaction must go through the open `conn` (the
+    # state_store._xxx(conn, ...) helpers). Calling a public state_store method here would
+    # open a SECOND connection, which on SQLite blocks against our own write lock.
+    # The transaction (and thus the SQLite write lock) is held for the whole import,
+    # including storage I/O — acceptable for this offline CLI, which runs before the server.
+    existing_marker = None
+    with state_store._begin_write() as conn:
+        if not state_store._insert_migration_marker(conn, marker_name, LEGACY_SOURCE_FORMAT, {"status": "in_progress"}):
+            # A concurrent migration already wrote the marker: converge gracefully.
+            existing_marker = state_store._read_migration_marker(conn, marker_name)
+        else:
+            _ensure_no_existing_state_data(state_store, conn)
 
             summary = {
                 "source_format": LEGACY_SOURCE_FORMAT,
@@ -100,22 +167,16 @@ def migrate_legacy_state_store(
                 "disabled_clients_path": _path_or_none(disabled_clients_path),
                 "jobs_uri_root": jobs_uri_root,
             }
-            summary.update(_import_studies(conn, study_registry_path))
-            summary.update(_import_jobs(conn, job_storage, jobs_uri_root))
-            summary.update(_import_disabled_clients(conn, disabled_clients_path))
+            summary.update(_import_studies(state_store, conn, study_registry_path, notes))
+            summary.update(_import_jobs(state_store, conn, job_storage, jobs_uri_root, notes))
+            summary.update(_import_disabled_clients(state_store, conn, disabled_clients_path))
+            summary["warnings"] = notes.warnings
             summary["status"] = "complete"
 
-            conn.execute(
-                update(state_store_migrations)
-                .where(state_store_migrations.c.name == marker_name)
-                .values(summary_json=_json_safe(summary))
-            )
-    except IntegrityError:
-        marker = state_store.get_migration_marker(marker_name)
-        if marker:
-            return {"migrated": False, "marker": marker}
-        raise
+            state_store._update_migration_marker_summary(conn, marker_name, summary)
 
+    if existing_marker is not None:
+        return {"migrated": False, "marker": existing_marker}
     return {"migrated": True, "marker": state_store.get_migration_marker(marker_name)}
 
 
@@ -124,13 +185,7 @@ def load_legacy_study_registry(path: str) -> dict:
         config = json.load(f)
 
     registry = LegacyStudyRegistry(config)
-    normalized_studies = {}
-    for study_name, study_def in registry.get_studies().items():
-        normalized_studies[study_name] = {
-            "admins": study_def.get("admins", []),
-            "site_orgs": study_def.get("site_orgs", {}),
-        }
-    return {"format_version": LegacyStudyRegistry.FORMAT_VERSION, "studies": normalized_studies}
+    return {"format_version": LegacyStudyRegistry.FORMAT_VERSION, "studies": registry.get_studies()}
 
 
 def load_legacy_disabled_clients(path: str) -> list:
@@ -146,105 +201,73 @@ def load_legacy_disabled_clients(path: str) -> list:
     return sorted({str(client_name) for client_name in disabled if client_name})
 
 
+class _WarningLog:
+    def __init__(self, strict: bool, warnings: List[str]):
+        self.strict = strict
+        self.warnings = warnings
+
+    def note(self, message: str):
+        if self.strict:
+            raise MigrationSkipError(message)
+        print(f"WARNING: {message}", file=sys.stderr)
+        self.warnings.append(message)
+
+
 def _path_or_none(path: str):
     return str(Path(path).expanduser()) if path else None
 
 
-def _has_rows(conn, table) -> bool:
-    return conn.execute(select(table).limit(1)).first() is not None
-
-
-def _ensure_no_existing_state_data(conn):
-    existing = []
-    for table, name in (
-        (studies, "studies"),
-        (jobs, "jobs"),
-        (submit_records, "submit_records"),
-        (disabled_clients, "disabled_clients"),
-    ):
-        if _has_rows(conn, table):
-            existing.append(name)
+def _ensure_no_existing_state_data(state_store: SqlStateStore, conn):
+    existing = state_store._state_tables_with_rows(conn)
     if existing:
         raise RuntimeError(
             "state store migration marker is missing but state data already exists: " + ", ".join(existing)
         )
 
 
-def _upsert_study_in_conn(conn, name: str, config: dict):
-    row = conn.execute(select(studies.c.name).where(studies.c.name == name)).first()
-    if not row:
-        conn.execute(insert(studies).values(name=name))
-    conn.execute(study_admins.delete().where(study_admins.c.study_name == name))
-    conn.execute(study_sites.delete().where(study_sites.c.study_name == name))
-    admin_values, site_values = _study_member_values(name, config)
-    if admin_values:
-        conn.execute(insert(study_admins), admin_values)
-    if site_values:
-        conn.execute(insert(study_sites), site_values)
-
-
-def _import_studies(conn, study_registry_path: str) -> dict:
+def _import_studies(state_store: SqlStateStore, conn, study_registry_path: str, notes: _WarningLog) -> dict:
     if not study_registry_path or not os.path.exists(study_registry_path):
         return {"imported_studies": []}
 
     config = load_legacy_study_registry(study_registry_path)
     imported = []
     for study_name, study_def in (config.get("studies") or {}).items():
-        _upsert_study_in_conn(conn, study_name, study_store.normalize_study(study_name, study_def))
+        try:
+            normalized = study_store.normalize_study(study_name, study_def)
+        except ValueError as e:
+            notes.note(f"skipping legacy study '{study_name}': {e}")
+            continue
+        state_store._upsert_study(conn, study_name, normalized)
         imported.append(study_name)
     return {"imported_studies": sorted(imported)}
 
 
-def _insert_job_in_conn(conn, uri: str, meta: dict):
-    values = _job_columns_from_meta(meta)
-    job_id = values.get("job_id")
-    if not job_id:
-        raise ValueError(f"legacy job metadata at {uri} is missing job_id")
-    if not values.get("status"):
-        raise ValueError(f"legacy job metadata at {uri} is missing status")
-
-    now = _now()
-    values.update(
-        {
-            "content_uri": uri,
-            "content_hash": None,
-            "content_size": None,
-            "meta_json": _json_safe(meta),
-            "version": 1,
-            "created_at": now,
-            "updated_at": now,
-        }
-    )
-    conn.execute(insert(jobs).values(**values))
-
-
-def _insert_submit_record_in_conn(conn, record: dict):
-    values = _submit_record_values(record)
-    if not values.get("job_id"):
-        raise ValueError("legacy submit record is missing job_id")
-
-    now = _now()
-    values.update({"version": 1, "created_at": now, "updated_at": now})
-    conn.execute(insert(submit_records).values(**values))
-
-
-def _import_jobs(conn, job_storage: Optional[StorageSpec], jobs_uri_root: str) -> dict:
+def _import_jobs(
+    state_store: SqlStateStore, conn, job_storage: Optional[StorageSpec], jobs_uri_root: str, notes: _WarningLog
+) -> dict:
     if not job_storage:
         return {"imported_jobs": [], "imported_submit_records": 0}
 
     imported_jobs = []
-    job_uris, jobs_root_missing = _list_legacy_job_objects(job_storage, jobs_uri_root)
+    job_uris, jobs_root_missing = _list_legacy_objects(job_storage, jobs_uri_root, optional=False)
     for uri in job_uris:
-        meta = dict(job_storage.get_meta(uri) or {})
+        try:
+            meta = dict(job_storage.get_meta(uri) or {})
+        except StorageException as e:
+            notes.note(f"skipping legacy job at '{uri}': failed to read meta: {e}")
+            continue
         job_id = meta.get(JobMetaKey.JOB_ID.value) or PurePath(uri).name
         meta[JobMetaKey.JOB_ID.value] = job_id
-        _insert_job_in_conn(conn, uri, meta)
+        if not meta.get(JobMetaKey.STATUS.value):
+            notes.note(f"skipping legacy job at '{uri}': metadata is missing status")
+            continue
+        state_store._create_job(conn, meta, content_uri=uri)
         imported_jobs.append(job_id)
 
     imported_submit_records = 0
-    for record in _legacy_submit_records(job_storage, jobs_uri_root):
-        _insert_submit_record_in_conn(conn, record)
-        imported_submit_records += 1
+    for record in _legacy_submit_records(job_storage, jobs_uri_root, notes):
+        if state_store._create_submit_record(conn, record):
+            imported_submit_records += 1
 
     return {
         "imported_jobs": sorted(imported_jobs),
@@ -253,41 +276,25 @@ def _import_jobs(conn, job_storage: Optional[StorageSpec], jobs_uri_root: str) -
     }
 
 
-def _import_disabled_clients(conn, disabled_clients_path: str) -> dict:
+def _import_disabled_clients(state_store: SqlStateStore, conn, disabled_clients_path: str) -> dict:
     if not disabled_clients_path or not os.path.exists(disabled_clients_path):
         return {"imported_disabled_clients": []}
 
-    now = _now()
     imported_clients = load_legacy_disabled_clients(disabled_clients_path)
     for client_name in imported_clients:
-        conn.execute(
-            insert(disabled_clients).values(
-                client_name=client_name,
-                disabled_by=None,
-                disabled_at=now,
-                reason="migrated from disabled_clients.json",
-                version=1,
-            )
-        )
+        state_store._disable_client(conn, client_name, reason="migrated from disabled_clients.json")
     return {"imported_disabled_clients": imported_clients}
 
 
-def _list_legacy_job_objects(storage: StorageSpec, uri_root: str):
+def _list_legacy_objects(storage: StorageSpec, uri_root: str, optional: bool = True):
+    """List object URIs under uri_root; returns (objects, root_missing)."""
     try:
         return storage.list_objects(uri_root), False
     except StorageException as e:
         if _is_missing_filesystem_uri(storage, uri_root):
             return [], True
-        raise RuntimeError(f"failed to list legacy jobs under '{uri_root}': {e}") from e
-
-
-def _list_optional_objects(storage: StorageSpec, uri_root: str):
-    try:
-        return storage.list_objects(uri_root)
-    except StorageException as e:
-        if _is_missing_filesystem_uri(storage, uri_root):
-            return []
-        raise RuntimeError(f"failed to list legacy objects under '{uri_root}': {e}") from e
+        kind = "objects" if optional else "jobs"
+        raise RuntimeError(f"failed to list legacy {kind} under '{uri_root}': {e}") from e
 
 
 def _is_missing_filesystem_uri(storage: StorageSpec, uri: str) -> bool:
@@ -301,15 +308,59 @@ def _is_missing_filesystem_uri(storage: StorageSpec, uri: str) -> bool:
     return not os.path.exists(path)
 
 
-def _legacy_submit_records(storage: StorageSpec, jobs_uri_root: str):
+def _scan_submit_record_uris(storage: StorageSpec, records_root: str) -> Optional[List[str]]:
+    """Recursively scan the records root for object URIs (FilesystemStorage layouts only).
+
+    Returns None when the storage does not expose a filesystem layout, in which case the
+    caller falls back to index-based enumeration only.
+    """
+    object_path = getattr(storage, "_object_path", None)
+    if not callable(object_path):
+        return None
+    try:
+        root_path = object_path(records_root)
+    except StorageException:
+        return None
+    if not os.path.isdir(root_path):
+        return []
+    uris = []
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        if "meta" in filenames and "data" in filenames:
+            rel = os.path.relpath(dirpath, root_path)
+            uris.append(records_root if rel == os.curdir else os.path.join(records_root, rel))
+            dirnames[:] = []  # an object dir has no nested objects
+    return sorted(uris)
+
+
+def _legacy_submit_records(storage: StorageSpec, jobs_uri_root: str, notes: _WarningLog):
     record_uris = []
+
+    # Primary enumeration: scan the records root directly so records whose index write was
+    # lost are still migrated.
+    records_root = _sidecar_root(jobs_uri_root, _SUBMIT_RECORD_URI_ROOT)
+    scanned = _scan_submit_record_uris(storage, records_root)
+    if scanned:
+        record_uris.extend(scanned)
+
+    # Union with the index sidecars (covers non-filesystem layouts the scan cannot see).
     index_root = _sidecar_root(jobs_uri_root, _SUBMIT_RECORD_JOB_INDEX_URI_ROOT)
-    for index_uri in _list_optional_objects(storage, index_root):
-        index_meta = storage.get_meta(index_uri) or {}
+    index_uris, _missing = _list_legacy_objects(storage, index_root)
+    for index_uri in index_uris:
+        try:
+            index_meta = storage.get_meta(index_uri) or {}
+        except StorageException as e:
+            notes.note(f"skipping legacy submit-record index '{index_uri}': failed to read meta: {e}")
+            continue
         record_uris.extend(index_meta.get(_SUBMIT_RECORD_URIS_KEY, []))
 
     for record_uri in dict.fromkeys(record_uris):
-        yield storage.get_meta(record_uri)
+        try:
+            record = storage.get_meta(record_uri)
+        except StorageException as e:
+            notes.note(f"skipping legacy submit record '{record_uri}': failed to read meta: {e}")
+            continue
+        if record:
+            yield record
 
 
 def _sidecar_root(jobs_uri_root: str, sidecar_name: str):

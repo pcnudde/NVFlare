@@ -18,8 +18,7 @@ import shutil
 import tempfile
 
 from nvflare.apis.fl_constant import SiteType, SystemComponents
-from nvflare.app_common.state_store.legacy_migration import migrate_legacy_state_store
-from nvflare.app_common.state_store.sql_store import SqlStateStore, migrate_database
+from nvflare.app_common.state_store import SqlStateStore
 from nvflare.fuel.f3.cellnet.cell import Cell
 from nvflare.fuel.f3.mpm import MainProcessMonitor as mpm
 from nvflare.fuel.utils.dict_utils import augment
@@ -57,7 +56,7 @@ class SimulatorDeployer(ServerDeployer):
             heart_beat_timeout=heart_beat_timeout,
         )
         services.deploy(args, grpc_args=simulator_server)
-        self._initialize_state_store(services)
+        self._initialize_state_store(services, os.path.join(args.workspace, SiteType.SERVER))
 
         admin_server = create_admin_server(
             services,
@@ -77,11 +76,10 @@ class SimulatorDeployer(ServerDeployer):
         if SystemComponents.STATE_STORE in self.components:
             return
 
+        # The simulator workspace is wiped before deployment, so the inherited
+        # _initialize_state_store bootstraps the schema and fresh-install marker.
         db_path = os.path.join(args.workspace, SiteType.SERVER, "state-store.db")
-        store = SqlStateStore.sqlite(db_path)
-        migrate_database(store.db_url)
-        migrate_legacy_state_store(store)
-        self.components[SystemComponents.STATE_STORE] = store
+        self.components[SystemComponents.STATE_STORE] = SqlStateStore.sqlite(db_path)
 
     def create_fl_client(self, client_name, args):
         client_config, build_ctx = self._create_simulator_client_config(client_name, args)

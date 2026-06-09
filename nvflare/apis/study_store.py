@@ -122,6 +122,11 @@ def delete_study(study: str):
     return _require_state_store().delete_study(study)
 
 
+def delete_study_if_no_jobs(study: str) -> dict:
+    """Atomically delete the study iff no jobs reference it (see StateStore.delete_study_if_no_jobs)."""
+    return _require_state_store().delete_study_if_no_jobs(study)
+
+
 def add_sites(study: str, site_orgs: dict):
     return study_from_row(
         _require_state_store().add_study_sites(study, normalize_study(study, {"site_orgs": site_orgs})["site_orgs"])
@@ -142,16 +147,21 @@ def remove_user(study: str, user: str):
     return study_from_row(_require_state_store().remove_study_admin(study, user))
 
 
+def sites_from_study_def(study_def: dict) -> set:
+    """Returns the flat set of sites enrolled in the study, across all orgs."""
+    sites = set()
+    for org_sites in (study_def or {}).get("site_orgs", {}).values():
+        sites.update(org_sites)
+    return sites
+
+
 def get_sites(study: str):
     if study == DEFAULT_STUDY:
         return None
     study_def = get_study(study)
     if study_def is None:
         return set()
-    sites = set()
-    for org_sites in study_def.get("site_orgs", {}).values():
-        sites.update(org_sites)
-    return sites
+    return sites_from_study_def(study_def)
 
 
 def has_study(study: str) -> bool:

@@ -20,8 +20,14 @@ from pathlib import Path
 
 from nvflare.apis.fl_constant import SiteType, SystemComponents
 from nvflare.apis.workspace import Workspace
-from nvflare.app_common.state_store.legacy_migration import migrate_legacy_state_store
-from nvflare.app_common.state_store.sql_store import SqlStateStore, migrate_database, resolve_db_url
+from nvflare.app_common.state_store.legacy_migration import MigrationSkipError, migrate_legacy_state_store
+from nvflare.app_common.state_store.sql_store import (
+    SqlStateStore,
+    default_state_store_db_url,
+    migrate_database,
+    resolve_db_url,
+    resolve_relative_db_url,
+)
 from nvflare.app_common.storages.filesystem_storage import FilesystemStorage
 
 
@@ -30,6 +36,11 @@ def _build_parser():
     parser.add_argument("--server-root", required=True, help="server workspace root containing local/ and startup/")
     parser.add_argument("--db-url", help="optional SQLAlchemy database URL override")
     parser.add_argument("--schema-revision", default="head", help="Alembic revision to migrate to before import")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="fail the migration on conditions that are otherwise skipped with a warning",
+    )
     return parser
 
 
@@ -65,10 +76,15 @@ def _resolve_path(path: str, server_root: Path):
     return str(path)
 
 
-def _filesystem_job_storage(resources: dict, server_root: Path):
+def _filesystem_job_storage(resources: dict, server_root: Path, strict: bool):
+    """Build the legacy FilesystemStorage job store, or skip job import with a warning.
+
+    Returns (job_storage, jobs_uri_root, warnings). A non-FilesystemStorage job store cannot
+    be imported from the filesystem; job import is skipped (prominently) unless --strict.
+    """
     job_manager = _component(resources, SystemComponents.JOB_MANAGER)
     if not job_manager:
-        return None, "jobs"
+        return None, "jobs", []
 
     job_manager_args = job_manager.get("args") or {}
     jobs_uri_root = os.environ.get("NVFL_JOB_STORE_ROOT") or job_manager_args.get("uri_root", "jobs")
@@ -79,7 +95,14 @@ def _filesystem_job_storage(resources: dict, server_root: Path):
 
     path = job_store.get("path", "")
     if path and not path.endswith(".FilesystemStorage"):
-        raise RuntimeError(f"job store component '{job_store_id}' must use FilesystemStorage for legacy migration")
+        message = (
+            f"job store component '{job_store_id}' uses '{path}', not FilesystemStorage; "
+            "legacy job import is SKIPPED — existing jobs and submit records will NOT be migrated"
+        )
+        if strict:
+            raise MigrationSkipError(message)
+        print(f"WARNING: {message}", file=sys.stderr)
+        return None, jobs_uri_root, [message]
 
     job_store_args = job_store.get("args") or {}
     root_dir = job_store_args.get("root_dir")
@@ -91,6 +114,7 @@ def _filesystem_job_storage(resources: dict, server_root: Path):
             uri_root=job_store_args.get("uri_root", "/"),
         ),
         jobs_uri_root,
+        [],
     )
 
 
@@ -107,9 +131,23 @@ def main(argv=None):
         resources = _load_resources(workspace)
         db_url = args.db_url or _state_store_db_url(resources)
         if not db_url:
-            raise RuntimeError("state_store component in resources.json must define args.db_url or args.db_url_env")
+            # Mirror the server deployer: a workspace without a state_store component falls
+            # back to the default SQLite DB under the server root, so legacy workspaces
+            # provisioned before the state store existed can still be migrated.
+            db_url = default_state_store_db_url(args.server_root)
+            print(
+                "NOTICE: no state_store component (or --db-url) configured; "
+                f"defaulting to '{db_url}'. Add a state_store component to local/resources.json "
+                "to control the state store database location.",
+                file=sys.stderr,
+            )
+        # Relative SQLite paths must resolve against the server root, not the CLI's CWD,
+        # so the server (which chdirs into the workspace) opens the same file.
+        db_url = resolve_relative_db_url(db_url, args.server_root)
 
-        job_storage, jobs_uri_root = _filesystem_job_storage(resources, Path(args.server_root).expanduser())
+        job_storage, jobs_uri_root, warnings = _filesystem_job_storage(
+            resources, Path(args.server_root).expanduser(), args.strict
+        )
         migrate_database(db_url, args.schema_revision)
         result = migrate_legacy_state_store(
             state_store=SqlStateStore(db_url),
@@ -117,6 +155,8 @@ def main(argv=None):
             jobs_uri_root=jobs_uri_root,
             study_registry_path=_existing_path(workspace.get_file_path_in_site_config("study_registry.json")),
             disabled_clients_path=_existing_path(workspace.get_file_path_in_root("disabled_clients.json")),
+            strict=args.strict,
+            warnings=warnings,
         )
     except Exception as e:
         print(f"state store migration failed: {e}", file=sys.stderr)

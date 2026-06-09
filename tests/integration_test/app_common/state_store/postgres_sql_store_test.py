@@ -29,6 +29,8 @@ from nvflare.app_common.state_store.legacy_migration import (
 from nvflare.app_common.state_store.sql_store import SqlStateStore, metadata, migrate_database
 from nvflare.app_common.state_store.state_store_migration import main as migration_main
 from nvflare.app_common.storages.filesystem_storage import FilesystemStorage
+from tests.unit_test.app_common.state_store.state_store_helpers import job_meta as _shared_job_meta
+from tests.unit_test.app_common.state_store.state_store_helpers import submit_record as _shared_submit_record
 
 POSTGRES_DB_URL = os.environ.get("NVFLARE_TEST_STATE_STORE_DB_URL")
 
@@ -71,35 +73,11 @@ def store(postgres_db_url):
 
 
 def _job_meta(job_id: str):
-    return {
-        JobMetaKey.JOB_ID.value: job_id,
-        JobMetaKey.STUDY.value: "study-a",
-        JobMetaKey.STATUS.value: RunStatus.SUBMITTED.value,
-        JobMetaKey.JOB_NAME.value: "hello",
-        JobMetaKey.JOB_FOLDER_NAME.value: "hello_job",
-        JobMetaKey.SUBMITTER_NAME.value: "admin@nvidia.com",
-        JobMetaKey.SUBMITTER_ORG.value: "nvidia",
-        JobMetaKey.SUBMITTER_ROLE.value: "project_admin",
-        JobMetaKey.SUBMIT_TIME.value: 1.0,
-        JobMetaKey.SUBMIT_TIME_ISO.value: "2026-06-08T00:00:00+00:00",
-    }
+    return _shared_job_meta(job_id, study="study-a")
 
 
 def _submit_record(job_id: str, token: str = "token-1"):
-    return {
-        SubmitRecordKey.SCHEMA_VERSION.value: 1,
-        SubmitRecordKey.STATE.value: SubmitRecordState.CREATING.value,
-        SubmitRecordKey.SUBMIT_TOKEN.value: token,
-        SubmitRecordKey.JOB_ID.value: job_id,
-        SubmitRecordKey.STUDY.value: "study-a",
-        SubmitRecordKey.SUBMITTER_NAME.value: "admin@nvidia.com",
-        SubmitRecordKey.SUBMITTER_ORG.value: "nvidia",
-        SubmitRecordKey.SUBMITTER_ROLE.value: "project_admin",
-        SubmitRecordKey.JOB_NAME.value: "hello",
-        SubmitRecordKey.JOB_FOLDER_NAME.value: "hello_job",
-        SubmitRecordKey.JOB_CONTENT_HASH.value: "sha256:abc",
-        SubmitRecordKey.SUBMIT_TIME.value: "2026-06-08T00:00:00+00:00",
-    }
+    return _shared_submit_record(job_id, token=token, study="study-a")
 
 
 def _write_legacy_server_root(server_root, db_url_env: str):

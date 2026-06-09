@@ -18,8 +18,6 @@ from unittest.mock import MagicMock, patch
 
 from nvflare.apis import study_store
 from nvflare.apis.client import Client, ClientPropKey
-from nvflare.apis.job_def import JobMetaKey
-from nvflare.apis.job_def_manager_spec import JobDefManagerSpec
 from nvflare.fuel.hci.server.authz import PreAuthzReturnCode
 from nvflare.fuel.hci.server.constants import ConnProps
 from nvflare.private.fed.server.study_cmds import StudyCommandModule
@@ -93,7 +91,9 @@ class _FakeStateStore:
         if config is None:
             config = _EMPTY_REGISTRY
         self.studies = deepcopy(config.get("studies", {}))
+        self.jobs_by_study = {}  # study name => job count, consulted by delete_study_if_no_jobs
         self.write_count = 0
+        self.calls = []
 
     def initialize(self):
         pass
@@ -108,17 +108,31 @@ class _FakeStateStore:
         return {"name": name, "config_json": deepcopy(study_def)}
 
     def upsert_study(self, name: str, config: dict):
+        self.calls.append("upsert_study")
         self.studies[name] = deepcopy(config)
         self.write_count += 1
         return {"name": name, "config_json": deepcopy(config), "version": self.write_count}
 
     def delete_study(self, name: str):
+        self.calls.append("delete_study")
         existed = name in self.studies
         self.studies.pop(name, None)
         self.write_count += 1
         return existed
 
+    def delete_study_if_no_jobs(self, name: str):
+        self.calls.append("delete_study_if_no_jobs")
+        if name not in self.studies:
+            return {"deleted": False, "not_found": True}
+        job_count = self.jobs_by_study.get(name, 0)
+        if job_count:
+            return {"deleted": False, "job_count": job_count}
+        self.studies.pop(name)
+        self.write_count += 1
+        return {"deleted": True}
+
     def add_study_sites(self, name: str, site_orgs: dict):
+        self.calls.append("add_study_sites")
         study = self.studies.setdefault(name, {"site_orgs": {}, "admins": []})
         existing = {site for org_sites in study.get("site_orgs", {}).values() for site in org_sites}
         for org, sites in site_orgs.items():
@@ -131,6 +145,7 @@ class _FakeStateStore:
         return self.get_study(name)
 
     def remove_study_sites(self, name: str, site_orgs: dict):
+        self.calls.append("remove_study_sites")
         study = self.studies.get(name)
         if not study:
             return None
@@ -143,6 +158,7 @@ class _FakeStateStore:
         return self.get_study(name)
 
     def add_study_admin(self, name: str, user: str):
+        self.calls.append("add_study_admin")
         study = self.studies.setdefault(name, {"site_orgs": {}, "admins": []})
         if user not in study.setdefault("admins", []):
             study["admins"].append(user)
@@ -150,6 +166,7 @@ class _FakeStateStore:
         return self.get_study(name)
 
     def remove_study_admin(self, name: str, user: str):
+        self.calls.append("remove_study_admin")
         study = self.studies.get(name)
         if not study:
             return None
@@ -602,41 +619,32 @@ class TestRemoveStudy:
     def _module(self):
         return StudyCommandModule()
 
-    def _engine_no_jobs(self):
-        engine = MagicMock()
-        engine.job_def_manager = MagicMock(spec=JobDefManagerSpec)
-        engine.job_def_manager.get_all_jobs.return_value = []
-        engine.new_context.return_value.__enter__ = MagicMock(return_value=MagicMock())
-        engine.new_context.return_value.__exit__ = MagicMock(return_value=False)
-        return engine
-
-    def _engine_with_jobs(self, study_name):
-        engine = self._engine_no_jobs()
-        job = MagicMock()
-        job.meta = {JobMetaKey.STUDY.value: study_name}
-        engine.job_def_manager.get_all_jobs.return_value = [job]
-        return engine
+    def _engine(self):
+        return MagicMock()
 
     def test_project_admin_removes_existing_study(self):
-        engine = self._engine_no_jobs()
-        conn = _FakeConnection(role="project_admin", org="project", engine=engine)
-        with _mutation_ctx(_REGISTRY_WITH_STUDY):
+        conn = _FakeConnection(role="project_admin", org="project", engine=self._engine())
+        with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
             self._module().cmd_remove_study(conn, ["remove_study", "study1"])
+            assert "study1" not in store.studies
+            # the check-and-delete is a single store call, not a separate count + delete
+            assert store.calls == ["delete_study_if_no_jobs"]
         assert conn.last_reply.get("removed") is True
 
     def test_remove_nonexistent_study_returns_not_found(self):
-        engine = self._engine_no_jobs()
-        conn = _FakeConnection(role="project_admin", org="project", engine=engine)
+        conn = _FakeConnection(role="project_admin", org="project", engine=self._engine())
         with _mutation_ctx(_EMPTY_REGISTRY):
             self._module().cmd_remove_study(conn, ["remove_study", "ghost"])
         assert conn.last_reply["error_code"] == "STUDY_NOT_FOUND"
 
     def test_remove_study_with_associated_jobs_returns_study_has_jobs(self):
-        engine = self._engine_with_jobs("study1")
-        conn = _FakeConnection(role="project_admin", org="project", engine=engine)
-        with _mutation_ctx(_REGISTRY_WITH_STUDY):
+        conn = _FakeConnection(role="project_admin", org="project", engine=self._engine())
+        with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
+            store.jobs_by_study["study1"] = 2
             self._module().cmd_remove_study(conn, ["remove_study", "study1"])
+            assert "study1" in store.studies
         assert conn.last_reply["error_code"] == "STUDY_HAS_JOBS"
+        assert "2 associated job(s)" in conn.last_reply["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -949,3 +957,136 @@ class TestAtomicityGuarantee:
             self._module().cmd_add_study_site(conn, ["add_study_site", "ghost", "--sites", "site-new"])
         assert conn.last_reply["error_code"] == "STUDY_NOT_FOUND"
         assert store.write_count == 0
+
+
+# ---------------------------------------------------------------------------
+# Section 12: register-study merge uses incremental store calls (A4)
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterStudyIncrementalMerge:
+    def _module(self):
+        return StudyCommandModule()
+
+    def test_register_existing_study_does_not_rewrite_full_snapshot(self):
+        # The existing-study branch must use incremental add calls; a full upsert of a
+        # stale snapshot would clobber concurrently added admins/sites.
+        engine = _make_engine({"site-new": "org_a"})
+        conn = _FakeConnection(role="org_admin", org="org_a", engine=engine, user="other-admin@example.com")
+        with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
+            self._module().cmd_register_study(conn, ["register_study", "study1", "--sites", "site-new"])
+        assert "error_code" not in conn.last_reply
+        assert "upsert_study" not in store.calls
+        assert store.calls == ["add_study_sites", "add_study_admin"]
+        assert "site-new" in store.studies["study1"]["site_orgs"]["org_a"]
+        assert "other-admin@example.com" in store.studies["study1"]["admins"]
+
+    def test_register_existing_study_skips_admin_write_when_caller_already_admin(self):
+        engine = _make_engine({"site-new": "org_a"})
+        conn = _FakeConnection(role="org_admin", org="org_a", engine=engine, user="admin@example.com")
+        with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
+            self._module().cmd_register_study(conn, ["register_study", "study1", "--sites", "site-new"])
+        assert "error_code" not in conn.last_reply
+        assert store.calls == ["add_study_sites"]
+        assert store.studies["study1"]["admins"] == ["admin@example.com"]
+
+    def test_register_new_study_uses_single_upsert(self):
+        engine = _make_engine({"site-a": "org_a"})
+        conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+        with _mutation_ctx(_EMPTY_REGISTRY) as store:
+            self._module().cmd_register_study(conn, ["register_study", "study1", "--sites", "site-a"])
+        assert "error_code" not in conn.last_reply
+        assert store.calls == ["upsert_study"]
+        assert store.studies["study1"]["admins"] == ["admin@example.com"]
+
+    def test_add_site_reports_added_and_already_enrolled_without_extra_writes(self):
+        engine = _make_engine({"site-existing": "org_a", "site-new": "org_a"})
+        conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+        with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
+            self._module().cmd_add_study_site(conn, ["add_study_site", "study1", "--sites", "site-existing,site-new"])
+        assert "error_code" not in conn.last_reply
+        assert conn.last_reply["added"] == ["site-new"]
+        assert conn.last_reply["already_enrolled"] == ["site-existing"]
+        assert store.calls == ["add_study_sites"]
+
+    def test_remove_site_reports_removed_and_not_enrolled(self):
+        engine = _make_engine({})
+        conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+        with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
+            self._module().cmd_remove_study_site(
+                conn, ["remove_study_site", "study1", "--sites", "site-existing,site-ghost"]
+            )
+        assert "error_code" not in conn.last_reply
+        assert conn.last_reply["removed"] == ["site-existing"]
+        assert conn.last_reply["not_enrolled"] == ["site-ghost"]
+        assert store.calls == ["remove_study_sites"]
+
+
+# ---------------------------------------------------------------------------
+# Section 13: org with zero sites stays enrolled — no org_admin lockout (A6)
+# ---------------------------------------------------------------------------
+
+
+class TestOrgZeroSitesNoLockout:
+    """Regression for the org_admin self-lockout: after an org_admin removes their org's
+    only site, the org stays enrolled (site_orgs keeps {"org": []}), so the study remains
+    visible and recoverable by that org's admin without project_admin help."""
+
+    def _module(self):
+        return StudyCommandModule()
+
+    def test_remove_last_site_keeps_org_enrolled_in_store(self):
+        engine = _make_engine({})
+        conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+        with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
+            self._module().cmd_remove_study_site(conn, ["remove_study_site", "study1", "--sites", "site-existing"])
+            assert "site-existing" in conn.last_reply.get("removed", [])
+            assert store.studies["study1"]["site_orgs"] == {"org_a": []}
+            # the zero-site org is still reported in the payload
+            assert conn.last_reply["site_orgs"] == {"org_a": []}
+
+    def test_show_study_still_visible_after_removing_last_site(self):
+        engine = _make_engine({})
+        module = self._module()
+        with _mutation_ctx(_REGISTRY_WITH_STUDY):
+            conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+            module.cmd_remove_study_site(conn, ["remove_study_site", "study1", "--sites", "site-existing"])
+            show_conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+            module.cmd_show_study(show_conn, ["show_study", "study1"])
+        assert show_conn.last_reply.get("name") == "study1"
+        assert "error_code" not in show_conn.last_reply
+
+    def test_add_site_works_after_removing_last_site(self):
+        engine = _make_engine({"site-new": "org_a"})
+        module = self._module()
+        with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
+            conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+            module.cmd_remove_study_site(conn, ["remove_study_site", "study1", "--sites", "site-existing"])
+            add_conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+            module.cmd_add_study_site(add_conn, ["add_study_site", "study1", "--sites", "site-new"])
+        assert "error_code" not in add_conn.last_reply
+        assert "site-new" in add_conn.last_reply.get("added", [])
+        assert store.studies["study1"]["site_orgs"]["org_a"] == ["site-new"]
+
+    def test_register_merges_for_enrolled_org_with_zero_sites(self):
+        # register on the existing study must take the merge path (the org is still
+        # enrolled), not return STUDY_ALREADY_EXISTS.
+        engine = _make_engine({"site-new": "org_a"})
+        module = self._module()
+        with _mutation_ctx(_REGISTRY_WITH_STUDY):
+            conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+            module.cmd_remove_study_site(conn, ["remove_study_site", "study1", "--sites", "site-existing"])
+            reg_conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+            module.cmd_register_study(reg_conn, ["register_study", "study1", "--sites", "site-new"])
+        assert "error_code" not in reg_conn.last_reply
+        assert "site-new" in reg_conn.last_reply.get("site_orgs", {}).get("org_a", [])
+
+    def test_register_by_unenrolled_org_still_reports_already_exists(self):
+        engine = _make_engine({"site-b": "org_b"})
+        module = self._module()
+        with _mutation_ctx(_REGISTRY_WITH_STUDY):
+            conn = _FakeConnection(role="org_admin", org="org_a", engine=engine)
+            module.cmd_remove_study_site(conn, ["remove_study_site", "study1", "--sites", "site-existing"])
+            other_conn = _FakeConnection(role="org_admin", org="org_b", engine=engine)
+            module.cmd_register_study(other_conn, ["register_study", "study1", "--sites", "site-b"])
+        assert other_conn.last_reply["error_code"] == "STUDY_ALREADY_EXISTS"

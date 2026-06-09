@@ -38,6 +38,11 @@ class RunStatus(str, Enum):
     ABANDONED = "FINISHED:ABANDONED"
 
 
+def run_status_value(status) -> str:
+    """Return the plain string value of a job status, accepting RunStatus or str."""
+    return getattr(status, "value", status)
+
+
 class JobDataKey(str, Enum):
     DATA = "data"
     META = "meta"

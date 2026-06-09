@@ -45,6 +45,14 @@ def upgrade():
     op.create_index("idx_study_admins_user", "study_admins", ["user_name"])
 
     op.create_table(
+        "study_orgs",
+        sa.Column("study_name", sa.String(length=255), nullable=False),
+        sa.Column("org", sa.String(length=255), nullable=False),
+        sa.ForeignKeyConstraint(["study_name"], ["studies.name"], ondelete="CASCADE"),
+        sa.PrimaryKeyConstraint("study_name", "org"),
+    )
+
+    op.create_table(
         "study_sites",
         sa.Column("study_name", sa.String(length=255), nullable=False),
         sa.Column("site_name", sa.String(length=255), nullable=False),
@@ -59,22 +67,9 @@ def upgrade():
         sa.Column("job_id", sa.String(length=64), nullable=False),
         sa.Column("study", sa.String(length=255), nullable=False),
         sa.Column("status", sa.String(length=64), nullable=False),
-        sa.Column("job_name", sa.String(length=255), nullable=True),
-        sa.Column("job_folder_name", sa.String(length=255), nullable=True),
-        sa.Column("submitter_name", sa.String(length=255), nullable=True),
-        sa.Column("submitter_org", sa.String(length=255), nullable=True),
-        sa.Column("submitter_role", sa.String(length=255), nullable=True),
         sa.Column("content_uri", sa.Text(), nullable=False),
         sa.Column("content_hash", sa.String(length=255), nullable=True),
         sa.Column("content_size", sa.BigInteger(), nullable=True),
-        sa.Column("result_uri", sa.Text(), nullable=True),
-        sa.Column("submit_time", sa.Float(), nullable=True),
-        sa.Column("submit_time_iso", sa.String(length=255), nullable=True),
-        sa.Column("start_time", sa.String(length=255), nullable=True),
-        sa.Column("duration", sa.String(length=255), nullable=True),
-        sa.Column("schedule_count", sa.Integer(), nullable=False),
-        sa.Column("last_schedule_time", sa.Float(), nullable=True),
-        sa.Column("schedule_history", sa.JSON(), nullable=True),
         sa.Column("meta_json", sa.JSON(), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -83,26 +78,14 @@ def upgrade():
     )
     op.create_index("idx_jobs_status", "jobs", ["status"])
     op.create_index("idx_jobs_study_status", "jobs", ["study", "status"])
-    op.create_index("idx_jobs_submitter", "jobs", ["submitter_name", "submitter_org", "submitter_role"])
 
     op.create_table(
         "submit_records",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("study", sa.String(length=255), nullable=False),
         sa.Column("study_hash", sa.String(length=64), nullable=False),
         sa.Column("submitter_hash", sa.String(length=64), nullable=False),
         sa.Column("submit_token_hash", sa.String(length=64), nullable=False),
-        sa.Column("submitter_name", sa.String(length=255), nullable=True),
-        sa.Column("submitter_org", sa.String(length=255), nullable=True),
-        sa.Column("submitter_role", sa.String(length=255), nullable=True),
         sa.Column("job_id", sa.String(length=64), nullable=False),
-        sa.Column("job_content_hash", sa.String(length=255), nullable=True),
-        sa.Column("job_name", sa.String(length=255), nullable=True),
-        sa.Column("job_folder_name", sa.String(length=255), nullable=True),
-        sa.Column("state", sa.String(length=64), nullable=False),
-        sa.Column("submit_time", sa.String(length=255), nullable=True),
-        sa.Column("deleted_time", sa.String(length=255), nullable=True),
-        sa.Column("deleted_by_json", sa.JSON(), nullable=True),
         sa.Column("record_json", sa.JSON(), nullable=False),
         sa.Column("version", sa.Integer(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
@@ -138,12 +121,12 @@ def downgrade():
     op.drop_table("disabled_clients")
     op.drop_index("idx_submit_records_job_id", table_name="submit_records")
     op.drop_table("submit_records")
-    op.drop_index("idx_jobs_submitter", table_name="jobs")
     op.drop_index("idx_jobs_study_status", table_name="jobs")
     op.drop_index("idx_jobs_status", table_name="jobs")
     op.drop_table("jobs")
     op.drop_index("idx_study_sites_org", table_name="study_sites")
     op.drop_table("study_sites")
+    op.drop_table("study_orgs")
     op.drop_index("idx_study_admins_user", table_name="study_admins")
     op.drop_table("study_admins")
     op.drop_table("studies")

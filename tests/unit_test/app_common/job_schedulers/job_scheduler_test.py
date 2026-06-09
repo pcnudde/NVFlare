@@ -167,10 +167,19 @@ class MockServerEngine(ServerEngineSpec):
 
 class _FakeStudyStore:
     sites = {}
+    get_sites_calls = []
 
     @staticmethod
     def get_sites(study):
-        return _FakeStudyStore.sites.get(study)
+        _FakeStudyStore.get_sites_calls.append(study)
+        if study == "default":
+            return None
+        # mirror the real store: unknown study -> empty set (fail closed)
+        return _FakeStudyStore.sites.get(study, set())
+
+    @staticmethod
+    def has_study(study):
+        return study in _FakeStudyStore.sites
 
 
 def create_servers(server_num, sites: list[Site]):
@@ -539,6 +548,85 @@ class TestDefaultJobScheduler:
 
         assert job == candidate
         assert set(dispatch_info) == {"server", "site0", "site2"}
+
+    def test_missing_study_logs_distinct_error_and_does_not_schedule(self, monkeypatch, setup_and_teardown):
+        servers, scheduler, num_sites, job_manager = setup_and_teardown
+        monkeypatch.setattr(job_scheduler_module, "study_store", _FakeStudyStore, raising=False)
+        monkeypatch.setattr(_FakeStudyStore, "sites", {}, raising=False)
+        monkeypatch.setattr(_FakeStudyStore, "get_sites_calls", [], raising=False)
+
+        candidate = create_job(
+            job_id="orphan_job",
+            resource_spec={},
+            deploy_map={"app5": [ALL_SITES]},
+            min_sites=1,
+        )
+        candidate.meta[JobMetaKey.STUDY.value] = "removed-study"
+
+        with servers[0].new_context() as fl_ctx:
+            job, dispatch_info = scheduler.schedule_job(
+                job_manager=job_manager, job_candidates=[candidate], fl_ctx=fl_ctx
+            )
+
+        assert job is None
+        assert dispatch_info is None
+        # fail closed, but with a distinct study-not-found reason instead of generic no-resources
+        history = candidate.meta[JobMetaKey.SCHEDULE_HISTORY.value]
+        assert any("study 'removed-study' not found" in entry for entry in history)
+
+    def test_zero_site_existing_study_is_generic_no_resources(self, monkeypatch, setup_and_teardown):
+        servers, scheduler, num_sites, job_manager = setup_and_teardown
+        monkeypatch.setattr(job_scheduler_module, "study_store", _FakeStudyStore, raising=False)
+        monkeypatch.setattr(_FakeStudyStore, "sites", {"cancer-research": set()}, raising=False)
+        monkeypatch.setattr(_FakeStudyStore, "get_sites_calls", [], raising=False)
+
+        candidate = create_job(
+            job_id="zero_site_job",
+            resource_spec={},
+            deploy_map={"app5": [ALL_SITES]},
+            min_sites=1,
+        )
+        candidate.meta[JobMetaKey.STUDY.value] = "cancer-research"
+
+        with servers[0].new_context() as fl_ctx:
+            job, _ = scheduler.schedule_job(job_manager=job_manager, job_candidates=[candidate], fl_ctx=fl_ctx)
+
+        assert job is None
+        history = candidate.meta[JobMetaKey.SCHEDULE_HISTORY.value]
+        assert not any("not found" in entry for entry in history)
+
+    def test_study_sites_fetched_once_per_pass_for_shared_study(self, monkeypatch):
+        sites = [Site(name=f"site{i}", resources=create_resource(1, 1)) for i in range(3)]
+        servers = create_servers(server_num=1, sites=sites)
+        scheduler = DefaultJobScheduler(max_jobs=10, min_schedule_interval=0)
+        job_manager = Mock(spec=JobDefManagerSpec)
+        monkeypatch.setattr(job_scheduler_module, "study_store", _FakeStudyStore, raising=False)
+        monkeypatch.setattr(_FakeStudyStore, "sites", {"cancer-research": {"site0", "site1"}}, raising=False)
+        monkeypatch.setattr(_FakeStudyStore, "get_sites_calls", [], raising=False)
+
+        candidates = []
+        for i in range(4):
+            # unschedulable: min_sites is larger than the enrolled-site count, so every
+            # candidate is tried (and fails) within a single scheduling pass
+            candidate = create_job(
+                job_id=f"job{i}",
+                resource_spec={},
+                deploy_map={"app": [ALL_SITES]},
+                min_sites=5,
+            )
+            candidate.meta[JobMetaKey.STUDY.value] = "cancer-research"
+            candidates.append(candidate)
+
+        with servers[0].new_context() as fl_ctx:
+            job, _ = scheduler.schedule_job(job_manager=job_manager, job_candidates=candidates, fl_ctx=fl_ctx)
+
+        assert job is None
+        assert _FakeStudyStore.get_sites_calls == ["cancer-research"]
+
+        # a new pass re-fetches (no cross-pass caching)
+        with servers[0].new_context() as fl_ctx:
+            scheduler.schedule_job(job_manager=job_manager, job_candidates=candidates, fl_ctx=fl_ctx)
+        assert _FakeStudyStore.get_sites_calls == ["cancer-research", "cancer-research"]
 
     def test_required_out_of_study_site_blocks_job(self, monkeypatch, setup_and_teardown):
         servers, scheduler, num_sites, job_manager = setup_and_teardown

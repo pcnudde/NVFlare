@@ -236,7 +236,8 @@ def _add_server_storage(resources_path, snapshot_persistor=None):
         {
             "id": "state_store",
             "path": "nvflare.app_common.state_store.sql_store.SqlStateStore",
-            "args": {"db_url": "sqlite:////tmp/nvflare/state-store.db"},
+            # workspace-relative provisioned default; relocation rewrites it to the workspace mount
+            "args": {"db_url": "sqlite:///state-store.db"},
         }
     )
     _write_json(resources_path, resources)

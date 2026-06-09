@@ -39,11 +39,10 @@ class CommandUtil(object):
     JOB_ID = "job_id"
     JOB = "job"
 
-    def _get_study_auth_context(self, conn: Connection):
+    def _study_requires_authz(self, conn: Connection) -> bool:
+        """Returns True if the session is bound to a real (non-default) study that still exists."""
         study = conn.get_prop(ConnProps.ACTIVE_STUDY, DEFAULT_STUDY)
-        if study and study != DEFAULT_STUDY and study_store.has_study(study):
-            return True, study
-        return None, None
+        return bool(study) and study != DEFAULT_STUDY and study_store.has_study(study)
 
     def _apply_study_role_for_authz(self, conn: Connection) -> bool:
         # Study membership is checked at session creation time. The certificate role remains
@@ -184,9 +183,8 @@ class CommandUtil(object):
         if target_type in [self.TARGET_TYPE_SERVER, self.TARGET_TYPE_ALL]:
             return PreAuthzReturnCode.REQUIRE_AUTHZ
 
-        registry, _ = self._get_study_auth_context(conn)
         if target_type == self.TARGET_TYPE_CLIENT:
-            if not registry:
+            if not self._study_requires_authz(conn):
                 return PreAuthzReturnCode.OK
             if not self._apply_study_role_for_authz(conn):
                 return PreAuthzReturnCode.ERROR

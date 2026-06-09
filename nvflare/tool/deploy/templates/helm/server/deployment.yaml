@@ -65,24 +65,7 @@ spec:
           image: {{ include "nvflare-server.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           volumeMounts:
-            - name: {{ .Values.persistence.workspace.volumeName }}
-              mountPath: {{ .Values.persistence.workspace.mountPath }}
-            {{- with .Values.workspaceConfig }}
-            {{- with .local }}
-            {{- if .configMapName }}
-            - name: workspace-local
-              mountPath: {{ $.Values.persistence.workspace.mountPath }}/local
-              readOnly: true
-            {{- end }}
-            {{- end }}
-            {{- with .startup }}
-            {{- if .secretName }}
-            - name: workspace-startup
-              mountPath: {{ $.Values.persistence.workspace.mountPath }}/startup
-              readOnly: true
-            {{- end }}
-            {{- end }}
-            {{- end }}
+            {{- include "nvflare-server.workspaceVolumeMounts" . | nindent 12 }}
           {{- with .Values.env }}
           env:
             {{- toYaml . | nindent 12 }}
@@ -101,24 +84,7 @@ spec:
           image: {{ include "nvflare-server.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           volumeMounts:
-            - name: {{ .Values.persistence.workspace.volumeName }}
-              mountPath: {{ .Values.persistence.workspace.mountPath }}
-            {{- with .Values.workspaceConfig }}
-            {{- with .local }}
-            {{- if .configMapName }}
-            - name: workspace-local
-              mountPath: {{ $.Values.persistence.workspace.mountPath }}/local
-              readOnly: true
-            {{- end }}
-            {{- end }}
-            {{- with .startup }}
-            {{- if .secretName }}
-            - name: workspace-startup
-              mountPath: {{ $.Values.persistence.workspace.mountPath }}/startup
-              readOnly: true
-            {{- end }}
-            {{- end }}
-            {{- end }}
+            {{- include "nvflare-server.workspaceVolumeMounts" . | nindent 12 }}
           {{- with .Values.env }}
           env:
             {{- toYaml . | nindent 12 }}

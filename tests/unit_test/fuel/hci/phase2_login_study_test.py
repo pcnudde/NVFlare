@@ -90,18 +90,19 @@ class _FakeCell:
 class _FakeStudyStore:
     studies = None
     users = {}
+    get_study_calls = 0
 
     @staticmethod
     def get_state_store():
         return object() if _FakeStudyStore.studies is not None else None
 
     @staticmethod
-    def has_study(study):
-        return _FakeStudyStore.studies is not None and study in _FakeStudyStore.studies
-
-    @staticmethod
-    def has_user(user_name, study):
-        return (user_name, study) in _FakeStudyStore.users
+    def get_study(study):
+        _FakeStudyStore.get_study_calls += 1
+        if _FakeStudyStore.studies is None or study not in _FakeStudyStore.studies:
+            return None
+        admins = [user for (user, mapped_study) in _FakeStudyStore.users if mapped_study == study]
+        return {"site_orgs": {}, "admins": admins}
 
 
 def _make_conn(study=None):
@@ -191,6 +192,7 @@ def test_handle_cert_login_accepts_mapped_user_for_valid_study(monkeypatch):
     monkeypatch.setattr("nvflare.fuel.hci.server.login.study_store", _FakeStudyStore, raising=False)
     _FakeStudyStore.studies = {"cancer-research": {"site-a"}}
     _FakeStudyStore.users = {("admin@nvidia.com", "cancer-research"): True}
+    _FakeStudyStore.get_study_calls = 0
 
     session_mgr = SessionManager(_FakeCell(), idle_timeout=3600, monitor_interval=3600)
     login = LoginModule(session_mgr)
@@ -205,6 +207,8 @@ def test_handle_cert_login_accepts_mapped_user_for_valid_study(monkeypatch):
         assert session.active_study == "cancer-research"
         assert session.user_name == "admin@nvidia.com"
         assert session.user_role == "project_admin"
+        # study existence and user mapping are both answered by a single study fetch
+        assert _FakeStudyStore.get_study_calls == 1
     finally:
         session_mgr.shutdown()
 

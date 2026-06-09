@@ -1581,6 +1581,12 @@ class JobCommandModule(CommandModule, CommandUtil, BinaryTransfer):
 
                 meta[JobMetaKey.STUDY.value] = _active_study_from_conn(conn)
                 requested_study = meta[JobMetaKey.STUDY.value]
+                # Re-validate the study at submit time: a stale session may still hold a study
+                # that was removed (remove_study) after the session was created.
+                if requested_study != DEFAULT_STUDY and not study_store.has_study(requested_study):
+                    error = f"study '{requested_study}' does not exist on the server"
+                    conn.append_error(error, meta=make_meta(MetaStatusValue.INVALID_JOB_DEFINITION, error))
+                    return
                 enrolled_sites = study_store.get_sites(requested_study)
                 if enrolled_sites is not None:
                     deploy_map = meta.get(JobMetaKey.DEPLOY_MAP.value, {})

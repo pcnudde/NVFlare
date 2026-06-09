@@ -16,7 +16,9 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 import time
+import weakref
 from typing import Any, Dict, List, Optional, Union
 
 from nvflare.apis.client_engine_spec import ClientEngineSpec
@@ -30,6 +32,7 @@ from nvflare.apis.job_def import (
     SubmitRecordState,
     job_from_meta,
     new_job_id,
+    run_status_value,
 )
 from nvflare.apis.job_def_manager_spec import JobDefManagerSpec, RunStatus
 from nvflare.apis.server_engine_spec import ServerEngineSpec
@@ -42,6 +45,14 @@ from nvflare.fuel.utils.zip_utils import unzip_all_from_bytes, zip_directory_to_
 
 
 class SimpleJobDefManager(JobDefManagerSpec):
+    # In-process per-job locks held across [state-store update + storage-meta
+    # mirror write] so the mirror is written in the same order as state-store
+    # commits within this process. WeakValueDictionary prunes entries once no
+    # caller holds the lock. Cross-process (HA) mirror ordering remains
+    # best-effort (see _write_meta_to_storage).
+    _job_meta_locks = weakref.WeakValueDictionary()
+    _job_meta_locks_guard = threading.Lock()
+
     def __init__(
         self,
         uri_root: str = "jobs",
@@ -101,15 +112,39 @@ class SimpleJobDefManager(JobDefManagerSpec):
         return job_from_meta(row.get("meta_json") or {})
 
     @staticmethod
-    def _status_value(status):
-        return getattr(status, "value", status)
-
-    @staticmethod
     def _update_state_job_meta(state_store: StateStore, jid: str, meta: dict):
         updated = state_store.update_job_meta(jid, meta)
         if updated is None:
             raise StorageException(f"job '{jid}' is missing from state store")
         return updated
+
+    @classmethod
+    def _get_job_meta_lock(cls, jid: str) -> threading.Lock:
+        with cls._job_meta_locks_guard:
+            lock = cls._job_meta_locks.get(jid)
+            if lock is None:
+                lock = threading.Lock()
+                cls._job_meta_locks[jid] = lock
+            return lock
+
+    def _write_meta_to_storage(self, jid: str, meta: dict, fl_ctx: FLContext):
+        """Mirror changed meta keys to the job-store object's meta.
+
+        The state store is authoritative; this write keeps the storage object
+        self-describing so re-migration after DB loss does not resurrect
+        finished jobs as SUBMITTED. Failures are logged but never fail the
+        operation.
+
+        In-process callers serialize [state-store update + this mirror write]
+        via _get_job_meta_lock so the mirror cannot end up holding a staler
+        status than the state store. Across processes (HA replicas) the mirror
+        ordering remains best-effort.
+        """
+        try:
+            store = self._get_job_store(fl_ctx)
+            store.update_meta(uri=self.job_uri(jid), meta=meta, replace=False)
+        except Exception as ex:
+            self.log_error(fl_ctx, f"failed to mirror meta of job '{jid}' to storage: {ex}")
 
     def get_job_content_hash(self, uploaded_content: Union[str, bytes]) -> str:
         return canonical_job_content_hash(uploaded_content)
@@ -183,13 +218,55 @@ class SimpleJobDefManager(JobDefManagerSpec):
         state_store = self._get_state_store(fl_ctx)
         store = self._get_job_store(fl_ctx)
         job_uri = self.job_uri(jid)
-        store.create_object(job_uri, uploaded_content, meta, overwrite_existing=False)
+        try:
+            store.create_object(job_uri, uploaded_content, meta, overwrite_existing=False)
+        except StorageException:
+            if state_store.get_job(jid):
+                # genuine duplicate: the job exists in the state store
+                raise
+            # The storage object exists but the state row does not: this is an
+            # orphan left by a crash between create_object and create_job in a
+            # prior attempt (the submit-token retry reuses the same job_id).
+            # Overwrite the orphan and proceed. Overwriting is safe even if the
+            # object actually belongs to a concurrent in-flight create for the
+            # same job_id: same-token retries carry identical content (same
+            # content hash), so the bytes we write are the bytes the winner
+            # expects. The destructive half of this race is the cleanup below,
+            # which therefore re-checks the state store before deleting.
+            self.log_info(fl_ctx, f"overwriting orphan storage object for job '{jid}' (no state row)")
+            store.create_object(job_uri, uploaded_content, meta, overwrite_existing=True)
         try:
             state_store.create_job(meta, content_uri=job_uri, content_size=self._content_size(uploaded_content))
         except Exception:
-            store.delete_object(job_uri)
+            self._cleanup_failed_create(state_store, store, jid, job_uri, fl_ctx)
             raise
         return meta
+
+    def _cleanup_failed_create(self, state_store, store, jid: str, job_uri: str, fl_ctx: FLContext):
+        """Clean up the storage object after create_job failed - but only if no state row exists.
+
+        Race: a concurrent create for the same job_id (submit-token retry on
+        another HA replica) may have committed its state row while we were
+        between create_object and create_job; our create_job then fails with a
+        duplicate-key error. In that case the winner owns the storage object
+        (its content is identical to ours - same submit token implies the same
+        content hash), so deleting it would leave a committed job with no
+        content. Only delete when no state row exists, i.e. the object is a
+        true orphan from our own failed attempt.
+        """
+        try:
+            row_exists = bool(state_store.get_job(jid))
+        except Exception as ex:
+            # unknown state: do not risk deleting a concurrent winner's content
+            self.log_error(fl_ctx, f"cannot verify state row for job '{jid}' during cleanup: {ex}")
+            return
+        if row_exists:
+            self.log_info(fl_ctx, f"keeping storage object for job '{jid}': a state row exists (concurrent create)")
+            return
+        try:
+            store.delete_object(job_uri)
+        except Exception as ex:
+            self.log_error(fl_ctx, f"failed to clean up storage object for job '{jid}': {ex}")
 
     def clone(self, from_jid: str, meta: dict, fl_ctx: FLContext) -> Dict[str, Any]:
         check_job_id(from_jid)
@@ -224,14 +301,33 @@ class SimpleJobDefManager(JobDefManagerSpec):
                 content_size=source_row.get("content_size"),
             )
         except Exception:
-            store.delete_object(job_uri)
+            # same race as in create(): only delete the cloned object if no
+            # state row exists for the new job_id (see _cleanup_failed_create)
+            self._cleanup_failed_create(state_store, store, jid, job_uri, fl_ctx)
             raise
         return meta
 
     def delete(self, jid: str, fl_ctx: FLContext):
         state_store = self._get_state_store(fl_ctx)
         store = self._get_job_store(fl_ctx)
-        store.delete_object(self.job_uri(jid))
+        job_uri = self.job_uri(jid)
+        try:
+            store.delete_object(job_uri)
+        except StorageException as ex:
+            # Distinguish two failure modes before touching the state row:
+            # - the object is already gone (previously half-completed delete):
+            #   proceed to delete the state row, otherwise the job becomes a
+            #   permanent ghost that can never be deleted.
+            # - a transient storage failure with the object still intact:
+            #   re-raise, otherwise deleting the state row leaves a live orphan
+            #   object that a later re-migration would resurrect.
+            try:
+                still_exists = store.get_meta(job_uri) is not None
+            except Exception:
+                still_exists = False
+            if still_exists:
+                raise
+            self.log_info(fl_ctx, f"ignoring storage delete error for missing job object '{jid}': {ex}")
         state_store.delete_job(jid)
 
     def _validate_meta(self, meta):
@@ -330,7 +426,7 @@ class SimpleJobDefManager(JobDefManagerSpec):
         return store.list_components_of_object(self.job_uri(jid))
 
     def set_status(self, jid: str, status: RunStatus, fl_ctx: FLContext):
-        status_value = self._status_value(status)
+        status_value = run_status_value(status)
         meta = {JobMetaKey.STATUS.value: status_value}
         state_store = self._get_state_store(fl_ctx)
         if status_value == RunStatus.RUNNING.value:
@@ -348,10 +444,15 @@ class SimpleJobDefManager(JobDefManagerSpec):
                     job_meta.get(JobMetaKey.START_TIME.value), "%Y-%m-%d %H:%M:%S.%f"
                 )
                 meta[JobMetaKey.DURATION.value] = str(datetime.datetime.now() - start_time)
-        self._update_state_job_meta(state_store, jid, meta)
+        with self._get_job_meta_lock(jid):
+            self._update_state_job_meta(state_store, jid, meta)
+            self._write_meta_to_storage(jid, meta, fl_ctx)
 
     def update_meta(self, jid: str, meta, fl_ctx: FLContext):
-        self._update_state_job_meta(self._get_state_store(fl_ctx), jid, meta)
+        state_store = self._get_state_store(fl_ctx)
+        with self._get_job_meta_lock(jid):
+            self._update_state_job_meta(state_store, jid, meta)
+            self._write_meta_to_storage(jid, meta, fl_ctx)
 
     def refresh_meta(self, job: Job, meta_keys: list, fl_ctx: FLContext):
         """Refresh meta of the job as specified in the meta keys
@@ -394,12 +495,9 @@ class SimpleJobDefManager(JobDefManagerSpec):
         """
         if not isinstance(status, list):
             status = [status]
-        result = []
-        state_store = self._get_state_store(fl_ctx)
-        for run_status in status:
-            rows = state_store.list_jobs(status=self._status_value(run_status))
-            result.extend(self._job_from_state_row(row) for row in rows)
-        return result
+        status_values = [run_status_value(s) for s in status]
+        rows = self._get_state_store(fl_ctx).list_jobs(status=status_values)
+        return [self._job_from_state_row(row) for row in rows]
 
     def get_jobs_waiting_for_review(self, reviewer_name: str, fl_ctx: FLContext) -> List[Job]:
         result = []

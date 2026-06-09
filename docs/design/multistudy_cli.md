@@ -56,9 +56,9 @@ The shipped multi-study design stores named-study state in the server State Stor
 server startup. This document defines the runtime CLI management surface that lets a running server accept ongoing study
 mutations without tying them to provisioning.
 
-The backend for all runtime mutations is the State Store. The server applies mutations through database transactions
-so runtime authorization and persisted state stay aligned under normal operation and fail closed on validation or write
-errors.
+The backend for all runtime mutations is the State Store. The server applies mutations through additive,
+individually-atomic State Store operations (see Mutation Flow) so runtime authorization and persisted state stay
+aligned under normal operation and fail closed on validation or write errors.
 
 ---
 
@@ -66,9 +66,9 @@ errors.
 
 1. **Same study shape** — mutations target the study shape used by multi-study, including `site_orgs` and `admins`.
 2. **Authoritative State Store** — after a successful mutation the database is authoritative; a server restart is not required.
-3. **Role-based lifecycle** — `remove` requires `project_admin`; `register`, `add-site`, `remove-site`, and study-user membership management are accessible to `project_admin` and `org_admin`, with `org_admin` visibility and authority scoped to studies where their org appears in `site_orgs`. `register` is a create-or-merge operation executed atomically in the State Store — see Validation Rules for the precise per-role behavior.
+3. **Role-based lifecycle** — `remove` requires `project_admin`; `register`, `add-site`, `remove-site`, and study-user membership management are accessible to `project_admin` and `org_admin`, with `org_admin` visibility and authority scoped to studies where their org appears in `site_orgs`. `register` is a create-or-merge operation applied through additive, individually-atomic State Store operations — see Validation Rules for the precise per-role behavior.
 4. **Cert role for lifecycle operations** — study lifecycle commands check the certificate-baked role (from distributed provisioning), consistent with the existing `must_be_project_admin` pattern for server-global operations.
-5. **Best-effort job-association guard** — `remove` queries job records before applying the deletion and rejects with `STUDY_HAS_JOBS` if any associated jobs exist at that moment. This is a best-effort guard: the study transaction does not gate job submission. A job submitted concurrently may arrive after the guard passes and before the study row is deleted. Jobs are the permanent audit trail regardless of whether the study entry still exists.
+5. **Best-effort job-association guard** — `remove` checks job records and deletes the study in one store transaction (`delete_study_if_no_jobs`) and rejects with `STUDY_HAS_JOBS` if any associated jobs exist at that moment. This is still a best-effort guard against racing submissions: the transaction does not gate job submission. A job submitted concurrently may arrive after the guard passes and before the study row is deleted. Jobs are the permanent audit trail regardless of whether the study entry still exists.
 6. **Agent-usable by design** — all commands follow the same output, error, exit-code, and flag conventions as the rest of the NVFlare CLI.
 
 ---
@@ -686,25 +686,35 @@ A new `StudyCommandModule` (parallel to `SystemCommandModule` and `JobCommandMod
 
 ### Mutation Flow
 
-All mutating commands follow the same serialized pattern:
+All mutating commands follow the same pattern:
 
 1. **Authorize** — check cert role; reject if insufficient.
 2. **Validate** — check that the study name, user, and sites are syntactically valid before modifying state.
-3. **Start transaction** — perform the mutation through the State Store so concurrent admin commands cannot lose updates.
-4. **Load current state** — read the current study rows in the transaction.
-5. **Guard** — for `remove_study`, query the job records for any job tagged with the study name; reject with `STUDY_HAS_JOBS` if any exist. This does not prevent a job submission that races in after this check — see the design limitation note below.
-6. **Apply mutation** — update the study rows. `register_study` auto-inserts the caller into `admins` if not already present; `add-user` and `remove-user` mutate `admins` explicitly. Study membership is stored in `site_orgs`: `org_admin` mutations affect only `site_orgs[caller_org]`; `project_admin` mutations may affect multiple org groups in one call.
-7. **Validate resulting config** — normalize and validate the updated study shape before committing.
-8. **Commit transaction** — the updated study is persisted in the State Store.
-9. **Return result** — reply to the admin connection with the updated study state as a JSON envelope.
+3. **Load current state** — read the current study rows for authorization scoping and merge decisions.
+4. **Apply mutation** — issue State Store operations. `register_study` auto-inserts the caller into `admins` if not
+   already present; `add-user` and `remove-user` mutate `admins` explicitly. Study membership is stored in
+   `site_orgs`: `org_admin` mutations affect only `site_orgs[caller_org]`; `project_admin` mutations may affect
+   multiple org groups in one call.
+5. **Return result** — reply to the admin connection with the updated study state as a JSON envelope.
 
-If validation of the post-mutation config fails, the transaction is not committed and the previous study rows remain
-unchanged.
+A command is **not** one wrapping database transaction. Each State Store operation it issues (insert the study row,
+add a site, add an admin) is individually atomic, and the operations are deliberately **additive**: a concurrent
+duplicate insert converges instead of erroring, and member rows are never deleted by an add/merge path. Two concurrent
+`register` calls on the same new study name CAN both pass the command layer's existence check; because both then issue
+additive operations, the end state is the merged union of the two calls — convergent, with no lost members — rather
+than a failure of one call. Removal happens only through the explicit `remove-site` / `remove-user` / `remove`
+commands.
 
-**Design limitation:** The mutation transaction serializes the study change itself, but it does not gate job submissions
-outside that transaction. A job may be submitted to a study being concurrently removed if the submission races the
-`remove` mutation. The job-association guard (step 5) checks job records at the time of the guard; any job submitted
-after that point is not prevented by the study mutation.
+The one exception is study removal: `remove` uses the store's `delete_study_if_no_jobs`, which performs the existence
+check, the job-association count, and the delete in a **single store transaction**, so a job recorded before the
+transaction reliably blocks the delete with `STUDY_HAS_JOBS`.
+
+**Design limitation:** even that transaction does not gate job submissions outside it. A job may be submitted to a
+study being concurrently removed if the submission races the `remove` mutation; the job-association guard checks job
+records as of its transaction, and any job submitted after that point is not prevented by the study mutation. Jobs are
+the permanent audit trail regardless of whether the study entry still exists. Similarly, the `org_admin`
+`STUDY_ALREADY_EXISTS` visibility rule for `register` is a check-then-act across transactions: it is an access-policy
+gate, not a uniqueness guarantee.
 
 ### Study config shape
 
@@ -736,7 +746,7 @@ not the legacy JSON file.
 - The regex is chosen to guarantee safe use as a filesystem path component: it excludes `/`, `.`, `..`, spaces, and all shell-special characters, so names can be safely joined into paths such as `/data/<study>/<dataset>` without sanitization
 - Dataset names must satisfy the same regex for the same reason — both appear as path components in the data mount path
 - `default` is reserved and always rejected with `INVALID_STUDY_NAME`
-- `register` is a **create-or-merge** operation, not a pure create. The entire check-then-mutate sequence runs in the State Store so two concurrent `register` calls on the same new study name cannot both pass the existence check and produce inconsistent state.
+- `register` is a **create-or-merge** operation, not a pure create. Two concurrent `register` calls on the same new study name may both pass the existence check; because the mutation is applied through additive, individually-atomic State Store operations, the end state converges to the merged union of both calls instead of becoming inconsistent (see Mutation Flow).
 
   `register` always applies **merge semantics** on an existing study: supplied sites that are not yet enrolled are added under the appropriate org group in `site_orgs`; already-enrolled sites are silently skipped. The caller is recorded in `admins` if not already present. `register` never removes sites or `admins` entries — removal requires explicit `remove-site` or `remove-user`.
 

@@ -448,6 +448,12 @@ class _FakeStudyStore:
         return _FakeStudyStore.sites.get(study)
 
 
+def _install_studies(monkeypatch, studies):
+    """Install _FakeStudyStore with the given {study: enrolled-sites-or-None} mapping."""
+    monkeypatch.setattr(job_cmds_module, "study_store", _FakeStudyStore, raising=False)
+    monkeypatch.setattr(_FakeStudyStore, "sites", studies, raising=False)
+
+
 class _FakeJobMetaValidatorWithMeta:
     def __init__(self, meta):
         self.meta = meta
@@ -488,6 +494,7 @@ def _submitted_job_id(conn):
 def test_submit_job_exposes_study_in_submit_event(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobMetaValidator", _FakeJobMetaValidator)
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
+    _install_studies(monkeypatch, {"cancer-research": None})
 
     engine = _FakeEngine()
     conn = _MockConnection(
@@ -556,6 +563,57 @@ def test_submit_job_defaults_study_when_cmd_props_missing(monkeypatch):
     assert engine.job_def_manager.created_meta[JobMetaKey.STUDY.value] == "default"
 
 
+def test_submit_job_rejects_study_that_no_longer_exists(monkeypatch):
+    # A stale session can still hold a study that was removed after login;
+    # submit must re-validate study existence and reject with a clear error.
+    monkeypatch.setattr(job_cmds_module, "JobMetaValidator", _FakeJobMetaValidator)
+    monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
+    _install_studies(monkeypatch, {})
+
+    engine = _FakeEngine()
+    conn = _MockConnection(
+        app_ctx=engine,
+        props={
+            ConnProps.FILE_LOCATION: "job.zip",
+            ConnProps.ACTIVE_STUDY: "removed-study",
+            ConnProps.USER_NAME: "submitter",
+            ConnProps.USER_ORG: "org",
+            ConnProps.USER_ROLE: "role",
+        },
+    )
+
+    JobCommandModule().submit_job(conn, ["submit_job", "job_folder"])
+
+    assert len(conn.errors) == 1
+    assert "study 'removed-study' does not exist" in conn.errors[0][0]
+    assert conn.successes == []
+    assert engine.job_def_manager.created_meta is None
+    assert engine.submit_event_meta is None
+
+
+def test_submit_job_default_study_skips_study_existence_check(monkeypatch):
+    monkeypatch.setattr(job_cmds_module, "JobMetaValidator", _FakeJobMetaValidator)
+    monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
+    _install_studies(monkeypatch, {})
+
+    engine = _FakeEngine()
+    conn = _MockConnection(
+        app_ctx=engine,
+        props={
+            ConnProps.FILE_LOCATION: "job.zip",
+            ConnProps.ACTIVE_STUDY: "default",
+            ConnProps.USER_NAME: "submitter",
+            ConnProps.USER_ORG: "org",
+            ConnProps.USER_ROLE: "role",
+        },
+    )
+
+    JobCommandModule().submit_job(conn, ["submit_job", "job_folder"])
+
+    assert conn.errors == []
+    assert engine.job_def_manager.created_meta[JobMetaKey.STUDY.value] == "default"
+
+
 def test_server_list_parser_accepts_submit_token():
     parser = _create_list_job_cmd_parser()
     parsed_args = parser.parse_args(["--submit-token", "retry.01:A_b-c"])
@@ -581,6 +639,7 @@ def test_submit_job_rejects_invalid_submit_token(monkeypatch, token):
 def test_same_submit_token_same_content_returns_same_job(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobMetaValidator", _FakeJobMetaValidatorFolderOnly)
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
+    _install_studies(monkeypatch, {"study-a": None})
 
     engine = _FakeEngine()
     engine.job_def_manager = _FakeSubmitTokenJobDefManager()
@@ -697,6 +756,7 @@ def test_delete_job_marks_submit_record_job_deleted():
 def test_same_submit_token_different_study_is_independent(monkeypatch):
     monkeypatch.setattr(job_cmds_module, "JobMetaValidator", _FakeJobMetaValidatorFolderOnly)
     monkeypatch.setattr(job_cmds_module, "JobDefManagerSpec", object)
+    _install_studies(monkeypatch, {"study-a": None, "study-b": None})
 
     engine = _FakeEngine()
     engine.job_def_manager = _FakeSubmitTokenJobDefManager()

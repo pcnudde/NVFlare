@@ -18,8 +18,6 @@ from typing import Dict, List, Tuple
 from nvflare.apis import study_store
 from nvflare.apis.client import ClientPropKey
 from nvflare.apis.fl_constant import AdminCommandNames
-from nvflare.apis.job_def import JobMetaKey
-from nvflare.apis.job_def_manager_spec import JobDefManagerSpec
 from nvflare.apis.utils.format_check import name_check
 from nvflare.fuel.hci.conn import Connection
 from nvflare.fuel.hci.proto import ConfirmMethod, MetaStatusValue, make_meta
@@ -325,16 +323,6 @@ class StudyCommandModule(CommandModule, CommandUtil):
             return admins
         raise ValueError("study admins must be a list")
 
-    @staticmethod
-    def _normalize_site_orgs(study_def: dict) -> Dict[str, List[str]]:
-        site_orgs = study_def.setdefault("site_orgs", {})
-        if site_orgs is None:
-            site_orgs = {}
-            study_def["site_orgs"] = site_orgs
-        if not isinstance(site_orgs, dict):
-            raise ValueError("study site_orgs must be a mapping")
-        return site_orgs
-
     def _requested_site_orgs(self, conn: Connection, parsed) -> Dict[str, List[str]]:
         caller_role = self._caller_role(conn)
         has_sites = bool(getattr(parsed, "sites", None))
@@ -421,9 +409,7 @@ class StudyCommandModule(CommandModule, CommandUtil):
             caller = self._caller_name(conn)
             caller_role = self._caller_role(conn)
             caller_org = self._caller_org(conn)
-            if is_new_study:
-                study_def = {"site_orgs": {}, "admins": []}
-            elif caller_role == "org_admin" and caller_org not in self._normalize_site_orgs(study_def):
+            if not is_new_study and caller_role == "org_admin" and caller_org not in study_def.get("site_orgs", {}):
                 return {
                     "error_code": "STUDY_ALREADY_EXISTS",
                     "message": f"Study '{parsed.study}' already exists.",
@@ -444,19 +430,12 @@ class StudyCommandModule(CommandModule, CommandUtil):
             if is_new_study:
                 study_def = study_store.upsert_study(parsed.study, {"site_orgs": requested, "admins": [caller]})
             else:
-                site_orgs = self._normalize_site_orgs(study_def)
-                all_existing = {site for org_sites in site_orgs.values() for site in org_sites}
-                for org, sites in requested.items():
-                    current = site_orgs.setdefault(org, [])
-                    for site in sites:
-                        if site in all_existing:
-                            continue
-                        current.append(site)
-                        all_existing.add(site)
-                admins = self._normalize_admins(study_def)
-                if caller not in admins:
-                    admins.append(caller)
-                study_def = study_store.upsert_study(parsed.study, {"site_orgs": site_orgs, "admins": admins})
+                # Incremental, race-safe store mutations: never rebuild and rewrite the full
+                # study snapshot (a stale snapshot would clobber concurrent membership changes).
+                already_admin = caller in study_def.get("admins", [])
+                study_def = study_store.add_sites(parsed.study, requested)
+                if not already_admin:
+                    study_def = study_store.add_user(parsed.study, caller)
             return self._study_payload(parsed.study, study_def)
 
         self._run_study_command(conn, _run)
@@ -495,20 +474,14 @@ class StudyCommandModule(CommandModule, CommandUtil):
                         "hint": "Each site must be currently connected to the server and provisioned under the specified org.",
                         "exit_code": 4,
                     }
-            site_orgs = self._normalize_site_orgs(study_def)
+            all_existing = study_store.sites_from_study_def(study_def)
             added = []
             already_enrolled = []
-            all_existing = {site for org_sites in site_orgs.values() for site in org_sites}
-            for org, sites in requested.items():
-                current = site_orgs.setdefault(org, [])
-                existing = set(current)
+            for sites in requested.values():
                 for site in sites:
                     if site in all_existing:
                         already_enrolled.append(site)
                     else:
-                        current.append(site)
-                        existing.add(site)
-                        all_existing.add(site)
                         added.append(site)
             study_def = study_store.add_sites(parsed.study, requested)
             return self._site_mutation_payload(parsed.study, study_def, added=added, already_enrolled=already_enrolled)
@@ -543,25 +516,16 @@ class StudyCommandModule(CommandModule, CommandUtil):
             # No connectivity check: the site may be offline or decommissioned.
             # The operator is explicitly requesting removal, so current connection
             # status is irrelevant.
-            site_orgs = self._normalize_site_orgs(study_def)
+            site_orgs = study_def.get("site_orgs", {})
             removed = []
             not_enrolled = []
             for org, sites in requested.items():
-                if org not in site_orgs:
-                    not_enrolled.extend(sites)
-                    continue
-                current = site_orgs[org]
-                current_set = set(current)
-                new_current = []
-                for site in current:
-                    if site in sites:
+                enrolled = set(site_orgs.get(org, []))
+                for site in sites:
+                    if site in enrolled:
                         removed.append(site)
                     else:
-                        new_current.append(site)
-                for site in sites:
-                    if site not in current_set:
                         not_enrolled.append(site)
-                site_orgs[org] = new_current
             study_def = study_store.remove_sites(parsed.study, requested)
             return self._site_mutation_payload(parsed.study, study_def, removed=removed, not_enrolled=not_enrolled)
 
@@ -576,23 +540,13 @@ class StudyCommandModule(CommandModule, CommandUtil):
             self._error(conn, "INVALID_STUDY_NAME", str(e), exit_code=4)
             return
 
-        def _run(engine):
-            study_def = study_store.get_study(parsed.study)
-            if study_def is None:
-                return {
-                    "error_code": "STUDY_NOT_FOUND",
-                    "message": f"Study '{parsed.study}' not found.",
-                    "hint": "Verify the study name.",
-                    "exit_code": 1,
-                }
-
-            job_def_manager = engine.job_def_manager
-            count = 0
-            if isinstance(job_def_manager, JobDefManagerSpec):
-                with engine.new_context() as fl_ctx:
-                    for job in job_def_manager.get_all_jobs(fl_ctx) or []:
-                        if job.meta.get(JobMetaKey.STUDY.value) == parsed.study:
-                            count += 1
+        def _run(_engine):
+            # The existence check, job count, and delete happen in ONE store transaction,
+            # so a concurrent job submission cannot slip between the count and the delete.
+            result = study_store.delete_study_if_no_jobs(parsed.study)
+            if result.get("deleted"):
+                return {"name": parsed.study, "removed": True}
+            count = result.get("job_count", 0)
             if count > 0:
                 return {
                     "error_code": "STUDY_HAS_JOBS",
@@ -600,8 +554,12 @@ class StudyCommandModule(CommandModule, CommandUtil):
                     "hint": "Archive or delete the associated jobs before retrying.",
                     "exit_code": 1,
                 }
-            study_store.delete_study(parsed.study)
-            return {"name": parsed.study, "removed": True}
+            return {
+                "error_code": "STUDY_NOT_FOUND",
+                "message": f"Study '{parsed.study}' not found.",
+                "hint": "Verify the study name.",
+                "exit_code": 1,
+            }
 
         self._run_study_command(conn, _run)
 
