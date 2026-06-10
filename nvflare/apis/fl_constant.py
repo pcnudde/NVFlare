@@ -404,8 +404,15 @@ class SystemComponents:
     FED_CLIENT = "fed_client"
     RUN_MANAGER = "run_manager"
 
+    # Components that exist only in the server parent process; job-process
+    # config parsing skips these instead of special-casing individual ids.
+    SERVER_PARENT_ONLY = frozenset({STATE_STORE})
+
 
 class JobConstants:
+    # Env var overriding the job store URI root; the migrate CLI must resolve
+    # the legacy jobs dir exactly as the live job manager does.
+    JOB_STORE_ROOT_ENV = "NVFL_JOB_STORE_ROOT"
     SERVER_JOB_CONFIG = "config_fed_server.json"
     CLIENT_JOB_CONFIG = "config_fed_client.json"
     META_FILE = "meta.json"

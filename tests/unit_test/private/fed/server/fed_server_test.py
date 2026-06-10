@@ -75,6 +75,27 @@ class TestFederatedServer:
             result = server.client_heartbeat(request)
             assert result.get_header(CellMessageHeaderKeys.ABORT_JOBS, []) == expected
 
+    @pytest.mark.parametrize("fail_open", [True, False])
+    def test_disabled_client_fail_open_kwarg_reaches_client_manager(self, fail_open):
+        with patch("nvflare.private.fed.server.fed_server.ServerEngine"):
+            server = FederatedServer(
+                project_name="project_name",
+                args=MagicMock(),
+                snapshot_persistor=MagicMock(),
+                disabled_client_fail_open=fail_open,
+            )
+            assert server.client_manager.disabled_check_fail_open is fail_open
+
+    def test_disabled_client_fail_open_defaults_to_env_fallback(self, monkeypatch):
+        monkeypatch.delenv("NVFL_DISABLED_CLIENT_FAIL_CLOSED", raising=False)
+        with patch("nvflare.private.fed.server.fed_server.ServerEngine"):
+            server = FederatedServer(
+                project_name="project_name",
+                args=MagicMock(),
+                snapshot_persistor=MagicMock(),
+            )
+            assert server.client_manager.disabled_check_fail_open is True
+
     def test_set_job_aborted_marks_runner_without_publishing_status(self):
         server = object.__new__(FederatedServer)
         server.logger = MagicMock()

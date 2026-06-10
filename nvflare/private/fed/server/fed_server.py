@@ -90,6 +90,7 @@ class BaseServer(ABC):
         heart_beat_timeout=600,
         handlers: Optional[List[FLComponent]] = None,
         shutdown_period=30.0,
+        disabled_client_fail_open: Optional[bool] = None,
     ):
         """Base server that provides the clients management and server deployment."""
         self.project_name = project_name
@@ -100,7 +101,10 @@ class BaseServer(ABC):
         self.handlers = handlers
 
         self.client_manager = ClientManager(
-            project_name=self.project_name, min_num_clients=self.min_num_clients, max_num_clients=self.max_num_clients
+            project_name=self.project_name,
+            min_num_clients=self.min_num_clients,
+            max_num_clients=self.max_num_clients,
+            disabled_check_fail_open=disabled_client_fail_open,
         )
 
         self.cell = None
@@ -284,6 +288,7 @@ class FederatedServer(BaseServer):
         snapshot_persistor=None,
         shutdown_period=30.0,
         check_engine_frequency=3.0,
+        disabled_client_fail_open: Optional[bool] = None,
     ):
         """Federated server services.
 
@@ -296,6 +301,9 @@ class FederatedServer(BaseServer):
             handlers: A list of handler
             args: arguments
             secure_train: whether to use secure communication
+            disabled_client_fail_open: disabled-client check behavior on state store read errors;
+                None (default) consults the NVFL_DISABLED_CLIENT_FAIL_CLOSED environment variable.
+                See ClientManager's disabled_check_fail_open for details.
         """
         BaseServer.__init__(
             self,
@@ -305,6 +313,7 @@ class FederatedServer(BaseServer):
             heart_beat_timeout=heart_beat_timeout,
             handlers=handlers,
             shutdown_period=shutdown_period,
+            disabled_client_fail_open=disabled_client_fail_open,
         )
 
         self.contributed_clients = {}

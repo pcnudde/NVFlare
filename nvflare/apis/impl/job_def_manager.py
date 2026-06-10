@@ -16,13 +16,11 @@ import json
 import os
 import shutil
 import tempfile
-import threading
 import time
-import weakref
 from typing import Any, Dict, List, Optional, Union
 
 from nvflare.apis.client_engine_spec import ClientEngineSpec
-from nvflare.apis.fl_constant import SystemComponents
+from nvflare.apis.fl_constant import JobConstants, SystemComponents
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.job_def import (
     Job,
@@ -41,17 +39,16 @@ from nvflare.apis.storage import META, WORKSPACE, StorageException, StorageSpec
 from nvflare.apis.utils.format_check import check_job_app_name, check_job_id
 from nvflare.apis.utils.job_submit_token import canonical_job_content_hash, submitter_to_dict
 from nvflare.fuel.utils import fobs
+from nvflare.fuel.utils.keyed_lock import KeyedLockRegistry
 from nvflare.fuel.utils.zip_utils import unzip_all_from_bytes, zip_directory_to_bytes
 
 
 class SimpleJobDefManager(JobDefManagerSpec):
     # In-process per-job locks held across [state-store update + storage-meta
     # mirror write] so the mirror is written in the same order as state-store
-    # commits within this process. WeakValueDictionary prunes entries once no
-    # caller holds the lock. Cross-process (HA) mirror ordering remains
+    # commits within this process. Cross-process (HA) mirror ordering remains
     # best-effort (see _write_meta_to_storage).
-    _job_meta_locks = weakref.WeakValueDictionary()
-    _job_meta_locks_guard = threading.Lock()
+    _job_meta_locks = KeyedLockRegistry()
 
     def __init__(
         self,
@@ -63,7 +60,7 @@ class SimpleJobDefManager(JobDefManagerSpec):
         self.uri_root = uri_root
 
         # if env var is defined, use it to override uri_root!
-        job_store_root = os.environ.get("NVFL_JOB_STORE_ROOT")
+        job_store_root = os.environ.get(JobConstants.JOB_STORE_ROOT_ENV)
         if job_store_root:
             self.uri_root = job_store_root
 
@@ -118,15 +115,6 @@ class SimpleJobDefManager(JobDefManagerSpec):
             raise StorageException(f"job '{jid}' is missing from state store")
         return updated
 
-    @classmethod
-    def _get_job_meta_lock(cls, jid: str) -> threading.Lock:
-        with cls._job_meta_locks_guard:
-            lock = cls._job_meta_locks.get(jid)
-            if lock is None:
-                lock = threading.Lock()
-                cls._job_meta_locks[jid] = lock
-            return lock
-
     def _write_meta_to_storage(self, jid: str, meta: dict, fl_ctx: FLContext):
         """Mirror changed meta keys to the job-store object's meta.
 
@@ -136,7 +124,7 @@ class SimpleJobDefManager(JobDefManagerSpec):
         operation.
 
         In-process callers serialize [state-store update + this mirror write]
-        via _get_job_meta_lock so the mirror cannot end up holding a staler
+        via _job_meta_locks so the mirror cannot end up holding a staler
         status than the state store. Across processes (HA replicas) the mirror
         ordering remains best-effort.
         """
@@ -444,13 +432,11 @@ class SimpleJobDefManager(JobDefManagerSpec):
                     job_meta.get(JobMetaKey.START_TIME.value), "%Y-%m-%d %H:%M:%S.%f"
                 )
                 meta[JobMetaKey.DURATION.value] = str(datetime.datetime.now() - start_time)
-        with self._get_job_meta_lock(jid):
-            self._update_state_job_meta(state_store, jid, meta)
-            self._write_meta_to_storage(jid, meta, fl_ctx)
+        self.update_meta(jid, meta, fl_ctx)
 
     def update_meta(self, jid: str, meta, fl_ctx: FLContext):
         state_store = self._get_state_store(fl_ctx)
-        with self._get_job_meta_lock(jid):
+        with self._job_meta_locks.get(jid):
             self._update_state_job_meta(state_store, jid, meta)
             self._write_meta_to_storage(jid, meta, fl_ctx)
 

@@ -15,11 +15,12 @@
 from nvflare.app_common.state_store.legacy_migration import (
     bootstrap_fresh_state_store,
     classify_legacy_state,
-    has_legacy_state,
+    prepare_server_state_store,
 )
 from nvflare.app_common.state_store.sql_store import (
     SqlStateStore,
     default_state_store_db_url,
+    ensure_sqlite_parent_dir,
     migrate_database,
     resolve_relative_db_url,
     sqlite_url,
@@ -31,8 +32,9 @@ __all__ = [
     "bootstrap_fresh_state_store",
     "classify_legacy_state",
     "default_state_store_db_url",
-    "has_legacy_state",
+    "ensure_sqlite_parent_dir",
     "migrate_database",
+    "prepare_server_state_store",
     "resolve_relative_db_url",
     "sqlite_url",
     "validate_database",

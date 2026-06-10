@@ -23,6 +23,7 @@ from nvflare.apis.job_def import JobMetaKey
 from nvflare.apis.storage import StorageException, StorageSpec
 from nvflare.app_common.state_store.legacy_study_registry import LegacyStudyRegistry
 from nvflare.app_common.state_store.sql_store import SqlStateStore, migrate_database
+from nvflare.app_common.storages.filesystem_storage import FilesystemStorage
 
 LEGACY_MIGRATION_MARKER = "legacy_filesystem_migration_v1"
 LEGACY_SOURCE_FORMAT = "legacy-filesystem"
@@ -75,19 +76,77 @@ def classify_legacy_state(server_root: str, jobs_dir: Optional[str]) -> dict:
     }
 
 
-def has_legacy_state(server_root: str, jobs_dir_name: str = "jobs") -> bool:
-    """Detect legacy filesystem state under a server workspace root.
+def prepare_server_state_store(store: SqlStateStore, server_root: str, jobs_dir: Optional[str]) -> dict:
+    """Validate the state store for server startup, self-bootstrapping fresh installs.
 
-    Used by deployers to decide between bootstrap_fresh_state_store (fresh install) and the
-    full nvflare-state-store-migrate flow (legacy upgrade).
+    Requires the migration marker, but a workspace with no legacy filesystem state gets its
+    schema applied and a fresh-install marker written inline, so POC, Docker, bare-metal, and
+    K8s fresh installs start cleanly. A workspace whose ONLY legacy artifact is
+    local/study_registry.json is a freshly provisioned kit with studies defined in project.yml
+    (provision-time config, not runtime data), so its studies are imported inline at startup.
+    If legacy runtime data exists (jobs or disabled clients), importing it implicitly at
+    startup is too risky, so the operator must run nvflare-state-store-migrate explicitly.
 
-    jobs_dir_name is resolved against server_root (an absolute jobs_dir_name is used as is).
-    Callers that know the job store's actual location should prefer classify_legacy_state
-    with the fully resolved jobs directory.
+    Args:
+        store: the server's SqlStateStore.
+        server_root: server workspace root containing local/ and startup/.
+        jobs_dir: the FULLY RESOLVED legacy jobs directory (see classify_legacy_state).
+
+    Returns:
+        {"action": "validated"} if the migration marker was already present;
+        {"action": "bootstrapped"} if a fresh-install marker was written;
+        {"action": "imported_registry", "registry_path": ..., "imported_studies": [...]} if a
+        provision-time study registry was imported.
     """
-    jobs_dir = str(Path(server_root).expanduser() / jobs_dir_name)
-    state = classify_legacy_state(server_root, jobs_dir)
-    return bool(state["jobs"] or state["study_registry"] or state["disabled_clients"])
+    try:
+        validate_state_store_migrated(store)
+        return {"action": "validated"}
+    except RuntimeError as e:
+        state = classify_legacy_state(server_root, jobs_dir)
+        if state["jobs"] or state["disabled_clients"]:
+            found = []
+            if state["jobs"]:
+                found.append(f"legacy jobs under '{jobs_dir}'")
+            if state["study_registry"]:
+                found.append(f"study registry at '{state['study_registry']}'")
+            if state["disabled_clients"]:
+                found.append(f"disabled clients file at '{Path(server_root).expanduser() / 'disabled_clients.json'}'")
+            raise RuntimeError(
+                f"{e}. Legacy filesystem state was found: {'; '.join(found)}. Run "
+                f"'nvflare-state-store-migrate --server-root {server_root}' to import it, "
+                "then restart the server."
+            ) from e
+        if state["study_registry"]:
+            return _import_provisioned_study_registry(store, state["study_registry"])
+    result = bootstrap_fresh_state_store(store)
+    return {"action": "bootstrapped" if result.get("bootstrapped") else "validated"}
+
+
+def _import_provisioned_study_registry(store: SqlStateStore, registry_path: str) -> dict:
+    """Import a provision-time study registry inline at startup.
+
+    Provisioning writes local/study_registry.json into a new server kit when project.yml
+    defines studies. With no other legacy artifacts this is a fresh install, not an
+    upgrade, so the studies are imported here (writing the real migration marker) instead
+    of failing startup and demanding a manual nvflare-state-store-migrate run.
+    """
+    _ensure_schema(store)
+    result = migrate_legacy_state_store(store, job_storage=None, study_registry_path=registry_path)
+    summary = (result.get("marker") or {}).get("summary_json") or {}
+    return {
+        "action": "imported_registry",
+        "registry_path": registry_path,
+        "imported_studies": summary.get("imported_studies", []),
+    }
+
+
+def _ensure_schema(store: SqlStateStore):
+    """Validate the schema, applying Alembic migrations once if validation fails."""
+    try:
+        store.initialize()
+    except RuntimeError:
+        migrate_database(store.db_url)
+        store.initialize()
 
 
 def bootstrap_fresh_state_store(store: SqlStateStore, marker_name: str = LEGACY_MIGRATION_MARKER) -> dict:
@@ -101,11 +160,7 @@ def bootstrap_fresh_state_store(store: SqlStateStore, marker_name: str = LEGACY_
     (renamed marker, partial restore, shared database), declaring it "fresh" would be a
     silent lie, so a RuntimeError is raised instead.
     """
-    try:
-        store.initialize()
-    except RuntimeError:
-        migrate_database(store.db_url)
-        store.initialize()
+    _ensure_schema(store)
     marker = store.get_migration_marker(marker_name)
     if marker:
         return {"bootstrapped": False, "marker": marker}
@@ -298,11 +353,10 @@ def _list_legacy_objects(storage: StorageSpec, uri_root: str, optional: bool = T
 
 
 def _is_missing_filesystem_uri(storage: StorageSpec, uri: str) -> bool:
-    object_path = getattr(storage, "_object_path", None)
-    if not callable(object_path):
+    if not isinstance(storage, FilesystemStorage):
         return False
     try:
-        path = object_path(uri)
+        path = storage.object_path(uri)
     except StorageException:
         return False
     return not os.path.exists(path)
@@ -314,11 +368,10 @@ def _scan_submit_record_uris(storage: StorageSpec, records_root: str) -> Optiona
     Returns None when the storage does not expose a filesystem layout, in which case the
     caller falls back to index-based enumeration only.
     """
-    object_path = getattr(storage, "_object_path", None)
-    if not callable(object_path):
+    if not isinstance(storage, FilesystemStorage):
         return None
     try:
-        root_path = object_path(records_root)
+        root_path = storage.object_path(records_root)
     except StorageException:
         return None
     if not os.path.isdir(root_path):

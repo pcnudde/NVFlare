@@ -146,7 +146,12 @@ class FilesystemStorage(StorageSpec):
         self.root_dir = os.path.realpath(root_dir)
         self.uri_root = uri_root
 
-    def _object_path(self, uri: str):
+    def object_path(self, uri: str) -> str:
+        """Return the resolved filesystem path for a storage URI.
+
+        Raises:
+            StorageException: if the URI escapes the storage uri_root or root_dir.
+        """
         uri_root = os.path.normpath(self.uri_root or os.sep)
         if not os.path.isabs(uri_root):
             uri_root = os.path.normpath(os.path.join(os.sep, uri_root))
@@ -189,7 +194,7 @@ class FilesystemStorage(StorageSpec):
             IOError: if error writing the object
 
         """
-        full_uri = self._object_path(uri)
+        full_uri = self.object_path(uri)
 
         if _object_exists(full_uri) and not overwrite_existing:
             raise StorageException(f"object {uri} already exists and overwrite_existing is False")
@@ -208,7 +213,7 @@ class FilesystemStorage(StorageSpec):
         return full_uri
 
     def clone_object(self, from_uri: str, to_uri: str, meta: dict, overwrite_existing: bool = False):
-        full_uri = self._object_path(to_uri)
+        full_uri = self.object_path(to_uri)
 
         if _object_exists(full_uri) and not overwrite_existing:
             raise StorageException(f"object {to_uri} already exists and overwrite_existing is False")
@@ -218,7 +223,7 @@ class FilesystemStorage(StorageSpec):
 
         data_path = os.path.join(full_uri, DATA)
 
-        from_full_uri = self._object_path(from_uri)
+        from_full_uri = self.object_path(from_uri)
         from_data_path = os.path.join(from_full_uri, DATA)
         _write(data_path, from_data_path, mv_file=False)
 
@@ -241,7 +246,7 @@ class FilesystemStorage(StorageSpec):
         Raises StorageException when the object does not exit.
 
         """
-        full_dir_path = self._object_path(uri)
+        full_dir_path = self.object_path(uri)
         if not os.path.isdir(full_dir_path):
             raise StorageException(f"path {full_dir_path} is not a valid directory.")
 
@@ -266,7 +271,7 @@ class FilesystemStorage(StorageSpec):
             IOError: if error writing the object
 
         """
-        full_uri = self._object_path(uri)
+        full_uri = self.object_path(uri)
 
         if not _object_exists(full_uri):
             raise StorageException("object {} does not exist".format(uri))
@@ -293,7 +298,7 @@ class FilesystemStorage(StorageSpec):
             StorageException: if path does not exist or is not a valid directory.
 
         """
-        full_dir_path = self._object_path(path)
+        full_dir_path = self.object_path(path)
         if not os.path.isdir(full_dir_path):
             raise StorageException(f"path {full_dir_path} is not a valid directory.")
 
@@ -325,7 +330,7 @@ class FilesystemStorage(StorageSpec):
             StorageException: if object does not exist
 
         """
-        full_uri = self._object_path(uri)
+        full_uri = self.object_path(uri)
 
         if not _object_exists(full_uri):
             raise StorageException("object {} does not exist".format(uri))
@@ -346,7 +351,7 @@ class FilesystemStorage(StorageSpec):
             StorageException: if object does not exist
 
         """
-        full_uri = self._object_path(uri)
+        full_uri = self.object_path(uri)
 
         if not _object_exists(full_uri):
             raise StorageException("object {} does not exist".format(uri))
@@ -368,7 +373,7 @@ class FilesystemStorage(StorageSpec):
             StorageException: if object does not exist
 
         """
-        full_uri = self._object_path(uri)
+        full_uri = self.object_path(uri)
 
         if not StorageSpec.is_valid_component(component_name):
             raise StorageException(f"{component_name} is not a valid component for storage object.")
@@ -379,7 +384,7 @@ class FilesystemStorage(StorageSpec):
         return _read(os.path.join(full_uri, component_name))
 
     def get_data_for_download(self, uri: str, component_name: str = DATA, download_file: str = None):
-        full_uri = self._object_path(uri)
+        full_uri = self.object_path(uri)
 
         if not StorageSpec.is_valid_component(component_name):
             raise StorageException(f"{component_name} is not a valid component for storage object.")
@@ -409,7 +414,7 @@ class FilesystemStorage(StorageSpec):
             StorageException: if object does not exist
 
         """
-        full_uri = self._object_path(uri)
+        full_uri = self.object_path(uri)
 
         if not _object_exists(full_uri):
             raise StorageException("object {} does not exist".format(uri))
@@ -427,7 +432,7 @@ class FilesystemStorage(StorageSpec):
             StorageException: if object does not exist
 
         """
-        full_uri = self._object_path(uri)
+        full_uri = self.object_path(uri)
 
         if not _object_exists(full_uri):
             raise StorageException("object {} does not exist".format(uri))
@@ -437,7 +442,7 @@ class FilesystemStorage(StorageSpec):
         return full_uri
 
     def tag_object(self, uri: str, tag: str, data=None):
-        full_path = self._object_path(uri)
+        full_path = self.object_path(uri)
         mark_file = os.path.join(full_path, tag)
         with open(mark_file, "w") as f:
             if data:

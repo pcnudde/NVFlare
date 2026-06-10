@@ -77,21 +77,26 @@ def test_cp_conn_props_include_root_auth_identity():
     assert cp_conn_props[ConnPropKey.AUTH_IDENTITY] == "custom-site-cn"
 
 
-def test_server_job_process_skips_state_store_component_before_build():
+@pytest.mark.parametrize("cid", sorted(SystemComponents.SERVER_PARENT_ONLY))
+def test_server_job_process_skips_parent_only_components_before_build(cid):
     configer = FLServerStarterConfiger.__new__(FLServerStarterConfiger)
     configer.args = SimpleNamespace(job_id="job-1")
     configer.components = {}
 
     def _fail_build(_element):
-        raise AssertionError("job server process must not build state_store")
+        raise AssertionError(f"job server process must not build {cid}")
 
     configer.build_component = _fail_build
     configer.process_config_element(
         None,
-        _Node("components.#1", {"id": SystemComponents.STATE_STORE, "path": "missing.StateStore"}),
+        _Node("components.#1", {"id": cid, "path": "missing.Component"}),
     )
 
     assert configer.components == {}
+
+
+def test_state_store_is_a_server_parent_only_component():
+    assert SystemComponents.STATE_STORE in SystemComponents.SERVER_PARENT_ONLY
 
 
 def test_parent_server_process_builds_state_store_component():

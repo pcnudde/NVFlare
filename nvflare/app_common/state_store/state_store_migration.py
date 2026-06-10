@@ -18,7 +18,7 @@ import os
 import sys
 from pathlib import Path
 
-from nvflare.apis.fl_constant import SiteType, SystemComponents
+from nvflare.apis.fl_constant import JobConstants, SiteType, SystemComponents
 from nvflare.apis.workspace import Workspace
 from nvflare.app_common.state_store.legacy_migration import MigrationSkipError, migrate_legacy_state_store
 from nvflare.app_common.state_store.sql_store import (
@@ -87,7 +87,7 @@ def _filesystem_job_storage(resources: dict, server_root: Path, strict: bool):
         return None, "jobs", []
 
     job_manager_args = job_manager.get("args") or {}
-    jobs_uri_root = os.environ.get("NVFL_JOB_STORE_ROOT") or job_manager_args.get("uri_root", "jobs")
+    jobs_uri_root = os.environ.get(JobConstants.JOB_STORE_ROOT_ENV) or job_manager_args.get("uri_root", "jobs")
     job_store_id = job_manager_args.get("job_store_id", "job_store")
     job_store = _component(resources, job_store_id)
     if not job_store:

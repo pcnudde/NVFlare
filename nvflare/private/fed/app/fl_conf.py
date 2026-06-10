@@ -162,7 +162,8 @@ class FLServerStarterConfiger(JsonConfigurator):
             if not isinstance(cid, str):
                 raise ConfigError('"id" must be str but got {}'.format(type(cid)))
 
-            if self.args.job_id and cid == SystemComponents.STATE_STORE:
+            if self.args.job_id and cid in SystemComponents.SERVER_PARENT_ONLY:
+                # these components only run in the server parent process; skip them in job processes
                 return
 
             c = self.build_component(element)

@@ -283,9 +283,8 @@ class StudyCommandModule(CommandModule, CommandUtil):
     def _is_list_visible_to_caller(self, conn: Connection, study_def: dict) -> bool:
         return self._is_visible_to_caller(conn, study_def)
 
-    def _study_list_item(self, conn: Connection, study_name: str) -> dict:
+    def _study_list_item(self, conn: Connection, study_name: str, can_submit: bool, reason: str) -> dict:
         role = self._caller_role(conn)
-        can_submit, reason = self._can_submit_job(conn)
         item = {
             "name": study_name,
             "role": role,
@@ -427,15 +426,11 @@ class StudyCommandModule(CommandModule, CommandUtil):
                         "exit_code": 4,
                     }
 
-            if is_new_study:
-                study_def = study_store.upsert_study(parsed.study, {"site_orgs": requested, "admins": [caller]})
-            else:
-                # Incremental, race-safe store mutations: never rebuild and rewrite the full
-                # study snapshot (a stale snapshot would clobber concurrent membership changes).
-                already_admin = caller in study_def.get("admins", [])
-                study_def = study_store.add_sites(parsed.study, requested)
-                if not already_admin:
-                    study_def = study_store.add_user(parsed.study, caller)
+            # upsert_study additively merges the requested sites and the caller into the
+            # study (creating it if needed) in ONE store transaction. It never rebuilds
+            # and rewrites the full study snapshot, so a stale snapshot cannot clobber
+            # concurrent membership changes.
+            study_def = study_store.upsert_study(parsed.study, {"site_orgs": requested, "admins": [caller]})
             return self._study_payload(parsed.study, study_def)
 
         self._run_study_command(conn, _run)
@@ -569,12 +564,14 @@ class StudyCommandModule(CommandModule, CommandUtil):
             return
         studies = []
         study_details = []
+        # submit_job authorization depends only on the caller identity, not the study
+        can_submit, reason = self._can_submit_job(conn)
         for row in study_store.list_studies():
             study_name = row.get("name")
             study_def = row.get("config_json")
             if study_name and self._is_list_visible_to_caller(conn, study_def):
                 studies.append(study_name)
-                study_details.append(self._study_list_item(conn, study_name))
+                study_details.append(self._study_list_item(conn, study_name, can_submit, reason))
         self._reply(
             conn,
             {

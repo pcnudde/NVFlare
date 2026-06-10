@@ -17,6 +17,7 @@ from nvflare.fuel.hci.server.authz import PreAuthzReturnCode
 from nvflare.fuel.hci.server.constants import ConnProps
 from nvflare.private.fed.server import cmd_utils as cmd_utils_module
 from nvflare.private.fed.server.cmd_utils import CommandUtil
+from tests.unit_test.private.fed.server.fake_study_store import install_fake_study_store
 
 
 class _FakeConnection:
@@ -61,22 +62,9 @@ class _FakeEngine:
         return clients, invalid
 
 
-class _FakeStudyStore:
-    studies = {}
-
-    @classmethod
-    def has_study(cls, study):
-        return study in cls.studies
-
-    @classmethod
-    def get_sites(cls, study):
-        return cls.studies.get(study)
-
-
 def _install_registry(monkeypatch, studies):
-    monkeypatch.setattr(cmd_utils_module, "study_store", _FakeStudyStore, raising=False)
+    install_fake_study_store(monkeypatch, cmd_utils_module, studies)
     monkeypatch.setattr(cmd_utils_module, "ServerEngineSpec", object)
-    _FakeStudyStore.studies = studies
 
 
 def test_command_authz_required_keeps_cert_role_for_named_study(monkeypatch):

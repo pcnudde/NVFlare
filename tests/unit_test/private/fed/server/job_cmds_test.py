@@ -43,6 +43,8 @@ from nvflare.private.fed.server.job_cmds import (
     _create_get_job_log_cmd_parser,
     _create_list_job_cmd_parser,
 )
+from tests.unit_test.private.fed.server.fake_study_store import FakeStudyStore as _FakeStudyStore
+from tests.unit_test.private.fed.server.fake_study_store import install_fake_study_store
 
 TEST_CASES = [
     (
@@ -436,22 +438,9 @@ class _FakeClient:
         self.token = token
 
 
-class _FakeStudyStore:
-    sites = {}
-
-    @staticmethod
-    def has_study(study):
-        return study in _FakeStudyStore.sites
-
-    @staticmethod
-    def get_sites(study):
-        return _FakeStudyStore.sites.get(study)
-
-
 def _install_studies(monkeypatch, studies):
     """Install _FakeStudyStore with the given {study: enrolled-sites-or-None} mapping."""
-    monkeypatch.setattr(job_cmds_module, "study_store", _FakeStudyStore, raising=False)
-    monkeypatch.setattr(_FakeStudyStore, "sites", studies, raising=False)
+    install_fake_study_store(monkeypatch, job_cmds_module, studies)
 
 
 class _FakeJobMetaValidatorWithMeta:
@@ -2269,7 +2258,8 @@ def test_submit_token_locks_are_weakly_released():
 
     lock = JobCommandModule._submit_token_lock("study", submitter, token)
 
-    assert JobCommandModule._submit_token_locks.get(key) is lock
+    assert JobCommandModule._submit_token_lock("study", submitter, token) is lock
+    assert key in JobCommandModule._submit_token_locks
     del lock
     gc.collect()
     assert key not in JobCommandModule._submit_token_locks

@@ -206,7 +206,7 @@ def test_disabled_check_refetches_after_ttl_expiry():
 
     assert manager.is_client_disabled("site-a") is False
     # expire the cached entry
-    manager._disabled_cache["site-a"] = (False, time.time() - 11.0)
+    manager._disabled_cache._entries["site-a"] = (False, time.time() - 11.0)
     # store state changed on another server in the meantime
     manager.state_store.disabled["site-a"] = {"client_name": "site-a"}
 
@@ -254,7 +254,7 @@ def test_disabled_check_falls_back_to_last_cached_value_on_store_error():
     assert manager.is_client_disabled("site-a") is True
 
     # entry expires, then the store starts failing
-    manager._disabled_cache["site-a"] = (True, time.time() - 11.0)
+    manager._disabled_cache._entries["site-a"] = (True, time.time() - 11.0)
     manager.state_store.get_error = RuntimeError("db down")
 
     assert manager.is_client_disabled("site-a") is True
@@ -283,7 +283,7 @@ def test_fail_closed_still_prefers_cached_value_on_store_error():
     manager = _make_manager(disabled_cache_ttl=10.0, disabled_check_fail_open=False)
     assert manager.is_client_disabled("site-a") is False  # caches not-disabled
 
-    manager._disabled_cache["site-a"] = (False, time.time() - 11.0)  # expired
+    manager._disabled_cache._entries["site-a"] = (False, time.time() - 11.0)  # expired
     manager.state_store.get_error = RuntimeError("db down")
 
     assert manager.is_client_disabled("site-a") is False
@@ -328,7 +328,7 @@ def test_stale_store_read_cannot_clobber_concurrent_disable():
     # the reader must report the newer authoritative value, not its stale read
     assert manager.is_client_disabled("site-a") is True
     # the authoritative cache entry survived: the under-lock recheck sees disabled
-    assert manager._get_cached_disabled("site-a", ignore_ttl=True) is True
+    assert manager._disabled_cache.get("site-a", ignore_ttl=True) is True
 
     # and a registration attempt right after the race is rejected by the under-lock recheck
     store.get_disabled_client = orig_get
@@ -346,7 +346,7 @@ def test_stale_store_read_cannot_clobber_concurrent_enable():
     manager = _make_manager()
     manager.disable_client("site-a")
     # expire the cached True so the next check goes to the store
-    manager._disabled_cache["site-a"] = (True, time.time() - 1e6)
+    manager._disabled_cache._entries["site-a"] = (True, time.time() - 1e6)
     store = manager.state_store
     orig_get = store.get_disabled_client
 
@@ -358,7 +358,7 @@ def test_stale_store_read_cannot_clobber_concurrent_enable():
     store.get_disabled_client = racy_get
 
     assert manager.is_client_disabled("site-a") is False
-    assert manager._get_cached_disabled("site-a", ignore_ttl=True) is False
+    assert manager._disabled_cache.get("site-a", ignore_ttl=True) is False
 
 
 def test_epoch_does_not_break_normal_cache_fill_after_disable_then_ttl_expiry():
@@ -368,10 +368,10 @@ def test_epoch_does_not_break_normal_cache_fill_after_disable_then_ttl_expiry():
     manager.disable_client("site-a")
     # state changed on another server; this server's cache entry expires
     manager.state_store.enable_client("site-a")
-    manager._disabled_cache["site-a"] = (True, time.time() - 11.0)
+    manager._disabled_cache._entries["site-a"] = (True, time.time() - 11.0)
 
     assert manager.is_client_disabled("site-a") is False
-    assert manager._get_cached_disabled("site-a") is False
+    assert manager._disabled_cache.get("site-a") is False
 
 
 def test_fail_open_default_is_true_without_env(monkeypatch):
@@ -381,14 +381,14 @@ def test_fail_open_default_is_true_without_env(monkeypatch):
 
 
 def test_env_var_makes_default_fail_closed(monkeypatch):
-    for value in ("1", "true", "TRUE", "Yes", " yes "):
+    for value in ("1", "true", "TRUE", "Yes", " yes ", "t", "y"):
         monkeypatch.setenv("NVFL_DISABLED_CLIENT_FAIL_CLOSED", value)
         manager = ClientManager(project_name="project")
         assert manager.disabled_check_fail_open is False, f"env value {value!r} should fail closed"
 
 
 def test_falsy_env_var_keeps_default_fail_open(monkeypatch):
-    for value in ("0", "false", "no", ""):
+    for value in ("0", "false", "no", "", "garbage"):
         monkeypatch.setenv("NVFL_DISABLED_CLIENT_FAIL_CLOSED", value)
         manager = ClientManager(project_name="project")
         assert manager.disabled_check_fail_open is True, f"env value {value!r} should fail open"

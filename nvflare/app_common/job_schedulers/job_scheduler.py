@@ -22,7 +22,15 @@ from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_component import FLComponent
 from nvflare.apis.fl_constant import FLContextKey
 from nvflare.apis.fl_context import FLContext
-from nvflare.apis.job_def import ALL_SITES, SERVER_SITE_NAME, Job, JobMetaKey, RunStatus, get_job_meta_study
+from nvflare.apis.job_def import (
+    ALL_SITES,
+    DEFAULT_STUDY,
+    SERVER_SITE_NAME,
+    Job,
+    JobMetaKey,
+    RunStatus,
+    get_job_meta_study,
+)
 from nvflare.apis.job_def_manager_spec import JobDefManagerSpec
 from nvflare.apis.job_scheduler_spec import DispatchInfo, JobSchedulerSpec
 from nvflare.apis.server_engine_spec import ServerEngineSpec
@@ -101,18 +109,27 @@ class DefaultJobScheduler(JobSchedulerSpec, FLComponent):
         return False, None
 
     def _try_job(
-        self, job: Job, fl_ctx: FLContext, enrolled_sites_by_study: Dict[str, Optional[set]]
+        self, job: Job, fl_ctx: FLContext, enrolled_sites_by_study: Dict[str, Tuple[Optional[set], bool]]
     ) -> (int, Optional[Dict[str, DispatchInfo]], str):
         engine = fl_ctx.get_engine()
         online_clients = engine.get_clients()
         online_site_names = [x.name for x in online_clients]
         job_study = get_job_meta_study(job.meta)
-        # Study sites are fetched at most once per study per scheduling pass (no cross-pass
-        # caching, to avoid acting on stale study membership).
+        # The study is fetched at most once per study per scheduling pass (no cross-pass
+        # caching, to avoid acting on stale study membership). One fetch yields both the
+        # enrolled sites and the study's existence.
         if job_study not in enrolled_sites_by_study:
-            enrolled_sites_by_study[job_study] = study_store.get_sites(job_study)
-        enrolled_sites = enrolled_sites_by_study[job_study]
-        if enrolled_sites is not None and not enrolled_sites and not study_store.has_study(job_study):
+            if job_study == DEFAULT_STUDY:
+                enrolled_sites_by_study[job_study] = (None, True)
+            else:
+                study_def = study_store.get_study(job_study)
+                enrolled_sites_by_study[job_study] = (
+                    # mirror get_sites: unknown study -> empty set (fail closed)
+                    study_store.sites_from_study_def(study_def) if study_def is not None else set(),
+                    study_def is not None,
+                )
+        enrolled_sites, study_exists = enrolled_sites_by_study[job_study]
+        if enrolled_sites is not None and not enrolled_sites and not study_exists:
             # Fail closed, but with a distinct error: the job references a study that no longer
             # exists (e.g. removed after submit), not a generic lack of resources.
             self.log_error(
@@ -343,7 +360,8 @@ class DefaultJobScheduler(JobSchedulerSpec, FLComponent):
         engine = fl_ctx.get_engine()
         # Per-pass memo of {study: enrolled sites}: candidates often share studies, so each
         # distinct study is fetched from the store at most once per scheduling pass.
-        enrolled_sites_by_study: Dict[str, Optional[set]] = {}
+        # per-pass cache: {study: (enrolled sites or None, study exists)}
+        enrolled_sites_by_study: Dict[str, Tuple[Optional[set], bool]] = {}
         for job in job_candidates:
             schedule_count = job.meta.get(JobMetaKey.SCHEDULE_COUNT.value, 0)
             if schedule_count >= self.max_schedule_count:

@@ -23,8 +23,9 @@ _state_store: Optional[StateStore] = None
 
 def configure(store: StateStore):
     store.initialize()
+    # Fail fast at startup on stored rows that normalize_study would reject.
     for row in store.list_studies():
-        study_from_row(row)
+        _normalize_study_row(row)
     set_state_store(store)
 
 

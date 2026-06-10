@@ -196,7 +196,7 @@ def resolve_relative_db_url(db_url: str, base_dir: str) -> str:
 
 def migrate_database(db_url: str, revision: str = "head"):
     """Apply Alembic migrations to the configured state-store database."""
-    _prepare_sqlite_parent(db_url)
+    ensure_sqlite_parent_dir(db_url)
     command.upgrade(_alembic_config(db_url), revision)
 
 
@@ -223,7 +223,13 @@ def _alembic_config(db_url: str) -> Config:
     return config
 
 
-def _prepare_sqlite_parent(db_url: str):
+def ensure_sqlite_parent_dir(db_url: str):
+    """Create the parent directory of a file-backed SQLite db_url if absent.
+
+    SQLite can create a missing DB file but not missing parent directories, and schema
+    validation connects before the bootstrap/migration path gets a chance to create them.
+    Non-SQLite URLs are ignored; :memory: URLs are rejected (state DBs must be file-backed).
+    """
     url = make_url(db_url)
     if not url.drivername.startswith("sqlite"):
         return
@@ -276,11 +282,13 @@ def _insert_ignore(conn: Connection, table: Table, values: dict, verify: Optiona
         return False
 
 
-def _site_orgs_from_rows(org_rows, site_rows) -> dict:
-    site_orgs = {org: [] for org in org_rows}
-    for org, site_name in site_rows:
+def _site_orgs_from_rows(rows) -> dict:
+    """Build {org: [site, ...]} from (org, site_name) pairs; site_name None marks an org-only row."""
+    site_orgs = {}
+    for org, site_name in rows:
+        sites = site_orgs.setdefault(org, [])
         if site_name is not None:
-            site_orgs.setdefault(org, []).append(site_name)
+            sites.append(site_name)
     return site_orgs
 
 
@@ -323,6 +331,7 @@ class SqlStateStore(StateStore):
         self.db_url = resolve_db_url(db_url=db_url, db_url_env=db_url_env)
         self.db_url_env = db_url_env
         self.engine = engine or self._create_engine(self.db_url)
+        self._validated = False
         self._configure_engine()
 
     @staticmethod
@@ -368,7 +377,13 @@ class SqlStateStore(StateStore):
         return cls(sqlite_url(db_path))
 
     def initialize(self):
+        # Memoized: server startup validates several times (marker check, study_store.configure,
+        # bootstrap). The flag is only set on success, so a failed validation (pre-migration)
+        # is retried; worst case under races is a redundant validation, which is harmless.
+        if self._validated:
+            return
         validate_database(self.db_url)
+        self._validated = True
 
     # ------------------------------------------------------------------ studies
 
@@ -422,9 +437,7 @@ class SqlStateStore(StateStore):
         result = _row_dict(row)
         result["config_json"] = {
             "admins": [user for (user,) in admin_rows],
-            "site_orgs": _site_orgs_from_rows(
-                [org for org, _site in org_site_rows], [(org, site) for org, site in org_site_rows]
-            ),
+            "site_orgs": _site_orgs_from_rows(org_site_rows),
         }
         return result
 
@@ -451,11 +464,9 @@ class SqlStateStore(StateStore):
         admins_by_study = {}
         for study_name, user in admin_rows:
             admins_by_study.setdefault(study_name, []).append(user)
-        orgs_by_study = {}
-        sites_by_study = {}
+        org_sites_by_study = {}
         for study_name, org, site in org_site_rows:
-            orgs_by_study.setdefault(study_name, []).append(org)
-            sites_by_study.setdefault(study_name, []).append((org, site))
+            org_sites_by_study.setdefault(study_name, []).append((org, site))
 
         result = []
         for row in study_rows:
@@ -463,7 +474,7 @@ class SqlStateStore(StateStore):
             name = study["name"]
             study["config_json"] = {
                 "admins": admins_by_study.get(name, []),
-                "site_orgs": _site_orgs_from_rows(orgs_by_study.get(name, []), sites_by_study.get(name, [])),
+                "site_orgs": _site_orgs_from_rows(org_sites_by_study.get(name, [])),
             }
             result.append(study)
         return result
@@ -697,7 +708,8 @@ class SqlStateStore(StateStore):
                     f"update_submit_record for job '{values.get('job_id')}' lost "
                     f"{_MAX_WRITE_ATTEMPTS} update/insert races"
                 )
-        return _json_safe(record)
+        # record_json is already a detached deepcopy of record (made by _submit_record_values).
+        return values["record_json"]
 
     def mark_submit_records_job_deleted(self, job_id: str, deleted_by: Any) -> List[dict]:
         deleted_by_info = submitter_to_dict(deleted_by)
@@ -721,11 +733,12 @@ class SqlStateStore(StateStore):
                 record[SubmitRecordKey.STATE.value] = SubmitRecordState.JOB_DELETED.value
                 record[SubmitRecordKey.DELETED_TIME.value] = deleted_time
                 record[SubmitRecordKey.DELETED_BY.value] = deleted_by_info
-                values = _submit_record_values(record)
+                # Only record_json changes: the scope hashes and job_id are derived from
+                # fields the tombstone does not touch, so they are not recomputed/rewritten.
                 conn.execute(
                     update(submit_records)
                     .where(submit_records.c.id == row._mapping["id"])
-                    .values(**values, version=submit_records.c.version + 1, updated_at=_now())
+                    .values(record_json=_json_safe(record), version=submit_records.c.version + 1, updated_at=_now())
                 )
                 updated.append(record)
         return updated

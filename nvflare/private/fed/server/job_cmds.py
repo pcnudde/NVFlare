@@ -17,9 +17,7 @@ import io
 import json
 import os
 import shutil
-import threading
 import uuid
-import weakref
 from typing import Dict, List, Optional, Set
 from zipfile import BadZipFile, ZipFile
 
@@ -68,6 +66,7 @@ from nvflare.fuel.hci.server.authz import PreAuthzReturnCode
 from nvflare.fuel.hci.server.binary_transfer import BinaryTransfer
 from nvflare.fuel.hci.server.constants import ConnProps
 from nvflare.fuel.utils.argument_utils import SafeArgumentParser
+from nvflare.fuel.utils.keyed_lock import KeyedLockRegistry
 from nvflare.fuel.utils.log_utils import get_obj_logger
 from nvflare.private.defs import RequestHeader, TrainingTopic
 from nvflare.private.fed.server.admin import new_message
@@ -147,8 +146,7 @@ class JobCommandModule(CommandModule, CommandUtil, BinaryTransfer):
     """Command module with commands for job management."""
 
     MAX_RETURNED_JOB_LOG_BYTES = 5 * 1024 * 1024
-    _submit_token_locks = weakref.WeakValueDictionary()
-    _submit_token_locks_guard = threading.Lock()
+    _submit_token_locks = KeyedLockRegistry()
 
     def __init__(self):
         super().__init__()
@@ -1297,12 +1295,7 @@ class JobCommandModule(CommandModule, CommandUtil, BinaryTransfer):
             submitter.get("role", ""),
             submit_token,
         )
-        with cls._submit_token_locks_guard:
-            lock = cls._submit_token_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                cls._submit_token_locks[key] = lock
-            return lock
+        return cls._submit_token_locks.get(key)
 
     def _handle_submit_token_record(
         self,
@@ -1583,11 +1576,15 @@ class JobCommandModule(CommandModule, CommandUtil, BinaryTransfer):
                 requested_study = meta[JobMetaKey.STUDY.value]
                 # Re-validate the study at submit time: a stale session may still hold a study
                 # that was removed (remove_study) after the session was created.
-                if requested_study != DEFAULT_STUDY and not study_store.has_study(requested_study):
-                    error = f"study '{requested_study}' does not exist on the server"
-                    conn.append_error(error, meta=make_meta(MetaStatusValue.INVALID_JOB_DEFINITION, error))
-                    return
-                enrolled_sites = study_store.get_sites(requested_study)
+                # One store fetch covers both the existence check and the enrolled sites.
+                enrolled_sites = None
+                if requested_study != DEFAULT_STUDY:
+                    study_def = study_store.get_study(requested_study)
+                    if study_def is None:
+                        error = f"study '{requested_study}' does not exist on the server"
+                        conn.append_error(error, meta=make_meta(MetaStatusValue.INVALID_JOB_DEFINITION, error))
+                        return
+                    enrolled_sites = study_store.sites_from_study_def(study_def)
                 if enrolled_sites is not None:
                     deploy_map = meta.get(JobMetaKey.DEPLOY_MAP.value, {})
                     invalid_sites = []

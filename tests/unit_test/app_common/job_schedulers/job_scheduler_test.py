@@ -167,19 +167,19 @@ class MockServerEngine(ServerEngineSpec):
 
 class _FakeStudyStore:
     sites = {}
-    get_sites_calls = []
+    get_study_calls = []
 
     @staticmethod
-    def get_sites(study):
-        _FakeStudyStore.get_sites_calls.append(study)
-        if study == "default":
+    def get_study(study):
+        _FakeStudyStore.get_study_calls.append(study)
+        # mirror the real store: unknown study -> None
+        if study not in _FakeStudyStore.sites:
             return None
-        # mirror the real store: unknown study -> empty set (fail closed)
-        return _FakeStudyStore.sites.get(study, set())
+        return {"_sites": _FakeStudyStore.sites[study]}
 
     @staticmethod
-    def has_study(study):
-        return study in _FakeStudyStore.sites
+    def sites_from_study_def(study_def):
+        return (study_def or {}).get("_sites")
 
 
 def create_servers(server_num, sites: list[Site]):
@@ -553,7 +553,7 @@ class TestDefaultJobScheduler:
         servers, scheduler, num_sites, job_manager = setup_and_teardown
         monkeypatch.setattr(job_scheduler_module, "study_store", _FakeStudyStore, raising=False)
         monkeypatch.setattr(_FakeStudyStore, "sites", {}, raising=False)
-        monkeypatch.setattr(_FakeStudyStore, "get_sites_calls", [], raising=False)
+        monkeypatch.setattr(_FakeStudyStore, "get_study_calls", [], raising=False)
 
         candidate = create_job(
             job_id="orphan_job",
@@ -578,7 +578,7 @@ class TestDefaultJobScheduler:
         servers, scheduler, num_sites, job_manager = setup_and_teardown
         monkeypatch.setattr(job_scheduler_module, "study_store", _FakeStudyStore, raising=False)
         monkeypatch.setattr(_FakeStudyStore, "sites", {"cancer-research": set()}, raising=False)
-        monkeypatch.setattr(_FakeStudyStore, "get_sites_calls", [], raising=False)
+        monkeypatch.setattr(_FakeStudyStore, "get_study_calls", [], raising=False)
 
         candidate = create_job(
             job_id="zero_site_job",
@@ -602,7 +602,7 @@ class TestDefaultJobScheduler:
         job_manager = Mock(spec=JobDefManagerSpec)
         monkeypatch.setattr(job_scheduler_module, "study_store", _FakeStudyStore, raising=False)
         monkeypatch.setattr(_FakeStudyStore, "sites", {"cancer-research": {"site0", "site1"}}, raising=False)
-        monkeypatch.setattr(_FakeStudyStore, "get_sites_calls", [], raising=False)
+        monkeypatch.setattr(_FakeStudyStore, "get_study_calls", [], raising=False)
 
         candidates = []
         for i in range(4):
@@ -621,12 +621,12 @@ class TestDefaultJobScheduler:
             job, _ = scheduler.schedule_job(job_manager=job_manager, job_candidates=candidates, fl_ctx=fl_ctx)
 
         assert job is None
-        assert _FakeStudyStore.get_sites_calls == ["cancer-research"]
+        assert _FakeStudyStore.get_study_calls == ["cancer-research"]
 
         # a new pass re-fetches (no cross-pass caching)
         with servers[0].new_context() as fl_ctx:
             scheduler.schedule_job(job_manager=job_manager, job_candidates=candidates, fl_ctx=fl_ctx)
-        assert _FakeStudyStore.get_sites_calls == ["cancer-research", "cancer-research"]
+        assert _FakeStudyStore.get_study_calls == ["cancer-research", "cancer-research"]
 
     def test_required_out_of_study_site_blocks_job(self, monkeypatch, setup_and_teardown):
         servers, scheduler, num_sites, job_manager = setup_and_teardown

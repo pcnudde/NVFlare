@@ -27,7 +27,6 @@ from nvflare.app_common.state_store.legacy_migration import (
     MigrationSkipError,
     bootstrap_fresh_state_store,
     classify_legacy_state,
-    has_legacy_state,
     load_legacy_disabled_clients,
     load_legacy_study_registry,
     migrate_legacy_state_store,
@@ -427,26 +426,6 @@ def test_migration_validates_legacy_files(tmp_path):
     registry_path.write_text(json.dumps({"studies": {"study-a": {}}}), encoding="utf-8")
     with pytest.raises(ValueError, match="format_version"):
         load_legacy_study_registry(str(registry_path))
-
-
-def test_has_legacy_state(tmp_path):
-    server_root = tmp_path / "server"
-    (server_root / "local").mkdir(parents=True)
-    assert has_legacy_state(str(server_root)) is False
-
-    (server_root / "jobs").mkdir()
-    assert has_legacy_state(str(server_root)) is False  # empty jobs dir is not legacy data
-
-    write_registry(server_root / "local" / "study_registry.json")
-    assert has_legacy_state(str(server_root)) is True
-    (server_root / "local" / "study_registry.json").unlink()
-
-    write_disabled_clients(server_root / "disabled_clients.json")
-    assert has_legacy_state(str(server_root)) is True
-    (server_root / "disabled_clients.json").unlink()
-
-    (server_root / "jobs" / "job-1").mkdir()
-    assert has_legacy_state(str(server_root)) is True
 
 
 def test_classify_legacy_state(tmp_path):

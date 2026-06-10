@@ -108,10 +108,23 @@ class _FakeStateStore:
         return {"name": name, "config_json": deepcopy(study_def)}
 
     def upsert_study(self, name: str, config: dict):
+        # mirrors the real store: creates the study if needed and additively merges
+        # admins and site_orgs from config in one transaction (never deletes members)
         self.calls.append("upsert_study")
-        self.studies[name] = deepcopy(config)
+        config = config or {}
+        study = self.studies.setdefault(name, {"site_orgs": {}, "admins": []})
+        for user in config.get("admins", []) or []:
+            if user not in study.setdefault("admins", []):
+                study["admins"].append(user)
+        existing = {site for org_sites in study.get("site_orgs", {}).values() for site in org_sites}
+        for org, sites in (config.get("site_orgs", {}) or {}).items():
+            current = study.setdefault("site_orgs", {}).setdefault(org, [])
+            for site in sites or []:
+                if site not in existing:
+                    current.append(site)
+                    existing.add(site)
         self.write_count += 1
-        return {"name": name, "config_json": deepcopy(config), "version": self.write_count}
+        return self.get_study(name)
 
     def delete_study(self, name: str):
         self.calls.append("delete_study")
@@ -960,7 +973,7 @@ class TestAtomicityGuarantee:
 
 
 # ---------------------------------------------------------------------------
-# Section 12: register-study merge uses incremental store calls (A4)
+# Section 12: register-study merges via a single additive upsert_study call (A4)
 # ---------------------------------------------------------------------------
 
 
@@ -968,26 +981,27 @@ class TestRegisterStudyIncrementalMerge:
     def _module(self):
         return StudyCommandModule()
 
-    def test_register_existing_study_does_not_rewrite_full_snapshot(self):
-        # The existing-study branch must use incremental add calls; a full upsert of a
-        # stale snapshot would clobber concurrently added admins/sites.
+    def test_register_existing_study_merges_with_single_store_call(self):
+        # register must merge into the existing study via ONE additive upsert_study
+        # transaction; existing admins/sites must be preserved, not clobbered.
         engine = _make_engine({"site-new": "org_a"})
         conn = _FakeConnection(role="org_admin", org="org_a", engine=engine, user="other-admin@example.com")
         with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
             self._module().cmd_register_study(conn, ["register_study", "study1", "--sites", "site-new"])
         assert "error_code" not in conn.last_reply
-        assert "upsert_study" not in store.calls
-        assert store.calls == ["add_study_sites", "add_study_admin"]
+        assert store.calls == ["upsert_study"]
+        assert "site-existing" in store.studies["study1"]["site_orgs"]["org_a"]
         assert "site-new" in store.studies["study1"]["site_orgs"]["org_a"]
+        assert "admin@example.com" in store.studies["study1"]["admins"]
         assert "other-admin@example.com" in store.studies["study1"]["admins"]
 
-    def test_register_existing_study_skips_admin_write_when_caller_already_admin(self):
+    def test_register_existing_study_does_not_duplicate_admin(self):
         engine = _make_engine({"site-new": "org_a"})
         conn = _FakeConnection(role="org_admin", org="org_a", engine=engine, user="admin@example.com")
         with _mutation_ctx(_REGISTRY_WITH_STUDY) as store:
             self._module().cmd_register_study(conn, ["register_study", "study1", "--sites", "site-new"])
         assert "error_code" not in conn.last_reply
-        assert store.calls == ["add_study_sites"]
+        assert store.calls == ["upsert_study"]
         assert store.studies["study1"]["admins"] == ["admin@example.com"]
 
     def test_register_new_study_uses_single_upsert(self):
