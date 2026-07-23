@@ -134,6 +134,7 @@ def validate_config(config: dict[str, Any]) -> None:
             "executables",
             "forward_env",
             "parent_host",
+            "submit_timeout",
             "poll_interval",
             "pending_timeout",
         },
@@ -148,7 +149,7 @@ def _validate_role_config(config: dict[str, Any], role: str) -> None:
         _fail(
             "INVALID_CONFIG",
             "Slurm server kits do not support parent configuration.",
-            "Run the server parent on a stable login/service host and remove parent from slurm.yaml.",
+            "Run the server parent on a stable service host and remove parent from slurm.yaml.",
         )
 
 
@@ -175,6 +176,7 @@ def _normalize_job_launcher(job_launcher: dict[str, Any]) -> dict:
             setup=job_launcher.get("setup"),
             forward_env=job_launcher.get("forward_env"),
             parent_host=job_launcher.get("parent_host"),
+            submit_timeout=job_launcher.get("submit_timeout", 30),
             poll_interval=job_launcher.get("poll_interval", 10),
             pending_timeout=job_launcher.get("pending_timeout", 600),
             require_image_file=True,

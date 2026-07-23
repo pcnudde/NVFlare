@@ -94,7 +94,7 @@ def test_render_template_rejects_unresolved_placeholder(tmp_path, monkeypatch):
 def test_prepare_slurm_generates_runtime_artifacts(tmp_path, capsys):
     kit = _make_client_kit(tmp_path)
     output = tmp_path / "site-1-slurm"
-    config = _slurm_config(tmp_path, internal_port=9210, forward_env=["HTTP_PROXY"])
+    config = _slurm_config(tmp_path, internal_port=9210, forward_env=["HTTP_PROXY"], submit_timeout=47)
 
     _run_prepare(kit, output, config)
     capsys.readouterr()
@@ -117,6 +117,7 @@ def test_prepare_slurm_generates_runtime_artifacts(tmp_path, capsys):
         },
         "forward_env": ["HTTP_PROXY"],
         "parent_host": None,
+        "submit_timeout": 47.0,
         "poll_interval": 10,
         "pending_timeout": 600,
     }
@@ -343,7 +344,10 @@ def test_prepare_slurm_server_relocates_storage_and_rejects_parent(tmp_path, cap
     config["parent"] = {}
     with pytest.raises(SystemExit):
         _run_prepare(kit, tmp_path / "server-parent", config)
-    assert "do not support parent" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "do not support parent" in error
+    assert "stable service host" in error
+    assert "login" not in error
 
     config.pop("parent")
     resources_path = kit / "local" / "resources.json.default"

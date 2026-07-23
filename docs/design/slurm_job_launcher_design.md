@@ -48,7 +48,7 @@ The generated `start_slurm.sh` is an optional convenience wrapper. It sets the r
 parent in the foreground. An external service manager may perform the same operations.
 
 Prepare can also create an optional `parent.slurm` script for running a client parent in a Slurm allocation. Server
-parents run on a service or login host with a stable public endpoint.
+parents run on a stable service host with a stable public endpoint.
 
 The prepare host does not resolve scheduler commands. It preserves optional configured absolute paths in the workspace,
 and generated parent-submission guidance uses `sbatch` from the submission host's `PATH`. After the parent reaches
@@ -113,11 +113,15 @@ Launch proceeds as follows:
 
 1. Resolve one launch plan and reject a duplicate live handle for the same job.
 2. Create the job artifact directory and render its batch and secret-environment files.
-3. Invoke `sbatch --parsable` once with structured arguments and a scrubbed scheduler environment.
+3. Invoke `sbatch --parsable` once with structured arguments, a scrubbed scheduler environment, and the site's
+   `submit_timeout`.
 4. Accept exactly one parsed bare job ID, add its handle to the live-handle map, and return it.
 
 An invocation timeout, exception, or output other than one line matching the Slurm job-ID format fails the launch.
 The manager immediately removes the job's artifacts.
+
+Parent logs associate each accepted Slurm ID and output path with its NVFlare job ID, then record the terminal
+scheduler state and exit status.
 
 An out-of-contract `job-id;cluster` result triggers one best-effort `scancel -M`, a critical log, and an
 infrastructure launch failure.

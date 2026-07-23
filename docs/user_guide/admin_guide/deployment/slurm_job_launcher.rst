@@ -14,7 +14,7 @@ parent.
 The *prepare host* runs ``nvflare deploy prepare``. The optional *submission
 host* runs ``sbatch`` to place a client parent in Slurm. The *runtime parent
 host* runs the CP or SP, and the *compute nodes* run its CJ or SJ allocations.
-A login or service host is a runtime parent host outside a Slurm allocation.
+A service host is a runtime parent host outside a Slurm allocation.
 
 Choose an execution backend with ``job_launcher.sandbox``:
 
@@ -83,7 +83,7 @@ Configure the Site
 ==================
 
 Create ``slurm.yaml`` beside the startup kit. This example runs the parent on a
-login or service host:
+dedicated service host:
 
 .. code-block:: yaml
 
@@ -100,6 +100,7 @@ login or service host:
      setup: |
        source /etc/profile.d/modules.sh
        module load apptainer
+     submit_timeout: 30
      pending_timeout: 600
 
 Important keys are:
@@ -136,6 +137,9 @@ Important keys are:
      - Worker-to-parent port; default ``8102``.
    * - ``poll_interval``
      - Scheduler polling interval; default ``10`` seconds.
+   * - ``submit_timeout``
+     - Maximum time to wait for ``sbatch`` to return a job ID; default ``30``
+       seconds.
    * - ``pending_timeout``
      - Time limit starting at the first observed pending state; default ``600``
        seconds. A job may lower it.
@@ -159,7 +163,7 @@ Run one parent per workspace. Re-running prepare with the same output replaces
 the complete workspace. Stop the parent and preserve required runs, snapshots,
 and server job storage before updating it.
 
-Start a parent on a login or service host:
+Start a parent on a dedicated service host:
 
 .. code-block:: shell
 
@@ -198,8 +202,8 @@ An explicit ``parent_host`` always wins. Otherwise an allocated parent uses
 ``SLURMD_NODENAME``. A parent outside an allocation without ``parent_host``
 cannot launch jobs. NVFlare does not guess or resolve a host name.
 
-Server kits reject ``parent``. Run the server parent on a stable host with a
-stable external NVFlare federation endpoint.
+Server kits reject ``parent``. Run the server parent on a stable service host
+with a stable external NVFlare federation endpoint.
 
 Study Settings
 ==============
@@ -300,8 +304,9 @@ before the Slurm launcher closes launch admission.
 Slurm job names include the first 32 characters of the NVFlare site name and a
 short job hash, so operators can distinguish sites sharing one Slurm user. Job output is
 ``<run-dir>/slurm-<slurm-job-id>.out``. Use ``squeue`` for live state and
-``sacct`` for completed jobs. Preserve the complete workspace and relevant
-scheduler records for investigation.
+``sacct`` for completed jobs. Parent logs record the NVFlare job ID, Slurm job
+ID, job name, output path, terminal state, and exit status. Preserve the
+complete workspace and relevant scheduler records for investigation.
 
 After a parent crash, the launcher does not cancel surviving allocations or
 remove their job artifacts; this matches the Docker and Kubernetes launchers.

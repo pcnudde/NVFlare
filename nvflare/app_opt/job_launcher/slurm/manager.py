@@ -274,13 +274,17 @@ class SlurmJobManager:
                             self._marker(plan.job_id),
                             self.config,
                         ),
-                        _COMMAND_TIMEOUT,
+                        self.config.submit_timeout,
                     )
                 except Exception as e:
-                    raise SlurmLauncherError("sbatch submission failed") from e
+                    raise SlurmLauncherError(
+                        f"sbatch submission failed for NVFlare job '{plan.job_id}' (job_name={job_name})"
+                    ) from e
                 if submission.command.timed_out or not submission.job_id:
                     raise SlurmLauncherError(
-                        f"sbatch did not return a valid job ID: {_command_diagnostic(submission.command)}"
+                        f"sbatch did not return a valid job ID for NVFlare job '{plan.job_id}' "
+                        f"(job_name={job_name}, marker={self._marker(plan.job_id)}): "
+                        f"{_command_diagnostic(submission.command)}"
                     )
                 if submission.cluster:
                     try:
@@ -298,6 +302,14 @@ class SlurmJobManager:
                         outcome,
                     )
                     raise SlurmLauncherError("Slurm multi-cluster routing is unsupported")
+                output_path = os.path.join(plan.run_dir, f"slurm-{submission.job_id}.out")
+                self.logger.info(
+                    "submitted NVFlare job to Slurm: nvflare_job_id=%s slurm_job_id=%s job_name=%s output=%s",
+                    plan.job_id,
+                    submission.job_id,
+                    job_name,
+                    output_path,
+                )
                 handle = SlurmJobHandle(
                     self,
                     plan.job_id,
@@ -360,14 +372,29 @@ class SlurmJobManager:
             if handle.accounting_misses < _HEALTHY_MISSES:
                 return JobReturnCode.UNKNOWN
             self.logger.critical(
-                "Slurm accounting has no record after five healthy retries: job_id=%s",
+                "Slurm accounting has no record after five healthy retries: "
+                "nvflare_job_id=%s slurm_job_id=%s job_name=%s",
+                handle.nvflare_job_id,
                 handle.job_id,
+                handle.job_name,
             )
             return self._finish(handle, ProcessExitCode.EXCEPTION)
         handle.accounting_misses = 0
         record = result.records[0]
         if _is_terminal(record.state):
-            return self._finish(handle, self._result_for(handle, record))
+            mapped_result = self._result_for(handle, record)
+            self.logger.info(
+                "Slurm job reached terminal state: nvflare_job_id=%s slurm_job_id=%s job_name=%s "
+                "state=%s exit_code=%s:%s result=%s",
+                handle.nvflare_job_id,
+                handle.job_id,
+                handle.job_name,
+                record.state,
+                record.exit_status,
+                record.exit_signal,
+                mapped_result,
+            )
+            return self._finish(handle, mapped_result)
         return JobReturnCode.UNKNOWN
 
     def _poll_handle(self, handle: "SlurmJobHandle") -> int:

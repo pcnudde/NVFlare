@@ -194,6 +194,7 @@ class SlurmJobLauncher(JobLauncherSpec):
         setup: str = "",
         forward_env: Optional[list] = None,
         parent_host: Optional[str] = None,
+        submit_timeout: float = 30.0,
         poll_interval: float = 10.0,
         pending_timeout: float = 600.0,
     ):
@@ -213,6 +214,7 @@ class SlurmJobLauncher(JobLauncherSpec):
                 setup=setup,
                 forward_env=forward_env,
                 parent_host=parent_host,
+                submit_timeout=submit_timeout,
                 poll_interval=poll_interval,
                 pending_timeout=pending_timeout,
             ),

@@ -47,7 +47,7 @@ def _workspace(tmp_path):
     return workspace
 
 
-def _launcher(tmp_path, workspace, sandbox="none", image=None, launcher_class=ClientSlurmJobLauncher):
+def _launcher(tmp_path, workspace, sandbox="none", image=None, launcher_class=ClientSlurmJobLauncher, **kwargs):
     return launcher_class(
         workspace_path=str(workspace),
         sandbox=sandbox,
@@ -55,6 +55,7 @@ def _launcher(tmp_path, workspace, sandbox="none", image=None, launcher_class=Cl
         python_path="/usr/bin/python3",
         executables={name: "/usr/bin/true" for name in ("sbatch", "squeue", "sacct", "scancel")},
         parent_host="compute.example",
+        **kwargs,
     )
 
 
@@ -104,6 +105,12 @@ def test_resource_resolution_combines_portable_gpu_total():
 def test_resource_resolution_rejects_invalid_job_policy(spec, message):
     with pytest.raises(SlurmLauncherError, match=message):
         _resolve_resources({}, "site-1", "apptainer", 600, spec=spec)
+
+
+@pytest.mark.parametrize("value", [0, -1, True, float("inf")])
+def test_launcher_rejects_invalid_submit_timeout(tmp_path, value):
+    with pytest.raises(SlurmLauncherError, match="submit_timeout"):
+        _launcher(tmp_path, _workspace(tmp_path), submit_timeout=value)
 
 
 def test_time_value_is_passed_to_slurm_without_custom_grammar():

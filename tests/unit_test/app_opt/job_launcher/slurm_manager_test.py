@@ -76,7 +76,7 @@ class Adapter:
         return value.pop(0) if isinstance(value, list) else value
 
     def submit(self, argv, timeout):
-        self.calls.append(("submit", argv))
+        self.calls.append(("submit", argv, timeout))
         self.submitted_batch = Path(argv[-1]).read_text(encoding="utf-8")
         return self._take(self.submission)
 
@@ -109,22 +109,23 @@ def _record(job_id="42", state="RUNNING", **kwargs):
     return SlurmRecord(job_id, state, **kwargs)
 
 
-def _config(tmp_path):
+def _config(tmp_path, submit_timeout=30):
     return SlurmConfig(
         workspace_path=str(tmp_path),
         sandbox="none",
         python_path="/usr/bin/python3",
         executables={name: f"/usr/bin/{name}" for name in ("sbatch", "squeue", "sacct", "scancel")},
+        submit_timeout=submit_timeout,
         poll_interval=0.01,
         pending_timeout=5,
     )
 
 
-def _manager(tmp_path, adapter=None, monotonic=None):
+def _manager(tmp_path, adapter=None, monotonic=None, submit_timeout=30):
     adapter = adapter or Adapter()
     monotonic = monotonic or Clock()
     manager = SlurmJobManager(
-        _config(tmp_path),
+        _config(tmp_path, submit_timeout),
         logging.getLogger("slurm-manager-test"),
         adapter=adapter,
         monotonic_clock=monotonic,
@@ -337,6 +338,22 @@ def test_job_name_limits_site_name_length():
     assert job_name == f"nvfl-{'s' * 32}-{_job_key('job-1')[:8]}"
 
 
+def test_submission_uses_site_timeout_and_logs_scheduler_identity(tmp_path, caplog):
+    adapter = Adapter()
+    manager = _manager(tmp_path, adapter, submit_timeout=47)
+    plan = _plan(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="slurm-manager-test"):
+        handle = manager.launch(plan)
+
+    submit_call = next(call for call in adapter.calls if call[0] == "submit")
+    assert submit_call[2] == 47
+    output_path = os.path.join(plan.run_dir, "slurm-42.out")
+    assert "nvflare_job_id=job-1" in caplog.text
+    assert "slurm_job_id=42" in caplog.text
+    assert f"output={output_path}" in caplog.text
+
+
 def test_stale_job_artifacts_block_relaunch(tmp_path):
     manager = _manager(tmp_path)
     stale = Path(manager.jobs_dir, _job_key("job-1"))
@@ -460,7 +477,7 @@ def test_handle_monitors_only_its_returned_id_when_job_name_is_shared(tmp_path):
     assert any(f"--name={job_name}" in argv for argv in calls)
 
 
-def test_terminal_accounting_cleans_job_artifacts_and_leaves_generic_rc_file(tmp_path):
+def test_terminal_accounting_cleans_job_artifacts_and_leaves_generic_rc_file(tmp_path, caplog):
     adapter = Adapter()
     adapter.live = _query(LookupStatus.NOT_FOUND)
     adapter.accounting_id = _query(
@@ -471,12 +488,18 @@ def test_terminal_accounting_cleans_job_artifacts_and_leaves_generic_rc_file(tmp
     plan = _plan(tmp_path)
     rc_file = Path(plan.run_dir, FLMetaKey.PROCESS_RC_FILE)
     rc_file.write_text("0\n", encoding="utf-8")
-    handle = manager.launch(plan)
+    with caplog.at_level(logging.INFO, logger="slurm-manager-test"):
+        handle = manager.launch(plan)
+        result = handle.poll()
 
-    assert handle.poll() == JobReturnCode.SUCCESS
+    assert result == JobReturnCode.SUCCESS
     assert not os.path.exists(handle.job_dir)
     assert not manager._handles
     assert rc_file.read_text(encoding="utf-8") == "0\n"
+    assert "Slurm job reached terminal state" in caplog.text
+    assert "state=COMPLETED" in caplog.text
+    assert "exit_code=0:0" in caplog.text
+    assert "result=0" in caplog.text
 
 
 def test_infrastructure_terminal_state_is_an_exception(tmp_path):
