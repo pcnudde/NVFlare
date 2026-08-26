@@ -39,10 +39,8 @@ from nvflare.apis.fl_constant import (
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.fl_exception import NotAuthenticated
 from nvflare.apis.job_def import JobMetaKey, RunStatus
-from nvflare.apis.job_launcher_spec import JobReturnCode
 from nvflare.apis.shareable import Shareable
 from nvflare.apis.workspace import Workspace
-from nvflare.fuel.common.exit_codes import ProcessExitCode
 from nvflare.fuel.f3.cellnet.cell import Cell
 from nvflare.fuel.f3.cellnet.core_cell import Message
 from nvflare.fuel.f3.cellnet.core_cell import make_reply as make_cellnet_reply
@@ -76,6 +74,7 @@ from nvflare.security.logging import secure_format_exception
 from nvflare.widgets.fed_event import ServerFedEventRunner
 
 from .client_manager import ClientManager
+from .job_completion import ClientOutcome, classify_client_outcome
 from .run_manager import RunManager
 from .server_engine import ServerEngine
 from .server_state import ABORT_RUN, ACTION, MESSAGE, NIS, HotState, ServerState
@@ -854,25 +853,15 @@ class FederatedServer(BaseServer):
             return make_cellnet_reply(F3ReturnCode.UNAUTHENTICATED, "", None)
         client_name = registered_client.name
         job_runner = self.engine.job_runner
-        if not job_runner.is_client_outcome_pending(job_id, client_name):
+        outcome = classify_client_outcome(code)
+        with self.engine.new_context() as fl_ctx:
+            accepted = job_runner.record_client_outcome(job_id, client_name, outcome, fl_ctx)
+        if not accepted:
             self.logger.warning(f"Dropped terminal outcome for untracked job/client {job_id}/{client_name}")
             return make_cellnet_reply(F3ReturnCode.OK, "", None)
 
-        if code in (
-            ProcessExitCode.CONFIG_ERROR,
-            ProcessExitCode.EXCEPTION,
-            ProcessExitCode.INFRASTRUCTURE_ERROR,
-            JobReturnCode.ABORTED,
-        ):
-            with self.engine.new_context() as fl_ctx:
-                self.logger.info(f"Failing job {job_id} due to reported failure from {client}: {reason}")
-                failure_code = ProcessExitCode.EXCEPTION if code == ProcessExitCode.CONFIG_ERROR else code
-                job_runner.fail_run(job_id, failure_code, fl_ctx)
-        elif code == ProcessExitCode.UNSAFE_COMPONENT:
-            with self.engine.new_context() as fl_ctx:
-                self.logger.info(f"Aborting job {job_id} due to reported failure from {client}: {reason}")
-                job_runner.stop_run(job_id, fl_ctx)
-        job_runner.resolve_client_outcome(job_id, client_name)
+        if outcome != ClientOutcome.NO_OVERRIDE:
+            self.logger.info(f"Applying {outcome.value} for job {job_id} from {client}: {reason}")
         return make_cellnet_reply(F3ReturnCode.OK, "", None)
 
     def client_heartbeat(self, request: Message) -> Message:
@@ -927,7 +916,10 @@ class FederatedServer(BaseServer):
             client_jobs = []
 
         client_jobs = set(client_jobs)
-        outcome_jobs = self.engine.job_runner.get_client_outcome_jobs()
+        job_runner = self.engine.job_runner
+        outcome_jobs = job_runner.get_client_outcome_jobs()
+        registered_client = self.client_manager.clients.get(client_token)
+        client_outcome_jobs = job_runner.get_client_outcome_jobs(registered_client.name) if registered_client else set()
         # Keep normally completed jobs alive until clients report their outcomes, but do not
         # protect client jobs after the server job has already failed.
         server_jobs = set(self.engine.run_processes.keys()).union(
@@ -969,9 +961,8 @@ class FederatedServer(BaseServer):
                 for job_id in jobs_on_server_but_not_on_client:
                     job_info = self.engine.run_processes.get(job_id)
                     if not job_info:
-                        client = self.client_manager.clients.get(client_token)
-                        if client and self.engine.job_runner.is_client_outcome_pending(job_id, client.name):
-                            missing_outcome_notifications.append((client, job_id))
+                        if registered_client and job_id in client_outcome_jobs:
+                            missing_outcome_notifications.append((registered_client, job_id))
                         continue
 
                     participating_clients = job_info.get(RunProcessKey.PARTICIPANTS, None)
@@ -1004,13 +995,14 @@ class FederatedServer(BaseServer):
 
     def _resolve_missing_client_outcome(self, client, job_id: str, reason: str):
         job_runner = self.engine.job_runner
-        if not job_runner.is_client_outcome_pending(job_id, client.name):
-            return
-        if job_id not in self.engine.run_processes and job_id not in self.engine.exception_run_processes:
-            with self.engine.new_context() as fl_ctx:
-                self.logger.warning(f"Failing job {job_id}: terminal outcome unavailable from {client.name}: {reason}")
-                job_runner.fail_run(job_id, ProcessExitCode.INFRASTRUCTURE_ERROR, fl_ctx)
-        job_runner.resolve_client_outcome(job_id, client.name)
+        server_process_gone = (
+            job_id not in self.engine.run_processes and job_id not in self.engine.exception_run_processes
+        )
+        outcome = ClientOutcome.ABNORMAL if server_process_gone else ClientOutcome.NO_OVERRIDE
+        with self.engine.new_context() as fl_ctx:
+            accepted = job_runner.record_client_outcome(job_id, client.name, outcome, fl_ctx)
+        if accepted and server_process_gone:
+            self.logger.warning(f"Failing job {job_id}: terminal outcome unavailable from {client.name}: {reason}")
 
     def notify_dead_client(self, client):
         """Called to do further processing of the dead client

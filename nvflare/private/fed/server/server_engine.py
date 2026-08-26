@@ -79,6 +79,7 @@ from nvflare.widgets.info_collector import InfoCollector
 from nvflare.widgets.widget import Widget, WidgetID
 
 from .client_manager import ClientManager
+from .job_completion import merge_process_return_code
 from .job_runner import JobRunner
 from .message_send import ClientReply
 from .run_info import RunInfo
@@ -220,16 +221,16 @@ class ServerEngine(ServerEngineInternalSpec, StreamableEngine):
                 # if process exit but with Execution exception
                 if return_code and return_code != 0:
                     self.logger.info(f"Job: {job_id} child process exit with return code {return_code}")
-                    if job_id in self.exception_run_processes:
-                        # An external path (e.g. fail_run from a client failure
-                        # report) has already recorded an authoritative return
-                        # code for this run. Don't let the SJ's secondary exit
-                        # code (e.g. ABORTED from the abort signal we sent)
-                        # overwrite that signal.
-                        pass
-                    else:
-                        run_process_info[RunProcessKey.PROCESS_RETURN_CODE] = return_code
-                        self.exception_run_processes[job_id] = run_process_info
+                    outcome_info = self.exception_run_processes.get(job_id)
+                    outcome_info = outcome_info if outcome_info is not None else run_process_info
+                    existing_code = outcome_info.get(RunProcessKey.PROCESS_RETURN_CODE)
+                    outcome_info[RunProcessKey.PROCESS_RETURN_CODE] = merge_process_return_code(
+                        existing_code,
+                        return_code,
+                        existing_is_authoritative=job_id in self.exception_run_processes,
+                        candidate_is_authoritative=False,
+                    )
+                    self.exception_run_processes[job_id] = outcome_info
                 self.run_processes.pop(job_id, None)
         self.engine_info.status = MachineStatus.STOPPED
 

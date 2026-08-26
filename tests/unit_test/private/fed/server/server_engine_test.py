@@ -265,6 +265,19 @@ def test_wait_for_complete_records_nonzero_return_code_for_first_failure():
     assert "job-1" not in engine.run_processes
 
 
+def test_wait_for_complete_releases_successful_run_to_completion_owner():
+    run_process_info = {RunProcessKey.PARTICIPANTS: {}}
+    engine = _make_wait_engine(run_process_info, {})
+    process = MagicMock()
+
+    with patch("nvflare.private.fed.server.server_engine.get_return_code", return_value=JobReturnCode.SUCCESS):
+        engine.wait_for_complete(workspace="/tmp", job_id="job-1", process=process)
+
+    process.wait.assert_called_once_with()
+    assert engine.exception_run_processes == {}
+    assert "job-1" not in engine.run_processes
+
+
 def _make_remove_engine(run_processes):
     engine = ServerEngine.__new__(ServerEngine)
     engine.lock = threading.Lock()

@@ -24,16 +24,15 @@ class SimulatorParentClientEngine(ClientEngine):
         fl_ctx = self.new_context()
         fl_ctx.set_prop(FLContextKey.SIMULATE_MODE, True, private=True, sticky=True)
 
-        self.client_executor.run_processes[SimulatorConstants.JOB_NAME] = {
-            RunProcessKey.JOB_HANDLE: None,
-            RunProcessKey.STATUS: ClientStatus.STARTED,
+        self.simulator_jobs = {
+            SimulatorConstants.JOB_NAME: {
+                RunProcessKey.JOB_HANDLE: None,
+                RunProcessKey.STATUS: ClientStatus.STARTED,
+            }
         }
 
     def get_all_job_ids(self):
-        jobs = []
-        for job in self.client_executor.run_processes.keys():
-            jobs.append(job)
-        return jobs
+        return list(self.simulator_jobs)
 
     def abort_app(self, job_id: str) -> str:
-        return self.client_executor.run_processes.pop(job_id)
+        return self.simulator_jobs.pop(job_id)
