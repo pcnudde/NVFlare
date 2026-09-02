@@ -39,6 +39,7 @@ __all__ = [
     "register_enum_types",
     "auto_register_enum_types",
     "register_folder",
+    "register_type_alias",
     "num_decomposers",
     "serialize",
     "serialize_stream",
@@ -114,6 +115,22 @@ def register(decomposer: Union[Decomposer, Type[Decomposer]]) -> None:
             _dot_handlers[d] = instance
 
 
+def register_type_alias(alias_type: Type, canonical_type: Type) -> None:
+    """Serialize ``alias_type`` objects with the decomposer registered for ``canonical_type``.
+
+    The wire type stays ``canonical_type``, so a receiver only needs the canonical decomposer.
+    """
+    alias_name = get_class_name(alias_type)
+    canonical_name = get_class_name(canonical_type)
+    decomposer = _decomposers.get(canonical_name)
+    if decomposer is None:
+        raise ValueError(f"canonical type {canonical_name} has no registered decomposer")
+    existing = _decomposers.get(alias_name)
+    if existing is not None and existing is not decomposer:
+        raise ValueError(f"alias type {alias_name} already has a different decomposer")
+    _decomposers[alias_name] = decomposer
+
+
 class Packer:
     def __init__(self, manager: DatumManager):
         self.manager = manager
@@ -153,7 +170,11 @@ class Packer:
             externalizer = Externalizer(self.manager)
             decomposed = externalizer.externalize(decomposed)
 
-        return {FOBS_TYPE: type_name, FOBS_DATA: decomposed, FOBS_DECOMPOSER: get_class_name(type(decomposer))}
+        return {
+            FOBS_TYPE: get_class_name(decomposer.supported_type()),
+            FOBS_DATA: decomposed,
+            FOBS_DECOMPOSER: get_class_name(type(decomposer)),
+        }
 
     def unpack(self, obj: Any) -> Any:
 

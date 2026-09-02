@@ -146,6 +146,14 @@ class FedAvgRecipe(UnifiedFedAvgRecipe):
     ):
         # Store PyTorch-specific model_locator before calling parent
         self._pt_model_locator = model_locator
+        if model_persistor is not None and server_expected_format != ExchangeFormat.PYTORCH:
+            from nvflare.app_opt.pt.safetensors_model_persistor import PTSafetensorsModelPersistor
+
+            if isinstance(model_persistor, PTSafetensorsModelPersistor):
+                raise ValueError(
+                    "PTSafetensorsModelPersistor exchanges PyTorch tensors; "
+                    "set server_expected_format=ExchangeFormat.PYTORCH"
+                )
 
         # Call the unified FedAvgRecipe with PyTorch-specific settings
         super().__init__(

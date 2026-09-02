@@ -20,12 +20,13 @@ from safetensors.torch import load, save
 import nvflare.fuel.utils.fobs.dots as dots
 from nvflare.app_common.utils.tensor_disk_offload_context import _TENSOR_DISK_OFFLOAD_ROOT_DIR
 from nvflare.fuel.f3.streaming.download_service import Downloadable
+from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.fobs import FOBSContextKey
 from nvflare.fuel.utils.fobs.datum import DatumManager
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import ViaDownloaderDecomposer
 
 from ...fuel.f3.cellnet.cell import Cell
-from .lazy_tensor_dict import LazyTensorDict
+from .lazy_tensor_dict import LazyTensorDict, _LazyRef, materialize
 from .tensor_downloader import TensorDownloadable, download_tensors, download_tensors_to_disk
 
 
@@ -121,7 +122,7 @@ class TensorDecomposer(ViaDownloaderDecomposer):
 
     def native_decompose(self, target: torch.Tensor, manager: DatumManager = None) -> bytes:
         # save the tensor to bytes using safetensors
-        dummy = {"t": target}
+        dummy = {"t": materialize(target)}
         return save(dummy)
 
     def native_recompose(self, data: bytes, manager: DatumManager = None) -> torch.Tensor:
@@ -130,3 +131,9 @@ class TensorDecomposer(ViaDownloaderDecomposer):
         if not isinstance(dummy, dict):
             raise ValueError(f"failed to load data: should be dict but got {type(dummy)}")
         return dummy.get("t")
+
+
+def register_tensor_decomposer() -> None:
+    """Register TensorDecomposer and let disk-backed lazy refs travel the wire as plain tensors."""
+    fobs.register(TensorDecomposer)
+    fobs.register_type_alias(_LazyRef, torch.Tensor)

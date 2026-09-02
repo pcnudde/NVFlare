@@ -17,7 +17,7 @@ import time
 from typing import Any, Dict, Optional, Set, Union
 
 from nvflare.apis.fl_constant import FLMetaKey
-from nvflare.app_common.abstract.fl_model import FLModel
+from nvflare.app_common.abstract.fl_model import FLModel, ParamsType
 from nvflare.app_common.aggregators.model_aggregator import ModelAggregator
 from nvflare.app_common.aggregators.weighted_aggregation_helper import (
     AggregationStatsKey,
@@ -88,9 +88,12 @@ class FedAvg(BaseFedAvg):
         aggregation_weights (dict, optional): Per-client aggregation weights.
             Defaults to None (equal weights). Only used when no custom aggregator is provided.
         enable_tensor_disk_offload (bool, optional): Download tensors to disk during FOBS streaming
-            instead of deserializing into memory. Reduces peak server memory from ~N× to ~1×
-            model size during aggregation. When used with a custom aggregator, lazy refs are
-            passed through directly and must be handled by that aggregator. Defaults to False.
+            instead of deserializing into memory. Built-in aggregation then works one tensor at a
+            time and keeps the aggregated model on disk as well, so server memory scales with the
+            largest tensor instead of the model. Combine with a persistor that loads lazily, such as
+            PTSafetensorsModelPersistor, to also avoid holding the initial and saved model in memory.
+            When used with a custom aggregator, lazy refs are passed through directly and must be
+            handled by that aggregator. Defaults to False.
         fedprox_mu (float or None, optional): Positive FedProx proximal coefficient sent to
             compatible clients. ``None`` or ``0.0`` disables FedProx. Defaults to None.
     """
@@ -143,6 +146,7 @@ class FedAvg(BaseFedAvg):
         # InTime aggregation helpers (reset each round, used only when no custom aggregator)
         self._aggr_helper: Optional[WeightedAggregationHelper] = None
         self._aggr_metrics_helper: Optional[WeightedAggregationHelper] = None
+        self._lazy_aggregation: bool = False  # built-in aggregation over disk-backed tensors
         self._all_metrics: bool = True
         self._warned_metric_keys: Set[str] = set()  # warn at most once per key (across clients/rounds)
         self._received_count: int = 0
@@ -163,6 +167,7 @@ class FedAvg(BaseFedAvg):
                     "enable_tensor_disk_offload=True but no active cell is available; "
                     "falling back to in-memory tensor download"
                 )
+            self._lazy_aggregation = disk_offload_context.applied
 
             self.info(center_message("Start FedAvg."))
 
@@ -202,7 +207,7 @@ class FedAvg(BaseFedAvg):
                     self.aggregator.reset_stats()
                 else:
                     # Use built-in InTime aggregation
-                    self._aggr_helper = WeightedAggregationHelper(exclude_vars=self.exclude_vars)
+                    self._aggr_helper = self._create_aggregation_helper(model, disk_offload_context)
                     self._aggr_metrics_helper = WeightedAggregationHelper()
                     self._all_metrics = True  # Only used by built-in aggregation
                 # Shared state for both aggregator types
@@ -265,6 +270,21 @@ class FedAvg(BaseFedAvg):
         finally:
             cleanup_tensor_disk_offload(engine=getattr(self, "engine", None), context=disk_offload_context)
 
+    def _create_aggregation_helper(self, model: FLModel, disk_offload_context) -> WeightedAggregationHelper:
+        if not disk_offload_context.applied:
+            return WeightedAggregationHelper(exclude_vars=self.exclude_vars)
+
+        # Client tensors arrive as disk-backed refs. Aggregate them one tensor at a time and keep
+        # the aggregate on disk under the offload root, so server memory does not scale with the model.
+        from nvflare.app_opt.pt.lazy_aggregation import LazyWeightedAggregationHelper
+
+        return LazyWeightedAggregationHelper(
+            spill_dir=disk_offload_context.root_dir,
+            exclude_vars=self.exclude_vars,
+            base_model=model.params,
+            abort_signal=self.abort_signal,
+        )
+
     def _aggregate_one_result(self, result: FLModel) -> bool:
         """Callback: aggregate ONE client result immediately (InTime aggregation)."""
         if not result.params:
@@ -281,7 +301,8 @@ class FedAvg(BaseFedAvg):
             # Use custom aggregator
             self.aggregator.accept_model(result)
         else:
-            # Built-in InTime aggregation: add() materializes lazy refs on-demand.
+            # Built-in InTime aggregation: the in-memory helper materializes lazy refs in add();
+            # the lazy helper records them and materializes one tensor at a time in get_result().
             # Cleanup relies on lazy ref object lifetime / GC.
             # Get weight: use aggregation_weights if specified, else use NUM_STEPS
             if self.aggregation_weights and client_name in self.aggregation_weights:
@@ -348,13 +369,19 @@ class FedAvg(BaseFedAvg):
             if self.fl_ctx:
                 self.fl_ctx.set_prop(AppConstants.AGGREGATION_STATS, aggr_stats, private=True, sticky=False)
 
-            aggr_params = self._aggr_helper.get_result()
+            if self._lazy_aggregation and self._params_type is not None:
+                # The lazy helper applies DIFF updates to the base model itself and returns a full model.
+                aggr_params = self._aggr_helper.get_result(params_type=self._params_type)
+                params_type = ParamsType.FULL
+            else:
+                aggr_params = self._aggr_helper.get_result()
+                params_type = self._params_type
             aggr_metrics = self._aggr_metrics_helper.get_result() if self._all_metrics else None
             aggr_metrics = aggr_metrics or None
 
             return FLModel(
                 params=aggr_params,
-                params_type=self._params_type,
+                params_type=params_type,
                 metrics=aggr_metrics,
                 current_round=self.current_round,
                 meta={

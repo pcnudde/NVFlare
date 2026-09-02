@@ -30,7 +30,7 @@ from nvflare.fuel.f3.streaming.download_service import download_object
 from nvflare.fuel.f3.streaming.obj_downloader import ObjectDownloader
 from nvflare.fuel.f3.streaming.stream_utils import stream_thread_pool
 
-from .lazy_tensor_dict import LazyTensorDict, _cleanup_temp_dir
+from .lazy_tensor_dict import LazyTensorDict, _cleanup_temp_dir, is_lazy_tensor, materialize
 
 _TWO_MB = 2 * 1024 * 1024
 _ACTIVE_DISK_TENSOR_CONSUMERS = weakref.WeakSet()
@@ -52,15 +52,24 @@ def cleanup_active_disk_tensor_downloads(reason: str = "download aborted", root_
             consumer.download_failed("active_disk_tensor_download", reason)
 
 
-class TensorDownloadable(CacheableObject):
+def _serialize_item(key: str, value) -> bytes:
+    return save_tensors({key: materialize(value)})
 
-    def __init__(self, tensors: dict[str, torch.Tensor], max_chunk_size: int):
+
+class TensorDownloadable(CacheableObject):
+    """Downloadable over a dict of tensors or disk-backed lazy tensor refs."""
+
+    def __init__(self, tensors: dict, max_chunk_size: int):
         self.size = len(tensors)
         self.keys = list(tensors.keys())
         self._prefetch_lock = threading.Lock()
         self._prefetch_futures = {}
         self._released = False
         super().__init__(tensors, max_chunk_size)
+        if any(is_lazy_tensor(value) for value in tensors.values()):
+            # Lazy refs are re-read from disk for each receiver. A shared chunk cache would
+            # otherwise grow toward the model size when receivers progress at different speeds.
+            self.clear_cache()
 
     def get_item_count(self) -> int:
         return self.size
@@ -74,7 +83,7 @@ class TensorDownloadable(CacheableObject):
         base_obj = self.base_obj
         if base_obj is None:
             raise RuntimeError(f"item {index} requested after tensors were released")
-        return save_tensors({key: base_obj[key]})
+        return _serialize_item(key, base_obj[key])
 
     def prefetch_item(self, index: int):
         with self._prefetch_lock:
@@ -84,8 +93,7 @@ class TensorDownloadable(CacheableObject):
             if base_obj is None:
                 return
             key = self.keys[index]
-            tensor = base_obj[key]
-            future = stream_thread_pool.submit(save_tensors, {key: tensor})
+            future = stream_thread_pool.submit(_serialize_item, key, base_obj[key])
             if future:
                 self._prefetch_futures[index] = future
 
@@ -93,8 +101,11 @@ class TensorDownloadable(CacheableObject):
         base_obj = self.base_obj
         if base_obj is None:
             return None
-        tensor = base_obj[self.keys[index]]
-        return tensor.numel() * tensor.element_size()
+        value = base_obj[self.keys[index]]
+        if isinstance(value, torch.Tensor):
+            return value.numel() * value.element_size()
+        get_metadata = getattr(value, "get_metadata", None)
+        return get_metadata().nbytes if callable(get_metadata) else None
 
     def release(self):
         with self._prefetch_lock:

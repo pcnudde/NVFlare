@@ -27,6 +27,12 @@ from nvflare.app_common.app_constant import ModelFormat
 from nvflare.app_opt.pt.utils import inspect_model_params
 
 
+def _materialize(value):
+    """Load a disk-backed lazy tensor ref into memory; other values pass through."""
+    materialize_fn = getattr(value, "materialize", None)
+    return materialize_fn() if callable(materialize_fn) else value
+
+
 class PTModelPersistenceFormatManager(object):
 
     PERSISTENCE_KEY_MODEL = "model"
@@ -158,7 +164,7 @@ class PTModelPersistenceFormatManager(object):
 
         # update with value of the model learnable
         # note that the original weights that are not learned are still kept!
-        learned_weights = ml.get(ModelLearnableKey.WEIGHTS, {})
+        learned_weights = {k: _materialize(v) for k, v in (ml.get(ModelLearnableKey.WEIGHTS) or {}).items()}
         if learned_weights and not self.var_dict:
             self._update_var_dict(learned_weights)
             return

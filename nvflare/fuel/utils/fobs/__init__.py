@@ -23,6 +23,7 @@ from nvflare.fuel.utils.fobs.fobs import (
     register_data_classes,
     register_enum_types,
     register_folder,
+    register_type_alias,
     reset,
     serialize,
     serialize_stream,

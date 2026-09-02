@@ -234,7 +234,11 @@ class FLModelUtils:
             model.params = model_update.params
         elif model_update.params_type == ParamsType.DIFF:
             for v_name, v_value in model_update.params.items():
-                model.params[v_name] = model.params[v_name] + v_value
+                base = model.params[v_name]
+                materialize_fn = getattr(base, "materialize", None)
+                if callable(materialize_fn):
+                    base = materialize_fn()
+                model.params[v_name] = base + v_value
         else:
             raise RuntimeError(f"params_type {model_update.params_type} of `model_update` not supported!")
         return model

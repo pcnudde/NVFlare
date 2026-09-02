@@ -18,10 +18,15 @@ Note: Deep copy protection is now handled at broadcast level in WFCommServer,
 not in TensorDownloadable itself. These tests verify the Downloadable's basic behavior.
 """
 
+import threading
+from types import SimpleNamespace
+
 import pytest
 import torch
 from safetensors.torch import load as load_tensors
+from safetensors.torch import save_file
 
+from nvflare.app_opt.pt.lazy_tensor_dict import safetensors_refs
 from nvflare.app_opt.pt.tensor_downloader import TensorDownloadable
 from nvflare.fuel.f3.streaming.download_service import ProduceRC
 
@@ -120,3 +125,48 @@ class TestTensorDownloadableBasic:
         assert downloadable.get_item_size(0) is None
         with pytest.raises(RuntimeError, match="released"):
             downloadable.produce_item(0)
+
+    def test_lazy_refs_are_materialized_per_item_and_batched_without_a_cache(self, tmp_path):
+        tensors = {"a": torch.arange(4.0), "b": torch.ones(2)}
+        save_file(tensors, tmp_path / "model.safetensors")
+        downloadable = TensorDownloadable(
+            tensors=safetensors_refs(str(tmp_path / "model.safetensors")), max_chunk_size=1024
+        )
+
+        assert downloadable.cache is None
+        assert downloadable.get_item_size(0) == 16
+        rc, items, _ = downloadable.produce({}, "receiver")
+
+        assert rc == ProduceRC.OK
+        assert len(items) == 2
+        assert torch.equal(load_tensors(items[0])["a"], tensors["a"])
+        assert torch.equal(load_tensors(items[1])["b"], tensors["b"])
+        downloadable.release()
+
+    def test_lazy_refs_serve_concurrent_receivers_without_serializing_them(self):
+        barrier = threading.Barrier(2)
+
+        class Ref:
+            def materialize(self):
+                barrier.wait(timeout=2.0)
+                return torch.tensor([1.0])
+
+            def get_metadata(self):
+                return SimpleNamespace(nbytes=4)
+
+        downloadable = TensorDownloadable({"only": Ref()}, max_chunk_size=1)
+        results = []
+        threads = [
+            threading.Thread(target=lambda client=client: results.append(downloadable.produce({}, client)))
+            for client in ("site-1", "site-2")
+        ]
+
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=3.0)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert len(results) == 2
+        assert all(rc == ProduceRC.OK and len(items) == 1 for rc, items, _ in results)
+        downloadable.release()

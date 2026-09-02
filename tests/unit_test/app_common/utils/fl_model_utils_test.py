@@ -98,3 +98,15 @@ class TestFLModelUtils:
         assert dxo.data[FLModelConst.PARAMS_TYPE] == ParamsType.FULL
         assert dxo.data[FLModelConst.CURRENT_ROUND] == current_round
         assert dxo.data[FLModelConst.TOTAL_ROUNDS] == num_rounds
+
+    def test_update_model_applies_diff_to_lazy_base_values(self):
+        class LazyValue:
+            def materialize(self):
+                return 10.0
+
+        model = FLModel(params={"w": LazyValue(), "b": 1.0}, params_type=ParamsType.FULL)
+        update = FLModel(params={"w": 2.5}, params_type=ParamsType.DIFF)
+
+        updated = FLModelUtils.update_model(model, update)
+
+        assert updated.params == {"w": 12.5, "b": 1.0}
