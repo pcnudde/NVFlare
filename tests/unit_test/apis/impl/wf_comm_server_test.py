@@ -14,12 +14,16 @@
 
 from unittest.mock import Mock
 
+import numpy as np
+
 from nvflare.apis.client import Client
+from nvflare.apis.controller_spec import Task, TaskPropKey
 from nvflare.apis.fl_constant import FLContextKey
 from nvflare.apis.fl_context import FLContextManager
-from nvflare.apis.impl.wf_comm_server import WFCommServer, _DeadClientStatus
+from nvflare.apis.impl.wf_comm_server import WFCommServer, _copy_broadcast_data, _DeadClientStatus
 from nvflare.apis.job_def import JobMetaKey
 from nvflare.apis.server_engine_spec import ServerEngineSpec
+from nvflare.apis.shareable import Shareable
 
 
 def _make_wf_comm(clients, dead_names, min_sites=1, required_sites=None):
@@ -50,6 +54,39 @@ def _make_wf_comm(clients, dead_names, min_sites=1, required_sites=None):
         status.disconnect_time = 1.0  # non-None → deemed disconnected
         wf._dead_clients[name] = status
     return wf
+
+
+def _broadcast_task(immutable_storage: bool) -> Task:
+    data = Shareable()
+    data["weights"] = {"w": np.arange(4.0), "nested": [np.ones(2)]}
+    data["round"] = 3
+    props = {TaskPropKey.IMMUTABLE_DATA_STORAGE: True} if immutable_storage else None
+    return Task(name="train", data=data, props=props)
+
+
+class TestBroadcastDataCopy:
+    def test_default_deep_copies_arrays(self):
+        task = _broadcast_task(immutable_storage=False)
+
+        snapshot = _copy_broadcast_data(task)
+
+        assert snapshot is not task.data
+        assert snapshot["weights"]["w"] is not task.data["weights"]["w"]
+        np.testing.assert_array_equal(snapshot["weights"]["w"], task.data["weights"]["w"])
+
+    def test_immutable_storage_shares_arrays_but_copies_containers(self):
+        task = _broadcast_task(immutable_storage=True)
+
+        snapshot = _copy_broadcast_data(task)
+
+        assert snapshot is not task.data
+        assert snapshot["weights"] is not task.data["weights"]
+        assert snapshot["weights"]["w"] is task.data["weights"]["w"]
+        assert snapshot["weights"]["nested"][0] is task.data["weights"]["nested"][0]
+        assert snapshot["round"] == 3
+
+        snapshot["weights"].pop("w")  # a per-client filter changing the shared snapshot
+        assert "w" in task.data["weights"]
 
 
 class TestJobPolicyViolated:

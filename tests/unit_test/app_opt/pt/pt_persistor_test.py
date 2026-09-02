@@ -101,6 +101,64 @@ class _PersistenceManager:
         return self.persistence_dict
 
 
+def _fl_ctx(tmp_path):
+    from nvflare.apis.fl_constant import FLContextKey
+    from nvflare.apis.fl_context import FLContext
+
+    fl_ctx = FLContext()
+    fl_ctx.set_prop(FLContextKey.APP_ROOT, str(tmp_path), private=True, sticky=False)
+    return fl_ctx
+
+
+class TestPTFileModelPersistorLoad:
+    def test_load_releases_the_model_after_capturing_its_state(self, tmp_path):
+        import torch
+        from torch import nn
+
+        from nvflare.apis.event_type import EventType
+        from nvflare.app_common.abstract.model import ModelLearnableKey
+        from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
+
+        model = nn.Linear(2, 1)
+        expected = {key: value.detach().clone() for key, value in model.state_dict().items()}
+        persistor = PTFileModelPersistor(model=model, allow_numpy_conversion=False)
+        fl_ctx = _fl_ctx(tmp_path)
+        persistor.handle_event(EventType.START_RUN, fl_ctx)
+
+        weights = persistor.load_model(fl_ctx)[ModelLearnableKey.WEIGHTS]
+
+        assert persistor.model is None
+        assert persistor.default_train_conf == {"train": {"model": "Linear"}}
+        assert all(torch.equal(weights[key], expected[key]) for key in expected)
+        # A second load serves the persisted state instead of an empty model.
+        assert set(persistor.load_model(fl_ctx)[ModelLearnableKey.WEIGHTS]) == set(expected)
+
+    def test_dict_config_with_checkpoint_does_not_instantiate_the_model(self, tmp_path, monkeypatch):
+        import torch
+
+        import nvflare.fuel.utils.class_utils as class_utils
+        from nvflare.apis.event_type import EventType
+        from nvflare.app_common.abstract.model import ModelLearnableKey
+        from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
+
+        torch.save({"weight": torch.ones(1, 2), "bias": torch.zeros(1)}, tmp_path / "init.pt")
+        monkeypatch.setattr(class_utils, "instantiate_class", lambda *args, **kwargs: pytest.fail("instantiated"))
+        persistor = PTFileModelPersistor(
+            model={"path": "torch.nn.Linear", "args": {"in_features": 2, "out_features": 1}},
+            source_ckpt_file_full_name=str(tmp_path / "init.pt"),
+            allow_numpy_conversion=False,
+            load_device="cpu",
+        )
+        fl_ctx = _fl_ctx(tmp_path)
+        persistor.handle_event(EventType.START_RUN, fl_ctx)
+
+        weights = persistor.load_model(fl_ctx)[ModelLearnableKey.WEIGHTS]
+
+        assert persistor.model is None
+        assert persistor.default_train_conf == {"train": {"model": "Linear"}}
+        assert torch.equal(weights["weight"], torch.ones(1, 2))
+
+
 class TestPTFileModelPersistorSave:
     def test_partial_save_failures_preserve_checkpoint_and_clean_unique_temp_files(self, tmp_path, monkeypatch):
         import torch

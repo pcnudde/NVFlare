@@ -201,6 +201,21 @@ its in-memory state dict, so existing `enable_tensor_disk_offload` jobs keep wor
 model-sized copy at save time. `FLModelUtils.update_model` likewise materializes a lazy base value
 when applying an in-memory DIFF.
 
+### Fewer Copies on the In-Memory Path
+
+Two model-sized copies that did not depend on offload are gone as well:
+
+- `WFCommServer` deep-copied `task.data` once per broadcast so that clients still downloading were not
+  affected by controllers that modify the payload in place after early aggregation (PR #4100). FedAvg
+  waits for every client task before `update_model()` and never updates tensor storage in place, so it
+  sets `TaskPropKey.IMMUTABLE_DATA_STORAGE` on its tasks. The communicator then copies only the
+  containers and shares tensor and array storage. Other controllers keep the full copy; a FedAvg
+  subclass that mutates the global model in place while clients are still downloading must set
+  `immutable_task_data_storage = False`.
+- `PTFileModelPersistor` releases the `nn.Module` after capturing its state dict, and no longer
+  instantiates a dict-configured model when a checkpoint supplies the weights. The module's parameters
+  were otherwise kept alive for the whole job after the first aggregation replaced them.
+
 ### Configuration
 
 ```python

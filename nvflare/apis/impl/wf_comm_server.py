@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
 import threading
 import time
 from collections import OrderedDict
@@ -18,7 +19,7 @@ from threading import Lock
 from typing import List, Optional, Tuple, Union
 
 from nvflare.apis.client import Client
-from nvflare.apis.controller_spec import ClientTask, SendOrder, Task, TaskCompletionStatus
+from nvflare.apis.controller_spec import ClientTask, SendOrder, Task, TaskCompletionStatus, TaskPropKey
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_component import FLComponent
 from nvflare.apis.fl_constant import ConfigVarName, FLContextKey, SystemConfigs
@@ -49,6 +50,39 @@ def _check_positive_int(name, value):
         raise TypeError("{} must be an instance of int, but got {}.".format(name, type(name)))
     if value < 0:
         raise ValueError("{} must >= 0.".format(name))
+
+
+def _share_storage(value, memo: dict, seen: set) -> None:
+    """Pre-seed a deepcopy memo so tensors and arrays are shared instead of copied."""
+    if id(value) in seen:
+        return
+    seen.add(id(value))
+    if isinstance(value, dict):
+        for item in value.values():
+            _share_storage(item, memo, seen)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _share_storage(item, memo, seen)
+    elif hasattr(value, "shape") and hasattr(value, "dtype"):
+        memo[id(value)] = value
+    elif hasattr(value, "__dict__"):
+        for item in vars(value).values():
+            _share_storage(item, memo, seen)
+
+
+def _copy_broadcast_data(task: Task) -> Shareable:
+    """Snapshot task.data once per broadcast.
+
+    The snapshot protects clients that are still downloading when the controller aggregates early and
+    modifies the payload in place. A controller that sets TaskPropKey.IMMUTABLE_DATA_STORAGE promises not
+    to modify tensor or array storage while the task is active, so only the containers are copied and the
+    storage is shared, which avoids a second model-sized copy for large models.
+    """
+    if not task.props.get(TaskPropKey.IMMUTABLE_DATA_STORAGE):
+        return copy.deepcopy(task.data)
+    memo = {}
+    _share_storage(task.data, memo, set())
+    return copy.deepcopy(task.data, memo)
 
 
 def _check_inputs(task: Task, fl_ctx: FLContext, targets: Union[List[Client], List[str], None]):
@@ -308,10 +342,8 @@ class WFCommServer(FLComponent, WFCommSpec):
             if not hasattr(task, "_broadcast_data"):
                 manager = task.props.get(_TASK_KEY_MANAGER)
                 if isinstance(manager, (BcastTaskManager, BcastForeverTaskManager)):
-                    import copy
-
                     try:
-                        task._broadcast_data = copy.deepcopy(task.data)
+                        task._broadcast_data = _copy_broadcast_data(task)
                     except Exception as e:
                         self.log_error(
                             fl_ctx,

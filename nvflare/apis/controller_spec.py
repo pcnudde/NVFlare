@@ -64,6 +64,13 @@ class OperatorConfigKey:
     OPERATORS = "operators"
 
 
+class TaskPropKey:
+    # Set to True by a controller that never modifies the storage of the tensors or arrays in task.data
+    # while the task is active. The communicator then shares that storage with all clients of a broadcast
+    # instead of deep-copying the payload; only the containers are copied.
+    IMMUTABLE_DATA_STORAGE = "__immutable_data_storage__"
+
+
 class Task:
     def __init__(
         self,

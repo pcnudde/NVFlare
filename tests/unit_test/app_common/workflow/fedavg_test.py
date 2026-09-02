@@ -20,7 +20,7 @@ import pytest
 
 import nvflare.app_common.utils.tensor_disk_offload_context as tensor_disk_offload_context_module
 from nvflare.apis.client import Client
-from nvflare.apis.controller_spec import ClientTask, Task
+from nvflare.apis.controller_spec import ClientTask, Task, TaskPropKey
 from nvflare.apis.fl_constant import FLMetaKey, ReservedKey
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.shareable import Shareable
@@ -2308,3 +2308,18 @@ class TestBaseFedAvgMemoryManagement:
         # Can be customized
         controller2 = CyclicController(memory_gc_rounds=3)
         assert controller2._memory_gc_rounds == 3
+
+
+class TestFedAvgBroadcastData:
+    @staticmethod
+    def _task(controller):
+        model = FLModel(params={"w": np.ones(2)}, params_type=ParamsType.FULL, current_round=0)
+        return controller._prepare_task(data=model, task_name="train", timeout=0, callback=None)
+
+    def test_fedavg_lets_the_communicator_share_task_data_storage(self):
+        task = self._task(FedAvg(num_clients=1))
+        assert task.props[TaskPropKey.IMMUTABLE_DATA_STORAGE] is True
+
+    def test_model_controllers_keep_the_broadcast_copy_by_default(self):
+        task = self._task(_TestBaseFedAvg(num_clients=1))
+        assert task.props[TaskPropKey.IMMUTABLE_DATA_STORAGE] is False

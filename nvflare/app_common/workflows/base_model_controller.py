@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from typing import Callable, List, Optional, Union
 
 from nvflare.apis.client import Client
-from nvflare.apis.controller_spec import ClientTask, OperatorMethod, Task, TaskOperatorKey
+from nvflare.apis.controller_spec import ClientTask, OperatorMethod, Task, TaskOperatorKey, TaskPropKey
 from nvflare.apis.fl_constant import ReturnCode
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.impl.controller import Controller
@@ -36,6 +36,11 @@ from nvflare.security.logging import secure_format_exception
 
 
 class BaseModelController(Controller, FLComponentWrapper, ABC):
+    # True only for controllers that never modify the storage of the tensors or arrays they send while a
+    # task is active. The communicator then shares that storage with all clients instead of deep-copying
+    # the model for every broadcast.
+    immutable_task_data_storage: bool = False
+
     def __init__(
         self,
         persistor_id: str = AppConstants.DEFAULT_PERSISTOR_ID,
@@ -214,7 +219,11 @@ class BaseModelController(Controller, FLComponentWrapper, ABC):
             name=task_name,
             data=data_shareable,
             operator=operator,
-            props={AppConstants.TASK_PROP_CALLBACK: callback, AppConstants.META_DATA: data.meta},
+            props={
+                AppConstants.TASK_PROP_CALLBACK: callback,
+                AppConstants.META_DATA: data.meta,
+                TaskPropKey.IMMUTABLE_DATA_STORAGE: self.immutable_task_data_storage,
+            },
             timeout=timeout,
             before_task_sent_cb=self._prepare_task_data,
             result_received_cb=self._process_result,

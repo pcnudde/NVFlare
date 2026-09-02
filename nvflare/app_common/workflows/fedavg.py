@@ -98,6 +98,10 @@ class FedAvg(BaseFedAvg):
             compatible clients. ``None`` or ``0.0`` disables FedProx. Defaults to None.
     """
 
+    # run() waits for every client task before update_model(), and update_model() never modifies tensor
+    # storage in place, so the model sent to clients can be shared instead of deep-copied per broadcast.
+    immutable_task_data_storage = True
+
     def __init__(
         self,
         *args,
