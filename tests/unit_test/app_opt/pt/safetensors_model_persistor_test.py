@@ -39,10 +39,6 @@ def _write_hf_checkpoint(path, tensors):
     (path / "model.safetensors.index.json").write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
 
 
-def _materialized(weights):
-    return {key: ref.materialize() for key, ref in weights.items()}
-
-
 @pytest.fixture
 def fl_ctx(tmp_path):
     ctx = FLContext()
@@ -186,7 +182,4 @@ def test_log_dir_is_created_below_app_root(tmp_path, fl_ctx):
 
     persistor.save_model(make_model_learnable({"w": torch.ones(1)}, {}), fl_ctx)
 
-    assert (
-        _materialized(safetensors_refs(str(tmp_path / "app" / "models" / "FL_global_model.safetensors")))["w"].item()
-        == 1.0
-    )
+    assert torch.equal(load_file(tmp_path / "app" / "models" / "FL_global_model.safetensors")["w"], torch.ones(1))

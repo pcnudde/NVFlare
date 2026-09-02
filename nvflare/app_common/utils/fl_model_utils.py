@@ -21,6 +21,7 @@ from nvflare.apis.shareable import Shareable
 from nvflare.app_common.abstract.fl_model import FLModel, FLModelConst, MetaKey, ParamsType
 from nvflare.app_common.abstract.model import ModelLearnable, ModelLearnableKey, make_model_learnable
 from nvflare.app_common.app_constant import AppConstants
+from nvflare.app_common.utils.lazy_value import materialize_if_lazy
 from nvflare.fuel.utils.validation_utils import check_object_type
 
 MODEL_ATTRS = [
@@ -234,11 +235,7 @@ class FLModelUtils:
             model.params = model_update.params
         elif model_update.params_type == ParamsType.DIFF:
             for v_name, v_value in model_update.params.items():
-                base = model.params[v_name]
-                materialize_fn = getattr(base, "materialize", None)
-                if callable(materialize_fn):
-                    base = materialize_fn()
-                model.params[v_name] = base + v_value
+                model.params[v_name] = materialize_if_lazy(model.params[v_name]) + v_value
         else:
             raise RuntimeError(f"params_type {model_update.params_type} of `model_update` not supported!")
         return model

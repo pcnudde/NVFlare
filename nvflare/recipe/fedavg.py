@@ -348,6 +348,12 @@ class FedAvgRecipe(Recipe):
                 UserWarning,
                 stacklevel=2,
             )
+        required_format = getattr(self.model_persistor, "required_exchange_format", None)
+        if required_format is not None and self.server_expected_format != required_format:
+            raise ValueError(
+                f"{type(self.model_persistor).__name__} requires server_expected_format={required_format!r}, "
+                f"got {self.server_expected_format!r}"
+            )
 
         # Validate that we have at least one model source
         # Note: Subclasses (e.g., sklearn) that manage models differently should pass

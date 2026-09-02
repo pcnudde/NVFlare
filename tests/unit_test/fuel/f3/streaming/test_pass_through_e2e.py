@@ -63,6 +63,7 @@ import pytest
 
 from nvflare.fuel.f3.cellnet.cell import Cell
 from nvflare.fuel.f3.cellnet.core_cell import CoreCell
+from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.fobs import FOBSContextKey, dots
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import LazyDownloadRef, _RefKey
 from nvflare.fuel.utils.fobs.lobs import dump_to_bytes, load_from_bytes
@@ -296,7 +297,7 @@ class TestPassThroughE2E:
         import torch
         from safetensors.torch import save_file
 
-        from nvflare.app_opt.pt.decomposers import register_tensor_decomposer
+        from nvflare.app_opt.pt.decomposers import TensorDecomposer
         from nvflare.app_opt.pt.lazy_tensor_dict import safetensors_refs
 
         server, subproc = cells
@@ -304,7 +305,7 @@ class TestPassThroughE2E:
         save_file({"weight": expected}, tmp_path / "weight.safetensors")
         ref = safetensors_refs(str(tmp_path / "weight.safetensors"))["weight"]
 
-        register_tensor_decomposer()
+        fobs.register(TensorDecomposer)
         server_bytes = dump_to_bytes({"weight": ref}, fobs_ctx={FOBSContextKey.CELL: server})
 
         cj_result, forwarded_bytes = _simulate_cj_pass_through(server_bytes)

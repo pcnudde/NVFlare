@@ -24,13 +24,8 @@ from nvflare.app_common.abstract.model import (
     validate_model_learnable,
 )
 from nvflare.app_common.app_constant import ModelFormat
+from nvflare.app_common.utils.lazy_value import materialize_if_lazy
 from nvflare.app_opt.pt.utils import inspect_model_params
-
-
-def _materialize(value):
-    """Load a disk-backed lazy tensor ref into memory; other values pass through."""
-    materialize_fn = getattr(value, "materialize", None)
-    return materialize_fn() if callable(materialize_fn) else value
 
 
 class PTModelPersistenceFormatManager(object):
@@ -134,8 +129,9 @@ class PTModelPersistenceFormatManager(object):
         return persistence_dict
 
     def _update_var_dict(self, learned_weights: dict):
+        # Disk-backed refs are loaded one at a time, so only one model copy is in memory at any point.
         for k, v in learned_weights.items():
-            self.var_dict[k] = v
+            self.var_dict[k] = materialize_if_lazy(v)
 
     def update(self, ml: ModelLearnable):
         """Update the persistence data with the learned values.
@@ -164,7 +160,7 @@ class PTModelPersistenceFormatManager(object):
 
         # update with value of the model learnable
         # note that the original weights that are not learned are still kept!
-        learned_weights = {k: _materialize(v) for k, v in (ml.get(ModelLearnableKey.WEIGHTS) or {}).items()}
+        learned_weights = ml.get(ModelLearnableKey.WEIGHTS, {})
         if learned_weights and not self.var_dict:
             self._update_var_dict(learned_weights)
             return

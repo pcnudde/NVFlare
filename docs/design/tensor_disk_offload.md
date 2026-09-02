@@ -174,8 +174,8 @@ therefore works on lazy refs end to end (`nvflare/app_opt/pt/lazy_aggregation.py
 - Custom aggregators are unaffected and still receive refs.
 
 Once an aggregate exists the global model is a dict of refs. Outbound task data is serialized by
-`TensorDecomposer` through the FOBS type alias `_LazyRef -> torch.Tensor`
-(`fobs.register_type_alias`), so `TensorDownloadable` materializes one tensor per item while
+`TensorDecomposer`, which declares `_LazyRef` as an alias of `torch.Tensor`
+(`Decomposer.supported_aliases`), so `TensorDownloadable` materializes one tensor per item while
 producing chunks, keeps normal chunk batching, and disables its cross-receiver chunk cache for
 ref-backed payloads. A deep copy of a ref is a ref. The wire format and the clients are unchanged.
 
@@ -208,13 +208,13 @@ Two model-sized copies that did not depend on offload are gone as well:
 - `WFCommServer` deep-copied `task.data` once per broadcast so that clients still downloading were not
   affected by controllers that modify the payload in place after early aggregation (PR #4100). FedAvg
   waits for every client task before `update_model()` and never updates tensor storage in place, so it
-  sets `TaskPropKey.IMMUTABLE_DATA_STORAGE` on its tasks. The communicator then copies only the
+  creates its tasks with `immutable_data_storage=True`. The communicator then copies only the
   containers and shares tensor and array storage. Other controllers keep the full copy; a FedAvg
   subclass that mutates the global model in place while clients are still downloading must set
   `immutable_task_data_storage = False`.
-- `PTFileModelPersistor` releases the `nn.Module` after capturing its state dict, and no longer
-  instantiates a dict-configured model when a checkpoint supplies the weights. The module's parameters
-  were otherwise kept alive for the whole job after the first aggregation replaced them.
+- `PTFileModelPersistor` releases the `nn.Module` after capturing its state dict, and instantiates a
+  dict-configured model only when no checkpoint supplies the weights. The module's parameters were
+  otherwise kept alive for the whole job after the first aggregation replaced them.
 
 ### Configuration
 

@@ -139,7 +139,7 @@ def _iter_slot_names(value):
             yield name
 
 
-def _iter_graph_children(value, excluded_dict_keys=None):
+def iter_graph_children(value, excluded_dict_keys=None):
     if isinstance(value, dict):
         for key, item in value.items():
             if excluded_dict_keys and key in excluded_dict_keys:
@@ -176,7 +176,7 @@ def contains_lazy_download_ref(value, visited=None, excluded_dict_keys=None) -> 
 
     return any(
         contains_lazy_download_ref(item, visited, excluded_dict_keys)
-        for item in _iter_graph_children(value, excluded_dict_keys)
+        for item in iter_graph_children(value, excluded_dict_keys)
     )
 
 
@@ -192,7 +192,7 @@ def _collect_lazy_download_refs(value, refs: list, visited: set, excluded_dict_k
         return
     visited.add(value_id)
 
-    for item in _iter_graph_children(value, excluded_dict_keys):
+    for item in iter_graph_children(value, excluded_dict_keys):
         _collect_lazy_download_refs(item, refs, visited, excluded_dict_keys)
 
 

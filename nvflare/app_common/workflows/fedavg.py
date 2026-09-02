@@ -17,7 +17,7 @@ import time
 from typing import Any, Dict, Optional, Set, Union
 
 from nvflare.apis.fl_constant import FLMetaKey
-from nvflare.app_common.abstract.fl_model import FLModel, ParamsType
+from nvflare.app_common.abstract.fl_model import FLModel
 from nvflare.app_common.aggregators.model_aggregator import ModelAggregator
 from nvflare.app_common.aggregators.weighted_aggregation_helper import (
     AggregationStatsKey,
@@ -150,7 +150,6 @@ class FedAvg(BaseFedAvg):
         # InTime aggregation helpers (reset each round, used only when no custom aggregator)
         self._aggr_helper: Optional[WeightedAggregationHelper] = None
         self._aggr_metrics_helper: Optional[WeightedAggregationHelper] = None
-        self._lazy_aggregation: bool = False  # built-in aggregation over disk-backed tensors
         self._all_metrics: bool = True
         self._warned_metric_keys: Set[str] = set()  # warn at most once per key (across clients/rounds)
         self._received_count: int = 0
@@ -171,7 +170,6 @@ class FedAvg(BaseFedAvg):
                     "enable_tensor_disk_offload=True but no active cell is available; "
                     "falling back to in-memory tensor download"
                 )
-            self._lazy_aggregation = disk_offload_context.applied
 
             self.info(center_message("Start FedAvg."))
 
@@ -373,13 +371,7 @@ class FedAvg(BaseFedAvg):
             if self.fl_ctx:
                 self.fl_ctx.set_prop(AppConstants.AGGREGATION_STATS, aggr_stats, private=True, sticky=False)
 
-            if self._lazy_aggregation and self._params_type is not None:
-                # The lazy helper applies DIFF updates to the base model itself and returns a full model.
-                aggr_params = self._aggr_helper.get_result(params_type=self._params_type)
-                params_type = ParamsType.FULL
-            else:
-                aggr_params = self._aggr_helper.get_result()
-                params_type = self._params_type
+            aggr_params, params_type = self._aggr_helper.aggregate(self._params_type)
             aggr_metrics = self._aggr_metrics_helper.get_result() if self._all_metrics else None
             aggr_metrics = aggr_metrics or None
 

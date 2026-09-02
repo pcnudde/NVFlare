@@ -19,7 +19,7 @@ from threading import Lock
 from typing import List, Optional, Tuple, Union
 
 from nvflare.apis.client import Client
-from nvflare.apis.controller_spec import ClientTask, SendOrder, Task, TaskCompletionStatus, TaskPropKey
+from nvflare.apis.controller_spec import ClientTask, SendOrder, Task, TaskCompletionStatus
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_component import FLComponent
 from nvflare.apis.fl_constant import ConfigVarName, FLContextKey, SystemConfigs
@@ -29,6 +29,7 @@ from nvflare.apis.shareable import ReservedHeaderKey, Shareable, make_copy
 from nvflare.apis.signal import Signal
 from nvflare.apis.wf_comm_spec import WFCommSpec
 from nvflare.fuel.utils.config_service import ConfigService
+from nvflare.fuel.utils.fobs.decomposers.via_downloader import iter_graph_children
 from nvflare.fuel.utils.msg_root_utils import delete_msg_root
 from nvflare.security.logging import secure_format_exception
 from nvflare.widgets.info_collector import GroupInfoCollector, InfoCollector
@@ -57,28 +58,22 @@ def _share_storage(value, memo: dict, seen: set) -> None:
     if id(value) in seen:
         return
     seen.add(id(value))
-    if isinstance(value, dict):
-        for item in value.values():
-            _share_storage(item, memo, seen)
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            _share_storage(item, memo, seen)
-    elif hasattr(value, "shape") and hasattr(value, "dtype"):
+    if hasattr(value, "shape") and hasattr(value, "dtype"):
         memo[id(value)] = value
-    elif hasattr(value, "__dict__"):
-        for item in vars(value).values():
-            _share_storage(item, memo, seen)
+        return
+    for item in iter_graph_children(value):
+        _share_storage(item, memo, seen)
 
 
 def _copy_broadcast_data(task: Task) -> Shareable:
     """Snapshot task.data once per broadcast.
 
     The snapshot protects clients that are still downloading when the controller aggregates early and
-    modifies the payload in place. A controller that sets TaskPropKey.IMMUTABLE_DATA_STORAGE promises not
-    to modify tensor or array storage while the task is active, so only the containers are copied and the
-    storage is shared, which avoids a second model-sized copy for large models.
+    modifies the payload in place. A task created with ``immutable_data_storage=True`` promises that its
+    tensor or array storage is not modified while the task is active, so only the containers are copied
+    and the storage is shared, which avoids a second model-sized copy for large models.
     """
-    if not task.props.get(TaskPropKey.IMMUTABLE_DATA_STORAGE):
+    if not task.immutable_data_storage:
         return copy.deepcopy(task.data)
     memo = {}
     _share_storage(task.data, memo, set())

@@ -94,6 +94,17 @@ class Decomposer(ABC):
         """
         pass
 
+    def supported_aliases(self) -> Optional[List[Type]]:
+        """Return additional local types that this decomposer serializes as its supported type.
+
+        An alias is decomposed by this decomposer and carries the supported type on the wire, so a
+        receiver only needs the canonical decomposer.
+
+        Returns: None or list of alias types
+
+        """
+        pass
+
     def process_datum(self, datum: Datum, manager: DatumManager):
         """This method will be called during message deserialization to process the specified datum.
 

@@ -17,42 +17,40 @@
 import math
 import os
 import tempfile
+from functools import lru_cache
 from typing import Any, Iterator, Mapping, Optional, Tuple
 
 import torch
 
 from nvflare.app_common.abstract.fl_model import ParamsType
 from nvflare.app_common.aggregators.weighted_aggregation_helper import WeightedAggregationHelper
+from nvflare.app_common.utils.lazy_value import is_lazy_value
 
-from .decomposers import register_tensor_decomposer
 from .lazy_tensor_dict import (
     TensorMetadata,
     _LazyRef,
     _TempDirRef,
-    is_lazy_tensor,
     materialize,
     metadata_of,
     safetensors_dtype,
-    tensor_metadata,
+    safetensors_refs,
     write_safetensors,
 )
 
 
-def _accumulation_dtype(dtype: torch.dtype) -> torch.dtype:
-    """Reduced-precision floats accumulate in float32; integers and bools average as floats."""
-    if dtype.is_floating_point:
-        return torch.float32 if dtype.itemsize < 4 else dtype
-    if dtype.is_complex:
-        return dtype
-    return torch.get_default_dtype()
-
-
 def _output_dtype(dtype: torch.dtype) -> torch.dtype:
+    """Floats and complex values keep their dtype; integer and bool inputs average as the default float."""
     return dtype if dtype.is_floating_point or dtype.is_complex else torch.get_default_dtype()
 
 
+def _accumulation_dtype(dtype: torch.dtype) -> torch.dtype:
+    """The output dtype, except that reduced-precision floats accumulate in float32."""
+    output_dtype = _output_dtype(dtype)
+    return torch.float32 if output_dtype.is_floating_point and output_dtype.itemsize < 4 else output_dtype
+
+
 def _output_metadata(item: TensorMetadata) -> TensorMetadata:
-    """Header entry of the aggregate: floats keep their dtype, integers and bools become floats."""
+    """Header entry of the aggregate for contributions with the given metadata."""
     if item.dtype.startswith(("F", "BF", "C")):
         return item
     dtype = torch.get_default_dtype()
@@ -61,25 +59,26 @@ def _output_metadata(item: TensorMetadata) -> TensorMetadata:
     )
 
 
-class _TensorRef:
-    """In-memory tensor behind the lazy ref interface, so both input kinds aggregate the same way."""
-
-    def __init__(self, tensor: torch.Tensor):
-        self._tensor = tensor
-
-    def materialize(self) -> torch.Tensor:
-        return self._tensor
-
-    def get_metadata(self) -> TensorMetadata:
-        return tensor_metadata(self._tensor)
+@lru_cache(maxsize=None)
+def _promotes_in_place(source: torch.dtype, target: torch.dtype) -> bool:
+    """Whether ``target.add_(source)`` accepts the source dtype without an explicit conversion."""
+    try:
+        return torch.promote_types(source, target) == target
+    except RuntimeError:  # float8 dtypes take part in no promotion
+        return False
 
 
-def _as_lazy(value):
-    if is_lazy_tensor(value):
-        return value
-    if isinstance(value, torch.Tensor):
-        return _TensorRef(value)
-    raise TypeError(f"lazy aggregation requires torch.Tensor values or lazy tensor refs, got {type(value)}")
+def _accumulate(accumulator: torch.Tensor, tensor: torch.Tensor, weight: float) -> None:
+    if not _promotes_in_place(tensor.dtype, accumulator.dtype):
+        tensor = tensor.to(accumulator.dtype)
+    accumulator.add_(tensor, alpha=weight)
+
+
+def _check_contribution_value(key: str, value) -> None:
+    if not (is_lazy_value(value) or isinstance(value, torch.Tensor)):
+        raise TypeError(
+            f"lazy aggregation requires torch.Tensor values or lazy tensor refs, got {type(value)} for '{key}'"
+        )
 
 
 class LazyWeightedAggregationHelper(WeightedAggregationHelper):
@@ -92,7 +91,7 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
 
     The result is always a full model: for ``ParamsType.DIFF`` contributions the mean
     difference is added to ``base_model`` and keys without contributions are copied
-    from it. Callers therefore treat the result as ``ParamsType.FULL``.
+    from it.
 
     Args:
         spill_dir: directory receiving one sub-directory per aggregate, normally the
@@ -113,7 +112,6 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
         self.spill_dir = spill_dir
         self.base_model = base_model or {}
         self.abort_signal = abort_signal
-        register_tensor_decomposer()
 
     def add(self, data, weight, contributor_name, contribution_round):
         """Record one contribution without loading tensor data."""
@@ -122,10 +120,17 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
                 if self.exclude_vars is not None and self.exclude_vars.search(k):
                     self.skipped_keys.add(k)
                     continue
+                _check_contribution_value(k, v)
                 self.key_contribution_counts[k] = self.key_contribution_counts.get(k, 0) + 1
-                self.total.setdefault(k, []).append((_as_lazy(v), weight))
+                self.total.setdefault(k, []).append((v, weight))
                 self.counts[k] = self.counts.get(k, 0.0) + weight
             self.history.append({"contributor_name": contributor_name, "round": contribution_round, "weight": weight})
+
+    def aggregate(self, params_type):
+        """Aggregate into a full model on disk; DIFF contributions are applied to the base model."""
+        if params_type is None:
+            return self.get_result(), None
+        return self.get_result(params_type), ParamsType.FULL
 
     def get_result(self, params_type: ParamsType = ParamsType.FULL) -> dict:
         """Write the weighted mean (applied to the base model for DIFF) to disk and return lazy refs."""
@@ -149,14 +154,15 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
                 return self._spill(metadata, self._result_tensors(keys, base))
             finally:
                 self.reset_stats()
+                self.base_model = {}  # let the previous aggregate's files go once the caller drops its refs
 
     def _result_metadata(self, key: str, base: Mapping[str, Any]) -> TensorMetadata:
         pending = self.total.get(key)
         if not pending:
             return metadata_of(base[key])
         first = metadata_of(pending[0][0])
-        for ref, _ in pending[1:]:
-            if metadata_of(ref) != first:
+        for value, _ in pending[1:]:
+            if metadata_of(value) != first:
                 raise ValueError(f"tensor '{key}' has different shape or dtype across contributions")
         if key in base and metadata_of(base[key]) != first:
             raise ValueError(f"DIFF tensor '{key}' does not match the shape or dtype of the global model")
@@ -170,22 +176,25 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
             yield key, tensor
             del tensor
 
-    def _aggregate_key(self, pending, base_ref) -> torch.Tensor:
+    def _aggregate_key(self, pending, base_value) -> torch.Tensor:
         accumulator = None
         total_weight = 0.0
-        for ref, weight in pending:
+        for value, weight in pending:
             self._check_abort()
-            tensor = materialize(ref)
+            tensor = materialize(value)
             if accumulator is None:
                 output_dtype = _output_dtype(tensor.dtype)
-                accumulator = tensor.to(_accumulation_dtype(tensor.dtype), copy=True).mul_(weight)
+                # A _LazyRef materializes a private copy that can become the accumulator; anything else may
+                # still be referenced by its owner and must not be modified in place.
+                accumulator = tensor.to(_accumulation_dtype(tensor.dtype), copy=not isinstance(value, _LazyRef))
+                accumulator.mul_(weight)
             else:
-                accumulator.add_(tensor.to(accumulator.dtype), alpha=weight)
+                _accumulate(accumulator, tensor, weight)
             total_weight += weight
             del tensor
         accumulator.div_(total_weight)
-        if base_ref is not None:
-            accumulator.add_(materialize(base_ref).to(accumulator.dtype))
+        if base_value is not None:
+            _accumulate(accumulator, materialize(base_value), 1.0)
         return accumulator.to(output_dtype)
 
     def _spill(self, metadata: dict, tensors: Iterator[Tuple[str, torch.Tensor]]) -> dict:
@@ -197,7 +206,7 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
         except BaseException:
             temp_ref.cleanup()
             raise
-        return {key: _LazyRef(file_path, key, temp_ref) for key in metadata}
+        return safetensors_refs(file_path, temp_ref)
 
     def _check_abort(self):
         if self.abort_signal is not None and self.abort_signal.triggered:

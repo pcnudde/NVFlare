@@ -64,13 +64,6 @@ class OperatorConfigKey:
     OPERATORS = "operators"
 
 
-class TaskPropKey:
-    # Set to True by a controller that never modifies the storage of the tensors or arrays in task.data
-    # while the task is active. The communicator then shares that storage with all clients of a broadcast
-    # instead of deep-copying the payload; only the containers are copied.
-    IMMUTABLE_DATA_STORAGE = "__immutable_data_storage__"
-
-
 class Task:
     def __init__(
         self,
@@ -84,6 +77,7 @@ class Task:
         task_done_cb=None,
         operator=None,
         secure=False,
+        immutable_data_storage=False,
     ):
         """Init the Task.
 
@@ -105,6 +99,9 @@ class Task:
                 It needs to follow the task_done_cb_signature.
             operator: task operator that describes the operation of the task
             secure: should this task be transmitted in a secure way
+            immutable_data_storage: the controller never modifies the storage of tensors or arrays in
+                ``data`` while the task is active, so a broadcast may share that storage with all clients
+                instead of deep-copying the payload.
 
         """
         if not isinstance(name, str):
@@ -120,6 +117,7 @@ class Task:
         self.operator = operator
         self.cb_lock = threading.Lock()
         self.secure = secure
+        self.immutable_data_storage = immutable_data_storage
 
         data.set_header(ReservedHeaderKey.TASK_NAME, name)
 

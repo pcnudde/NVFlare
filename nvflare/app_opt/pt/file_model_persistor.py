@@ -178,34 +178,13 @@ class PTFileModelPersistor(ModelPersistor):
             os.makedirs(self.log_dir)
 
         if isinstance(self.model, dict):
-            # Dict config: {"path": "module.Class", "args": {...}}
-            from nvflare.fuel.utils.class_utils import instantiate_class
-
+            # Dict config: {"path": "module.Class", "args": {...}}. The model is only instantiated in
+            # load_model when no checkpoint supplies the weights, so it never lingers beside the checkpoint.
             class_path = self.model.get("path")
-            class_args = self.model.get("args", {})
             if not class_path:
                 self.system_panic(reason="Dict model config must have 'path' key with class path", fl_ctx=fl_ctx)
                 return
-            if self.source_ckpt_file_full_name or self.ckpt_preload_path:
-                # The checkpoint supplies the weights and only the class name is needed for train_conf.
-                # Instantiating the model would keep a second model-sized copy alive for the whole job.
-                self.default_train_conf = {"train": {"model": class_path.rsplit(".", 1)[-1]}}
-                self.model = None
-            else:
-                try:
-                    self.model = instantiate_class(class_path, class_args)
-                except Exception as e:
-                    self.system_panic(
-                        reason=f"Failed to instantiate model class '{class_path}': {e}",
-                        fl_ctx=fl_ctx,
-                    )
-                    return
-                if not isinstance(self.model, torch.nn.Module):
-                    self.system_panic(
-                        reason=f"expect model class '{class_path}' to be torch.nn.Module but got {type(self.model)}",
-                        fl_ctx=fl_ctx,
-                    )
-                    return
+            self.default_train_conf = {"train": {"model": class_path.rsplit(".", 1)[-1]}}
         elif isinstance(self.model, str):
             # treat it as model component ID
             model_component_id = self.model
@@ -283,6 +262,10 @@ class PTFileModelPersistor(ModelPersistor):
                 f"Both source_ckpt_file_full_name and {AppConstants.CKPT_PRELOAD_PATH} are not provided. Using the default model weights initialized on the persistor side.",
                 fire_event=False,
             )
+            if isinstance(self.model, dict):
+                self.model = self._instantiate_model(fl_ctx)
+                if self.model is None:
+                    return None
             try:
                 data = self.model.state_dict() if self.model is not None else OrderedDict()
             except Exception:
@@ -290,7 +273,7 @@ class PTFileModelPersistor(ModelPersistor):
                 self.system_panic(reason="cannot create state_dict from model object", fl_ctx=fl_ctx)
                 return None
 
-        if self.model:
+        if isinstance(self.model, torch.nn.Module):
             self.default_train_conf = {"train": {"model": type(self.model).__name__}}
         # The state dict shares storage with the model's parameters. Dropping the model lets the initial
         # weights be freed as soon as the first aggregated model replaces them in the persistence manager.
@@ -300,6 +283,22 @@ class PTFileModelPersistor(ModelPersistor):
             data, default_train_conf=self.default_train_conf, allow_numpy_conversion=self._allow_numpy_conversion
         )
         return self.persistence_manager.to_model_learnable(self.exclude_vars)
+
+    def _instantiate_model(self, fl_ctx: FLContext) -> Optional[torch.nn.Module]:
+        from nvflare.fuel.utils.class_utils import instantiate_class
+
+        class_path = self.model.get("path")
+        try:
+            model = instantiate_class(class_path, self.model.get("args", {}))
+        except Exception as e:
+            self.system_panic(reason=f"Failed to instantiate model class '{class_path}': {e}", fl_ctx=fl_ctx)
+            return None
+        if not isinstance(model, torch.nn.Module):
+            self.system_panic(
+                reason=f"expect model class '{class_path}' to be torch.nn.Module but got {type(model)}", fl_ctx=fl_ctx
+            )
+            return None
+        return model
 
     def _get_persistence_manager(self, fl_ctx: FLContext):
         if not self.persistence_manager:

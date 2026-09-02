@@ -16,6 +16,8 @@ import re
 import threading
 from typing import Any, Callable, Dict, Optional, Set
 
+from nvflare.app_common.utils.lazy_value import materialize_if_lazy
+
 
 def _is_aggregatable_metric_value(v: Any) -> bool:
     """Return True if the metric value supports weighted aggregation (v * weight and addition).
@@ -167,12 +169,8 @@ class WeightedAggregationHelper(object):
 
                 self.key_contribution_counts[k] = self.key_contribution_counts.get(k, 0) + 1
 
-                # Disk-streamed payloads may pass lazy refs
-                # instead of in-memory tensors. If present, materialize() loads
-                # the tensor from disk before weighted aggregation math.
-                materialize_fn = getattr(v, "materialize", None)
-                if callable(materialize_fn):
-                    v = materialize_fn()
+                # Disk-streamed payloads pass lazy refs instead of in-memory tensors.
+                v = materialize_if_lazy(v)
 
                 current_total = self.total.get(k, None)
 
@@ -238,6 +236,14 @@ class WeightedAggregationHelper(object):
             self.last_aggregation_stats = self._compute_aggregation_stats()
             self.reset_stats()
             return aggregated_dict
+
+    def aggregate(self, params_type):
+        """Return the aggregated params together with their params type.
+
+        Contributions are accumulated as they arrive, so the result has the params type of
+        the contributions themselves.
+        """
+        return self.get_result(), params_type
 
     def _compute_aggregation_stats(self) -> dict:
         num_contributions = len(self.history)

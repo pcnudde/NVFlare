@@ -19,7 +19,6 @@ import weakref
 
 import pytest
 import torch
-from safetensors import SafetensorError
 from safetensors.torch import load_file, save_file
 
 from nvflare.app_common.abstract.fl_model import ParamsType
@@ -51,17 +50,22 @@ def _load(result, key):
     return ref.materialize()
 
 
+def _refs(path, tensors) -> dict:
+    save_file(tensors, path)
+    return safetensors_refs(str(path))
+
+
 @pytest.fixture
 def spill_dir(tmp_path):
     path = tmp_path / "spill"
     path.mkdir()
-    return path
+    return str(path)
 
 
 def test_weighted_full_matches_in_memory_helper(tmp_path, spill_dir):
     first = {"z": torch.tensor([2.0, 4.0]), "a": torch.tensor([1.0, 3.0, 5.0])}
     second = {"z": torch.tensor([8.0, 10.0]), "a": torch.tensor([7.0, 9.0, 11.0])}
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
     _add(helper, _lazy_model(tmp_path, "first", first), 1.0, "site-1")
     _add(helper, _lazy_model(tmp_path, "second", second), 3.0, "site-2")
     stats = helper.get_aggregation_stats()
@@ -81,7 +85,7 @@ def test_weighted_full_matches_in_memory_helper(tmp_path, spill_dir):
 
 
 def test_result_is_one_sorted_safetensors_file_under_spill_dir(tmp_path, spill_dir):
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
     _add(helper, _lazy_model(tmp_path, "model", {"b": torch.ones(2), "a": torch.zeros(3)}), 1.0, "site-1")
 
     result = helper.get_result()
@@ -89,12 +93,12 @@ def test_result_is_one_sorted_safetensors_file_under_spill_dir(tmp_path, spill_d
     files = {ref.file_path for ref in result.values()}
     assert len(files) == 1
     (file_path,) = files
-    assert os.path.dirname(os.path.dirname(file_path)) == str(spill_dir)
+    assert os.path.dirname(os.path.dirname(file_path)) == spill_dir
     assert list(load_file(file_path)) == ["a", "b"]
 
 
 def test_result_file_is_removed_when_refs_are_released(tmp_path, spill_dir):
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
     _add(helper, _lazy_model(tmp_path, "model", {"w": torch.ones(2)}), 1.0, "site-1")
     result = helper.get_result()
     aggregate_dir = os.path.dirname(result["w"].file_path)
@@ -108,7 +112,7 @@ def test_result_file_is_removed_when_refs_are_released(tmp_path, spill_dir):
 
 
 def test_float16_inputs_accumulate_in_float32(tmp_path, spill_dir):
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
     _add(helper, _lazy_model(tmp_path, "first", {"w": torch.tensor([60000.0], dtype=torch.float16)}), 1.0, "site-1")
     _add(helper, _lazy_model(tmp_path, "second", {"w": torch.tensor([60000.0], dtype=torch.float16)}), 1.0, "site-2")
 
@@ -121,7 +125,7 @@ def test_float16_inputs_accumulate_in_float32(tmp_path, spill_dir):
 def test_bfloat16_result_keeps_its_dtype(tmp_path, spill_dir):
     first = {"w": torch.randn(64, dtype=torch.bfloat16)}
     second = {"w": torch.randn(64, dtype=torch.bfloat16)}
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
     _add(helper, _lazy_model(tmp_path, "first", first), 1.0, "site-1")
     _add(helper, _lazy_model(tmp_path, "second", second), 3.0, "site-2")
 
@@ -137,7 +141,7 @@ def test_integer_inputs_average_as_the_default_float_dtype(tmp_path, spill_dir, 
     previous = torch.get_default_dtype()
     torch.set_default_dtype(default_dtype)
     try:
-        helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+        helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
         _add(helper, _lazy_model(tmp_path, "first", {"n": torch.tensor([10, 20])}), 2.0, "site-1")
         _add(helper, _lazy_model(tmp_path, "second", {"n": torch.tensor([5, 10])}), 3.0, "site-2")
 
@@ -150,9 +154,10 @@ def test_integer_inputs_average_as_the_default_float_dtype(tmp_path, spill_dir, 
 
 
 def test_diff_adds_weighted_mean_to_base_and_copies_missing_keys(tmp_path, spill_dir):
-    base_path = tmp_path / "base.safetensors"
-    save_file({"changed": torch.tensor([10.0, 20.0]), "unchanged": torch.tensor([7.0])}, base_path)
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir), base_model=safetensors_refs(str(base_path)))
+    base = _refs(
+        tmp_path / "base.safetensors", {"changed": torch.tensor([10.0, 20.0]), "unchanged": torch.tensor([7.0])}
+    )
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir, base_model=base)
     _add(helper, _lazy_model(tmp_path, "first", {"changed": torch.tensor([1.0, 3.0])}), 1.0, "site-1")
     _add(helper, _lazy_model(tmp_path, "second", {"changed": torch.tensor([5.0, 7.0])}), 3.0, "site-2")
 
@@ -165,7 +170,7 @@ def test_diff_adds_weighted_mean_to_base_and_copies_missing_keys(tmp_path, spill
 
 def test_diff_accepts_in_memory_base_model(tmp_path, spill_dir):
     base = {"w": torch.tensor([10.0])}
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir), base_model=base)
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir, base_model=base)
     _add(helper, _lazy_model(tmp_path, "delta", {"w": torch.tensor([2.0])}), 1.0, "site-1")
 
     assert torch.equal(_load(helper.get_result(ParamsType.DIFF), "w"), torch.tensor([12.0]))
@@ -173,10 +178,8 @@ def test_diff_accepts_in_memory_base_model(tmp_path, spill_dir):
 
 
 def test_diff_without_contributions_returns_the_base_refs(tmp_path, spill_dir):
-    base_path = tmp_path / "base.safetensors"
-    save_file({"w": torch.ones(1)}, base_path)
-    base = safetensors_refs(str(base_path))
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir), base_model=base)
+    base = _refs(tmp_path / "base.safetensors", {"w": torch.ones(1)})
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir, base_model=base)
 
     result = helper.get_result(ParamsType.DIFF)
 
@@ -186,16 +189,15 @@ def test_diff_without_contributions_returns_the_base_refs(tmp_path, spill_dir):
 
 
 def test_full_without_contributions_returns_empty_dict(spill_dir):
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
 
     assert helper.get_result() == {}
     assert os.listdir(spill_dir) == []
 
 
 def test_diff_rejects_keys_absent_from_base_model(tmp_path, spill_dir):
-    base_path = tmp_path / "base.safetensors"
-    save_file({"w": torch.ones(2)}, base_path)
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir), base_model=safetensors_refs(str(base_path)))
+    base = _refs(tmp_path / "base.safetensors", {"w": torch.ones(2)})
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir, base_model=base)
     _add(helper, _lazy_model(tmp_path, "delta", {"unexpected": torch.ones(2)}), 1.0, "site-1")
 
     with pytest.raises(ValueError, match="absent from the global model"):
@@ -207,7 +209,7 @@ def test_diff_rejects_keys_absent_from_base_model(tmp_path, spill_dir):
 def test_sparse_keys_and_exclude_vars(tmp_path, spill_dir):
     first = {"shared": torch.tensor([2.0]), "only_first": torch.tensor([3.0]), "bias": torch.ones(1)}
     second = {"shared": torch.tensor([4.0]), "only_second": torch.tensor([7.0]), "bias": torch.ones(1)}
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir), exclude_vars="bias")
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir, exclude_vars="bias")
     _add(helper, _lazy_model(tmp_path, "first", first), 1.0, "site-1")
     _add(helper, _lazy_model(tmp_path, "second", second), 1.0, "site-2")
     stats = helper.get_aggregation_stats()
@@ -226,7 +228,7 @@ def test_sparse_keys_and_exclude_vars(tmp_path, spill_dir):
 def test_in_memory_tensors_are_accepted_and_left_untouched(spill_dir):
     first = {"w": torch.tensor([2.0, 6.0])}
     second = {"w": torch.tensor([5.0, 9.0])}
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
     _add(helper, first, 1.0, "site-1")
     _add(helper, second, 2.0, "site-2")
 
@@ -237,14 +239,14 @@ def test_in_memory_tensors_are_accepted_and_left_untouched(spill_dir):
 
 
 def test_non_tensor_values_are_rejected(spill_dir):
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
 
     with pytest.raises(TypeError, match="lazy aggregation requires"):
         _add(helper, {"w": [1.0, 2.0]}, 1.0, "site-1")
 
 
 def test_shape_mismatch_across_contributions_is_rejected(tmp_path, spill_dir):
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
     _add(helper, _lazy_model(tmp_path, "first", {"w": torch.ones(2)}), 1.0, "site-1")
     _add(helper, _lazy_model(tmp_path, "second", {"w": torch.ones(3)}), 1.0, "site-2")
 
@@ -254,11 +256,11 @@ def test_shape_mismatch_across_contributions_is_rejected(tmp_path, spill_dir):
     assert os.listdir(spill_dir) == []
 
 
-@pytest.mark.parametrize("failure,expected_error", [("abort", RuntimeError), ("corrupt", SafetensorError)])
+@pytest.mark.parametrize("failure,expected_error", [("abort", RuntimeError), ("corrupt", ValueError)])
 def test_failures_leave_no_partial_output(tmp_path, spill_dir, failure, expected_error):
     model = _lazy_model(tmp_path, "model", {"w": torch.ones(2)})
     signal = types.SimpleNamespace(triggered=failure == "abort")
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir), abort_signal=signal)
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir, abort_signal=signal)
     _add(helper, model, 1.0, "site-1")
     if failure == "corrupt":
         with open(model["w"].file_path, "wb") as f:
@@ -292,7 +294,7 @@ def test_materializes_one_input_tensor_at_a_time(tmp_path, spill_dir, monkeypatc
         return tensor
 
     monkeypatch.setattr(_LazyRef, "materialize", tracked)
-    helper = LazyWeightedAggregationHelper(spill_dir=str(spill_dir))
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
     _add(helper, first, 1.0, "site-1")
     _add(helper, second, 1.0, "site-2")
 
@@ -300,7 +302,7 @@ def test_materializes_one_input_tensor_at_a_time(tmp_path, spill_dir, monkeypatc
     gc.collect()
 
     largest = max(t.numel() * t.element_size() for t in tensors.values())
-    assert active["max"] <= largest
+    assert active["max"] <= 2 * largest  # the first input doubles as the accumulator, plus one more input
     assert active["bytes"] == 0
     assert calls == ["first", "first", "second", "second", "third", "third"]
     assert set(result) == set(tensors)

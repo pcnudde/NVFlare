@@ -17,6 +17,7 @@
 import json
 import os
 import shutil
+from pathlib import Path
 from typing import Optional
 
 from nvflare.apis.event_type import EventType
@@ -26,8 +27,10 @@ from nvflare.app_common.abstract.model import ModelLearnable, ModelLearnableKey,
 from nvflare.app_common.abstract.model_persistor import ModelPersistor
 from nvflare.app_common.app_constant import AppConstants
 from nvflare.app_common.app_event_type import AppEventType
+from nvflare.client.config import ExchangeFormat
+from nvflare.fuel.utils import fobs
 
-from .decomposers import register_tensor_decomposer
+from .decomposers import TensorDecomposer
 from .lazy_tensor_dict import (
     _LazyRef,
     materialize,
@@ -64,9 +67,10 @@ def _index_refs(index_path: str) -> dict[str, _LazyRef]:
     refs = {}
     for key, shard_name in weight_map.items():
         shard_path = os.path.realpath(os.path.join(index_dir, str(shard_name)))
-        if os.path.dirname(shard_path) != index_dir or key not in read_safetensors_metadata(shard_path):
+        shard_metadata = read_safetensors_metadata(shard_path) if os.path.dirname(shard_path) == index_dir else {}
+        if key not in shard_metadata:
             raise ValueError(f"safetensors index entry '{key}' points to an invalid shard: {shard_name}")
-        refs[key] = _LazyRef(shard_path, key)
+        refs[key] = _LazyRef(shard_path, key, metadata=shard_metadata[key])
     return refs
 
 
@@ -86,13 +90,6 @@ def _link_or_copy(source: str, destination: str) -> None:
         os.link(source, destination)
     except OSError:
         shutil.copyfile(source, destination)
-
-
-def _remove(path: str) -> None:
-    try:
-        os.remove(path)
-    except FileNotFoundError:
-        pass
 
 
 class PTSafetensorsModelPersistor(ModelPersistor):
@@ -115,6 +112,9 @@ class PTSafetensorsModelPersistor(ModelPersistor):
         best_global_model_file_name: file name used for GLOBAL_BEST_MODEL_AVAILABLE.
         filter_id: optional PersistorFilter component id.
     """
+
+    # Lazy refs materialize as PyTorch tensors, so the exchange with clients must stay in that format.
+    required_exchange_format = ExchangeFormat.PYTORCH
 
     def __init__(
         self,
@@ -140,20 +140,19 @@ class PTSafetensorsModelPersistor(ModelPersistor):
                 self._save(ml.get(ModelLearnableKey.WEIGHTS), self._path(fl_ctx, self.best_global_model_file_name))
 
     def _initialize(self, fl_ctx: FLContext):
-        app_root = fl_ctx.get_prop(FLContextKey.APP_ROOT)
-        log_dir = fl_ctx.get_prop(AppConstants.LOG_DIR)
-        self.log_dir = os.path.join(app_root, log_dir) if log_dir else app_root
-        os.makedirs(self.log_dir, exist_ok=True)
-        register_tensor_decomposer()
+        if self.log_dir is None:
+            app_root = fl_ctx.get_prop(FLContextKey.APP_ROOT)
+            log_dir = fl_ctx.get_prop(AppConstants.LOG_DIR)
+            self.log_dir = os.path.join(app_root, log_dir) if log_dir else app_root
+            os.makedirs(self.log_dir, exist_ok=True)
+        fobs.register(TensorDecomposer)
 
     def _path(self, fl_ctx: FLContext, file_name: str) -> str:
-        if self.log_dir is None:
-            self._initialize(fl_ctx)
+        self._initialize(fl_ctx)
         return os.path.join(self.log_dir, file_name)
 
     def load_model(self, fl_ctx: FLContext) -> ModelLearnable:
-        if self.log_dir is None:
-            self._initialize(fl_ctx)
+        self._initialize(fl_ctx)
         path = self.source_ckpt_file_full_name
         if not os.path.isabs(path):
             path = os.path.join(fl_ctx.get_prop(FLContextKey.APP_ROOT), WorkspaceConstants.CUSTOM_FOLDER_NAME, path)
@@ -166,16 +165,18 @@ class PTSafetensorsModelPersistor(ModelPersistor):
     def _save(weights, path: str) -> None:
         if not isinstance(weights, dict) or not weights:
             raise ValueError("model weights must be a non-empty dict")
-        temp_path = f"{path}.tmp"
-        _remove(temp_path)
+        temp_path = Path(f"{path}.tmp")
+        temp_path.unlink(missing_ok=True)
         try:
             source = _single_source_file(weights)
             if source:
-                _link_or_copy(source, temp_path)
+                _link_or_copy(source, str(temp_path))
             else:
                 metadata = {key: metadata_of(value) for key, value in weights.items()}
-                write_safetensors(temp_path, metadata, ((key, materialize(value)) for key, value in weights.items()))
+                write_safetensors(
+                    str(temp_path), metadata, ((key, materialize(value)) for key, value in weights.items())
+                )
             os.replace(temp_path, path)
         except BaseException:
-            _remove(temp_path)
+            temp_path.unlink(missing_ok=True)
             raise

@@ -110,6 +110,9 @@ def _format_key_sample(keys: tuple[str, ...], max_keys: int = 5) -> str:
 
 
 def _get_value_shape(value) -> Optional[tuple]:
+    get_metadata = getattr(value, "get_metadata", None)
+    if callable(get_metadata):
+        return tuple(get_metadata().shape)  # disk-backed lazy ref: read the header, not the tensor
     shape = getattr(value, "shape", None)
     if shape is not None:
         return tuple(shape)

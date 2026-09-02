@@ -30,9 +30,7 @@ explicit cleanup via `cleanup()`, with GC as a fallback through `_TempDirRef`.
 
 import json
 import logging
-import math
 import os
-import re
 import shutil
 import struct
 from dataclasses import dataclass
@@ -43,7 +41,11 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save as save_tensors
 
+from nvflare.app_common.utils.lazy_value import materialize_if_lazy
+
 logger = logging.getLogger(__name__)
+
+_HEADER_SIZE_FIELD = 8
 
 
 @dataclass(frozen=True)
@@ -55,26 +57,44 @@ class TensorMetadata:
     nbytes: int
 
 
-def _dtype_size(dtype: str) -> int:
-    if dtype == "BOOL":
-        return 1
-    match = re.match(r"^[A-Z]+(\d+)", dtype)
-    if not match:
-        raise ValueError(f"unsupported safetensors dtype: {dtype}")
-    return max(1, int(match.group(1)) // 8)
+def read_safetensors_header(data: bytes) -> dict:
+    """Parse the JSON header of safetensors bytes; the tensor data behind it is not touched."""
+    if len(data) < _HEADER_SIZE_FIELD:
+        raise ValueError("Invalid safetensors data: too short")
+    header_size = struct.unpack("<Q", data[:_HEADER_SIZE_FIELD])[0]
+    if header_size == 0:
+        raise ValueError("Invalid safetensors data: empty header")
+    header_end = _HEADER_SIZE_FIELD + header_size
+    if header_end > len(data):
+        raise ValueError("Invalid safetensors data: header size exceeds payload length")
+    try:
+        header = json.loads(data[_HEADER_SIZE_FIELD:header_end])
+    except Exception as e:
+        raise ValueError("Invalid safetensors data: invalid JSON header") from e
+    if not isinstance(header, dict):
+        raise ValueError("Invalid safetensors data: header must be JSON object")
+    return header
+
+
+def _metadata_from_header(header: dict) -> dict[str, TensorMetadata]:
+    result = {}
+    for key, entry in header.items():
+        if key == "__metadata__":
+            continue
+        start, end = entry["data_offsets"]
+        result[key] = TensorMetadata(shape=tuple(entry["shape"]), dtype=entry["dtype"], nbytes=end - start)
+    return result
 
 
 @lru_cache(maxsize=4096)
 def _read_file_metadata(file_path: str, mtime_ns: int, file_size: int) -> dict:
-    del mtime_ns, file_size  # cache key only: a rewritten file is read again
-    result = {}
-    with safe_open(file_path, framework="pt", device="cpu") as tensor_file:
-        for key in tensor_file.keys():
-            tensor_slice = tensor_file.get_slice(key)
-            shape = tuple(tensor_slice.get_shape())
-            dtype = tensor_slice.get_dtype()
-            result[key] = TensorMetadata(shape=shape, dtype=dtype, nbytes=math.prod(shape) * _dtype_size(dtype))
-    return result
+    del mtime_ns  # part of the cache key only, so a rewritten file is read again
+    with open(file_path, "rb") as tensor_file:
+        size_field = tensor_file.read(_HEADER_SIZE_FIELD)
+        header_size = struct.unpack("<Q", size_field)[0] if len(size_field) == _HEADER_SIZE_FIELD else 0
+        # A corrupt size field must not turn into a huge allocation; the parser reports the short read.
+        header = tensor_file.read(min(header_size, file_size))
+        return _metadata_from_header(read_safetensors_header(size_field + header))
 
 
 def read_safetensors_metadata(file_path: str) -> dict[str, TensorMetadata]:
@@ -85,9 +105,7 @@ def read_safetensors_metadata(file_path: str) -> dict[str, TensorMetadata]:
 
 @lru_cache(maxsize=None)
 def safetensors_dtype(dtype: torch.dtype) -> str:
-    probe = save_tensors({"t": torch.empty(0, dtype=dtype)})
-    header_size = struct.unpack("<Q", probe[:8])[0]
-    return json.loads(probe[8 : 8 + header_size])["t"]["dtype"]
+    return read_safetensors_header(save_tensors({"t": torch.empty(0, dtype=dtype)}))["t"]["dtype"]
 
 
 def tensor_metadata(tensor: torch.Tensor) -> TensorMetadata:
@@ -98,14 +116,9 @@ def tensor_metadata(tensor: torch.Tensor) -> TensorMetadata:
     )
 
 
-def is_lazy_tensor(value) -> bool:
-    return callable(getattr(value, "materialize", None))
-
-
 def materialize(value) -> torch.Tensor:
     """Return the tensor behind a lazy ref, or the value itself when it already is a tensor."""
-    if is_lazy_tensor(value):
-        value = value.materialize()
+    value = materialize_if_lazy(value)
     if not isinstance(value, torch.Tensor):
         raise TypeError(f"expected a torch.Tensor or lazy tensor ref but got {type(value)}")
     return value
@@ -200,10 +213,17 @@ class _LazyRef:
     files that are not owned by the job (a user checkpoint) have no temp_ref.
     """
 
-    def __init__(self, file_path: str, key: str, temp_ref: Optional[_TempDirRef] = None):
+    def __init__(
+        self,
+        file_path: str,
+        key: str,
+        temp_ref: Optional[_TempDirRef] = None,
+        metadata: Optional[TensorMetadata] = None,
+    ):
         self.file_path = file_path
         self.key = key
         self._temp_ref = temp_ref
+        self.metadata = metadata
 
     def materialize(self):
         """Load tensor from safetensors file. Opens mmap, copies data out, closes mmap."""
@@ -211,22 +231,24 @@ class _LazyRef:
             return f.get_tensor(self.key)
 
     def get_metadata(self) -> TensorMetadata:
-        """Read tensor metadata without materializing its data."""
-        try:
-            return read_safetensors_metadata(self.file_path)[self.key]
-        except KeyError as e:
-            raise ValueError(f"safetensors file '{self.file_path}' has no tensor '{self.key}'") from e
+        """Tensor metadata, read once from the file header when it was not supplied at creation."""
+        if self.metadata is None:
+            try:
+                self.metadata = read_safetensors_metadata(self.file_path)[self.key]
+            except KeyError as e:
+                raise ValueError(f"safetensors file '{self.file_path}' has no tensor '{self.key}'") from e
+        return self.metadata
 
     def __repr__(self):
         return f"_LazyRef({self.file_path!r}, key={self.key!r})"
 
-    def __deepcopy__(self, memo):
-        return _LazyRef(file_path=self.file_path, key=self.key, temp_ref=self._temp_ref)
-
 
 def safetensors_refs(file_path: str, temp_ref: Optional[_TempDirRef] = None) -> dict[str, _LazyRef]:
     """Return a lazy ref for every tensor in a safetensors file."""
-    return {key: _LazyRef(file_path, key, temp_ref) for key in read_safetensors_metadata(file_path)}
+    return {
+        key: _LazyRef(file_path, key, temp_ref, metadata)
+        for key, metadata in read_safetensors_metadata(file_path).items()
+    }
 
 
 class LazyTensorDict:

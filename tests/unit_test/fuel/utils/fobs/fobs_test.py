@@ -68,10 +68,9 @@ class TestFobs:
         new_class = fobs.loads(buf)
         assert new_class.number == TestFobs.NUMBER
 
-    def test_type_alias_uses_canonical_wire_type(self):
+    def test_decomposer_alias_uses_canonical_wire_type(self):
         fobs.reset()
-        fobs.register(ExampleClassDecomposer)
-        fobs.register_type_alias(ExampleClassAlias, ExampleClass)
+        fobs.register(ExampleClassDecomposerWithAlias)
         buf = fobs.dumps(ExampleClassAlias(TestFobs.NUMBER))
 
         # A receiver needs only the canonical decomposer, not the sender's alias.
@@ -81,11 +80,6 @@ class TestFobs:
 
         assert type(restored) is ExampleClass
         assert restored.number == TestFobs.NUMBER
-
-    def test_type_alias_requires_a_registered_canonical_type(self):
-        fobs.reset()
-        with pytest.raises(ValueError, match="no registered decomposer"):
-            fobs.register_type_alias(ExampleClassAlias, ExampleClass)
 
     def test_no_registration(self):
         test_class = ExampleClass(TestFobs.NUMBER)
@@ -205,3 +199,8 @@ class ExampleClassDecomposer(Decomposer):
 
     def recompose(self, data: Any, manager: DatumManager = None) -> ExampleClass:
         return ExampleClass(data)
+
+
+class ExampleClassDecomposerWithAlias(ExampleClassDecomposer):
+    def supported_aliases(self):
+        return [ExampleClassAlias]

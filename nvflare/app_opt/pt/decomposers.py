@@ -20,7 +20,6 @@ from safetensors.torch import load, save
 import nvflare.fuel.utils.fobs.dots as dots
 from nvflare.app_common.utils.tensor_disk_offload_context import _TENSOR_DISK_OFFLOAD_ROOT_DIR
 from nvflare.fuel.f3.streaming.download_service import Downloadable
-from nvflare.fuel.utils import fobs
 from nvflare.fuel.utils.fobs import FOBSContextKey
 from nvflare.fuel.utils.fobs.datum import DatumManager
 from nvflare.fuel.utils.fobs.decomposers.via_downloader import ViaDownloaderDecomposer
@@ -43,6 +42,10 @@ class TensorDecomposer(ViaDownloaderDecomposer):
 
     def supported_type(self):
         return torch.Tensor
+
+    def supported_aliases(self):
+        # Disk-backed lazy refs travel the wire as the tensors they stand for.
+        return [_LazyRef]
 
     def get_download_dot(self) -> int:
         return dots.TENSOR_DOWNLOAD
@@ -131,9 +134,3 @@ class TensorDecomposer(ViaDownloaderDecomposer):
         if not isinstance(dummy, dict):
             raise ValueError(f"failed to load data: should be dict but got {type(dummy)}")
         return dummy.get("t")
-
-
-def register_tensor_decomposer() -> None:
-    """Register TensorDecomposer and let disk-backed lazy refs travel the wire as plain tensors."""
-    fobs.register(TensorDecomposer)
-    fobs.register_type_alias(_LazyRef, torch.Tensor)

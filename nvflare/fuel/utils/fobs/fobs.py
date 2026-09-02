@@ -39,7 +39,6 @@ __all__ = [
     "register_enum_types",
     "auto_register_enum_types",
     "register_folder",
-    "register_type_alias",
     "num_decomposers",
     "serialize",
     "serialize_stream",
@@ -96,6 +95,14 @@ def register(decomposer: Union[Decomposer, Type[Decomposer]]) -> None:
         return
 
     _decomposers[name] = instance
+    for alias_type in instance.supported_aliases() or []:
+        alias_name = get_class_name(alias_type)
+        existing = _decomposers.get(alias_name)
+        if existing is not None and existing is not instance:
+            log.error(f"Duplicate registration for type {alias_name}: {type(existing)} and {type(instance)}")
+            continue
+        _decomposers[alias_name] = instance
+
     supported_dots = instance.supported_dots()
     if supported_dots:
         for d in supported_dots:
@@ -113,22 +120,6 @@ def register(decomposer: Union[Decomposer, Type[Decomposer]]) -> None:
                 continue
 
             _dot_handlers[d] = instance
-
-
-def register_type_alias(alias_type: Type, canonical_type: Type) -> None:
-    """Serialize ``alias_type`` objects with the decomposer registered for ``canonical_type``.
-
-    The wire type stays ``canonical_type``, so a receiver only needs the canonical decomposer.
-    """
-    alias_name = get_class_name(alias_type)
-    canonical_name = get_class_name(canonical_type)
-    decomposer = _decomposers.get(canonical_name)
-    if decomposer is None:
-        raise ValueError(f"canonical type {canonical_name} has no registered decomposer")
-    existing = _decomposers.get(alias_name)
-    if existing is not None and existing is not decomposer:
-        raise ValueError(f"alias type {alias_name} already has a different decomposer")
-    _decomposers[alias_name] = decomposer
 
 
 class Packer:

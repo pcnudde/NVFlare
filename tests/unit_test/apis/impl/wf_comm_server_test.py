@@ -17,7 +17,7 @@ from unittest.mock import Mock
 import numpy as np
 
 from nvflare.apis.client import Client
-from nvflare.apis.controller_spec import Task, TaskPropKey
+from nvflare.apis.controller_spec import Task
 from nvflare.apis.fl_constant import FLContextKey
 from nvflare.apis.fl_context import FLContextManager
 from nvflare.apis.impl.wf_comm_server import WFCommServer, _copy_broadcast_data, _DeadClientStatus
@@ -60,8 +60,7 @@ def _broadcast_task(immutable_storage: bool) -> Task:
     data = Shareable()
     data["weights"] = {"w": np.arange(4.0), "nested": [np.ones(2)]}
     data["round"] = 3
-    props = {TaskPropKey.IMMUTABLE_DATA_STORAGE: True} if immutable_storage else None
-    return Task(name="train", data=data, props=props)
+    return Task(name="train", data=data, immutable_data_storage=immutable_storage)
 
 
 class TestBroadcastDataCopy:

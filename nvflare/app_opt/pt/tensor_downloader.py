@@ -11,9 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import json
 import os
-import struct
 import tempfile
 import threading
 import weakref
@@ -23,6 +21,7 @@ import torch
 from safetensors.torch import load as load_tensors
 from safetensors.torch import save as save_tensors
 
+from nvflare.app_common.utils.lazy_value import is_lazy_value
 from nvflare.app_common.utils.tensor_disk_offload_context import _TENSOR_DISK_OFFLOAD_ROOT_DIR
 from nvflare.fuel.f3.cellnet.cell import Cell
 from nvflare.fuel.f3.streaming.cacheable import CacheableObject, ItemConsumer
@@ -30,7 +29,7 @@ from nvflare.fuel.f3.streaming.download_service import download_object
 from nvflare.fuel.f3.streaming.obj_downloader import ObjectDownloader
 from nvflare.fuel.f3.streaming.stream_utils import stream_thread_pool
 
-from .lazy_tensor_dict import LazyTensorDict, _cleanup_temp_dir, is_lazy_tensor, materialize
+from .lazy_tensor_dict import LazyTensorDict, _cleanup_temp_dir, materialize, read_safetensors_header
 
 _TWO_MB = 2 * 1024 * 1024
 _ACTIVE_DISK_TENSOR_CONSUMERS = weakref.WeakSet()
@@ -66,7 +65,7 @@ class TensorDownloadable(CacheableObject):
         self._prefetch_futures = {}
         self._released = False
         super().__init__(tensors, max_chunk_size)
-        if any(is_lazy_tensor(value) for value in tensors.values()):
+        if any(is_lazy_value(value) for value in tensors.values()):
             # Lazy refs are re-read from disk for each receiver. A shared chunk cache would
             # otherwise grow toward the model size when receivers progress at different speeds.
             self.clear_cache()
@@ -211,26 +210,7 @@ def download_tensors(
 
 def _extract_safetensors_keys(data: bytes) -> list[str]:
     """Extract tensor key names from safetensors header without deserializing tensors."""
-    if len(data) < 8:
-        raise ValueError("Invalid safetensors data: too short")
-
-    header_size = struct.unpack("<Q", data[:8])[0]
-    if header_size == 0:
-        raise ValueError("Invalid safetensors data: empty header")
-
-    header_end = 8 + header_size
-    if header_end > len(data):
-        raise ValueError("Invalid safetensors data: header size exceeds payload length")
-
-    try:
-        header = json.loads(data[8:header_end])
-    except Exception as e:
-        raise ValueError("Invalid safetensors data: invalid JSON header") from e
-
-    if not isinstance(header, dict):
-        raise ValueError("Invalid safetensors data: header must be JSON object")
-
-    return [k for k in header.keys() if k != "__metadata__"]
+    return [k for k in read_safetensors_header(data) if k != "__metadata__"]
 
 
 class DiskTensorConsumer(ItemConsumer):

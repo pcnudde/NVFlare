@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from typing import Callable, List, Optional, Union
 
 from nvflare.apis.client import Client
-from nvflare.apis.controller_spec import ClientTask, OperatorMethod, Task, TaskOperatorKey, TaskPropKey
+from nvflare.apis.controller_spec import ClientTask, OperatorMethod, Task, TaskOperatorKey
 from nvflare.apis.fl_constant import ReturnCode
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.impl.controller import Controller
@@ -219,14 +219,11 @@ class BaseModelController(Controller, FLComponentWrapper, ABC):
             name=task_name,
             data=data_shareable,
             operator=operator,
-            props={
-                AppConstants.TASK_PROP_CALLBACK: callback,
-                AppConstants.META_DATA: data.meta,
-                TaskPropKey.IMMUTABLE_DATA_STORAGE: self.immutable_task_data_storage,
-            },
+            props={AppConstants.TASK_PROP_CALLBACK: callback, AppConstants.META_DATA: data.meta},
             timeout=timeout,
             before_task_sent_cb=self._prepare_task_data,
             result_received_cb=self._process_result,
+            immutable_data_storage=self.immutable_task_data_storage,
         )
 
         return task

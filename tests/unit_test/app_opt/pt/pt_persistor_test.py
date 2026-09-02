@@ -158,6 +158,25 @@ class TestPTFileModelPersistorLoad:
         assert persistor.default_train_conf == {"train": {"model": "Linear"}}
         assert torch.equal(weights["weight"], torch.ones(1, 2))
 
+    def test_dict_config_without_checkpoint_is_instantiated_at_load(self, tmp_path):
+        from nvflare.apis.event_type import EventType
+        from nvflare.app_common.abstract.model import ModelLearnableKey
+        from nvflare.app_opt.pt.file_model_persistor import PTFileModelPersistor
+
+        persistor = PTFileModelPersistor(
+            model={"path": "torch.nn.Linear", "args": {"in_features": 2, "out_features": 1}},
+            allow_numpy_conversion=False,
+        )
+        fl_ctx = _fl_ctx(tmp_path)
+        persistor.handle_event(EventType.START_RUN, fl_ctx)
+        assert isinstance(persistor.model, dict)
+
+        weights = persistor.load_model(fl_ctx)[ModelLearnableKey.WEIGHTS]
+
+        assert set(weights) == {"weight", "bias"}
+        assert persistor.model is None
+        assert persistor.default_train_conf == {"train": {"model": "Linear"}}
+
 
 class TestPTFileModelPersistorSave:
     def test_partial_save_failures_preserve_checkpoint_and_clean_unique_temp_files(self, tmp_path, monkeypatch):
