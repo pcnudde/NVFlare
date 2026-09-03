@@ -103,7 +103,9 @@ class ComponentBuilder(ABC):
         if config_dict.get("disabled") is True:
             return None
 
-        class_args = config_dict.get("args", dict())
+        # Work on a copy: the configuration tree is kept for the whole job, and substituting built
+        # components into it would pin them (a model object, for example) even after their owner let go.
+        class_args = dict(config_dict.get("args", dict()))
         for k, v in class_args.items():
             if isinstance(v, dict) and self.is_class_config(v):
                 # try to replace the arg with a component

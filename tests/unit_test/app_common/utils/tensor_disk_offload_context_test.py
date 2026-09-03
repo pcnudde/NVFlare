@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 from nvflare.app_common.utils.tensor_disk_offload_context import (
     _TENSOR_DISK_OFFLOAD_ROOT_DIR,
     cleanup_tensor_disk_offload,
@@ -122,6 +124,28 @@ def test_cleanup_noop_when_not_applied():
     assert cell.ctx["enable_tensor_disk_offload"] is True
     assert cell.ctx[_TENSOR_DISK_OFFLOAD_ROOT_DIR] == "/tmp/owner"
     assert cell.update_calls == 0
+
+
+def test_setup_also_flags_the_simulator_job_cell_and_cleanup_restores_it(tmp_path, monkeypatch):
+    parent_cell = _MockCell(enable_tensor_disk_offload=False)
+    job_cell = _MockCell(enable_tensor_disk_offload=False, root_dir="/tmp/job_owner")
+    engine = _MockEngine(parent_cell, run_manager=_MockRunManager(parent_cell))
+    engine.server = SimpleNamespace(job_cell=job_cell)
+    root_dir = _patch_mkdtemp(monkeypatch, tmp_path)
+
+    context = setup_tensor_disk_offload(engine=engine, enabled=True)
+
+    for cell in (parent_cell, job_cell):
+        assert cell.ctx["enable_tensor_disk_offload"] is True
+        assert cell.ctx[_TENSOR_DISK_OFFLOAD_ROOT_DIR] == str(root_dir)
+
+    cleanup_tensor_disk_offload(engine=engine, context=context)
+
+    assert parent_cell.ctx["enable_tensor_disk_offload"] is False
+    assert parent_cell.ctx[_TENSOR_DISK_OFFLOAD_ROOT_DIR] is None
+    assert job_cell.ctx["enable_tensor_disk_offload"] is False
+    assert job_cell.ctx[_TENSOR_DISK_OFFLOAD_ROOT_DIR] == "/tmp/job_owner"
+    assert not root_dir.exists()
 
 
 def test_cleanup_removes_root_dir_when_cell_gone(tmp_path, monkeypatch):

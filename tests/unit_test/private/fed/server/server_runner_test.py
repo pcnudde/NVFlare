@@ -69,6 +69,33 @@ def _make_server_runner_for_submission(status="started"):
     return runner
 
 
+class TestSubmissionContextCleanup:
+    def test_result_payload_is_dropped_from_the_context_after_processing(self):
+        from nvflare.apis.fl_constant import FLContextKey, ReservedKey
+        from nvflare.apis.fl_context import FLContext
+
+        runner = _make_server_runner_for_submission()
+        runner.job_id = "job-1"
+        runner.abort_signal = None
+        runner.config = SimpleNamespace(task_result_filters={})
+        for name in ("log_error", "log_debug", "log_exception", "fire_event", "system_panic"):
+            setattr(runner, name, MagicMock())
+        fl_ctx = FLContext()
+        peer_ctx = FLContext()
+        peer_ctx.set_prop(ReservedKey.RUN_NUM, "job-1", private=False, sticky=False)
+        fl_ctx.set_peer_context(peer_ctx)
+        result = Shareable()
+        result["payload"] = "model bytes"
+
+        with patch("nvflare.private.fed.server.server_runner.add_job_audit_event"):
+            runner._process_submission(MagicMock(name="client"), "train", "task-1", result, fl_ctx)
+
+        communicator = runner.current_wf.controller.communicator
+        assert communicator.process_submission.call_args.kwargs["result"] is result
+        # The workflow keeps this context as its current context; the payload must not stay pinned in it.
+        assert fl_ctx.get_prop(FLContextKey.TASK_RESULT) is None
+
+
 class TestLateSubmissionAdmission:
     def test_submission_after_terminal_state_does_not_touch_run_state(self):
         runner = _make_server_runner_for_submission(status="done")

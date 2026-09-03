@@ -67,6 +67,17 @@ class TestComponentBuilder:
         b = builder.build_component(config)
         assert isinstance(b, NPModelLocator)
 
+    def test_nested_component_is_not_written_back_into_the_config(self):
+        nested = {"path": "tests.unit_test.fuel.utils.component_builder_test.MyComponentWithDictArgs", "args": {}}
+        config = {"path": "tests.unit_test.fuel.utils.component_builder_test.MyComponent", "args": {"model": nested}}
+        builder = MockComponentBuilder()
+
+        b = builder.build_component(config)
+
+        assert isinstance(b.mode, MyComponentWithDictArgs)
+        # The configuration tree outlives the components it describes; it must not pin the instances.
+        assert config["args"]["model"] is nested
+
     def test_component_with_name_only(self):
         """Backward compat: config with only 'name' (short name) still resolves via module scanner."""
         config = {"id": "id", "name": "NPModelLocator", "args": {}}

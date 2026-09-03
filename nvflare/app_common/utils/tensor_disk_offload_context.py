@@ -14,7 +14,7 @@
 
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from nvflare.fuel.utils.fobs import FOBSContextKey
@@ -29,6 +29,8 @@ class TensorDiskOffloadContext:
     previous_root_dir: Optional[str] = None
     root_dir: Optional[str] = None
     applied: bool = False
+    # (cell, previous flag, previous root dir) for every further cell that decodes this job's payloads
+    extra_cells: list = field(default_factory=list)
 
 
 def _get_cell(engine):
@@ -41,8 +43,19 @@ def _get_cell(engine):
     return engine.get_cell()
 
 
+def _get_extra_cells(engine, primary) -> list:
+    """Further cells that decode this job's payloads.
+
+    The simulator runs the server app and its job cell in one process: client results are decoded by
+    the job cell, while the engine exposes the parent cell. Production job processes expose the job
+    cell itself, so nothing is added there.
+    """
+    job_cell = getattr(getattr(engine, "server", None), "job_cell", None)
+    return [job_cell] if job_cell is not None and job_cell is not primary else []
+
+
 def setup_tensor_disk_offload(engine, enabled: bool, job_id: str = "job") -> TensorDiskOffloadContext:
-    """Enable tensor disk offload in the active cell FOBS context.
+    """Enable tensor disk offload in the FOBS context of every cell that decodes this job's payloads.
 
     Args:
         engine: engine that owns the active Cell.
@@ -63,8 +76,16 @@ def setup_tensor_disk_offload(engine, enabled: bool, job_id: str = "job") -> Ten
     previous_value = fobs_ctx.get(_ENABLE_TENSOR_DISK_OFFLOAD, False)
     previous_root_dir = fobs_ctx.get(_TENSOR_DISK_OFFLOAD_ROOT_DIR)
     root_dir = tempfile.mkdtemp(prefix=f"nvflare_tensor_offload_{job_id}_")
+    props = {_ENABLE_TENSOR_DISK_OFFLOAD: True, _TENSOR_DISK_OFFLOAD_ROOT_DIR: root_dir}
+    extra_cells = []
     try:
-        cell.update_fobs_context({_ENABLE_TENSOR_DISK_OFFLOAD: True, _TENSOR_DISK_OFFLOAD_ROOT_DIR: root_dir})
+        cell.update_fobs_context(props)
+        for extra in _get_extra_cells(engine, cell):
+            extra_ctx = extra.get_fobs_context()
+            extra_cells.append(
+                (extra, extra_ctx.get(_ENABLE_TENSOR_DISK_OFFLOAD, False), extra_ctx.get(_TENSOR_DISK_OFFLOAD_ROOT_DIR))
+            )
+            extra.update_fobs_context(props)
     except Exception:
         shutil.rmtree(root_dir, ignore_errors=True)
         raise
@@ -73,6 +94,7 @@ def setup_tensor_disk_offload(engine, enabled: bool, job_id: str = "job") -> Ten
         previous_root_dir=previous_root_dir,
         root_dir=root_dir,
         applied=True,
+        extra_cells=extra_cells,
     )
 
 
@@ -90,6 +112,10 @@ def cleanup_tensor_disk_offload(engine, context: TensorDiskOffloadContext) -> No
                         _ENABLE_TENSOR_DISK_OFFLOAD: context.previous_value,
                         _TENSOR_DISK_OFFLOAD_ROOT_DIR: context.previous_root_dir,
                     }
+                )
+            for extra, previous_value, previous_root_dir in context.extra_cells:
+                extra.update_fobs_context(
+                    {_ENABLE_TENSOR_DISK_OFFLOAD: previous_value, _TENSOR_DISK_OFFLOAD_ROOT_DIR: previous_root_dir}
                 )
     finally:
         if context.root_dir:

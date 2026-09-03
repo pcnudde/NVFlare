@@ -568,6 +568,10 @@ class ServerRunner(TBI):
                     fl_ctx,
                     "Error processing client result by {}: {}".format(self.current_wf.id, secure_format_exception(e)),
                 )
+            finally:
+                # The workflow keeps this context as its current context. Drop the result payload so a
+                # model-sized submission is not pinned in memory until the next submission replaces it.
+                fl_ctx.set_prop(FLContextKey.TASK_RESULT, value=None, private=True, sticky=False)
 
     def _report_client_active(self, reason: str, fl_ctx: FLContext):
         with self.wf_lock:
