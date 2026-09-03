@@ -29,7 +29,7 @@ from nvflare.fuel.f3.streaming.download_service import download_object
 from nvflare.fuel.f3.streaming.obj_downloader import ObjectDownloader
 from nvflare.fuel.f3.streaming.stream_utils import stream_thread_pool
 
-from .lazy_tensor_dict import LazyTensorDict, _cleanup_temp_dir, materialize, read_safetensors_header
+from .lazy_tensor_dict import LazyTensorDict, _cleanup_temp_dir, _LazyRef, materialize, read_safetensors_header
 
 _TWO_MB = 2 * 1024 * 1024
 _ACTIVE_DISK_TENSOR_CONSUMERS = weakref.WeakSet()
@@ -52,6 +52,9 @@ def cleanup_active_disk_tensor_downloads(reason: str = "download aborted", root_
 
 
 def _serialize_item(key: str, value) -> bytes:
+    if isinstance(value, _LazyRef):
+        # One copy straight from the file instead of a materialized tensor plus a re-serialization.
+        return value.to_safetensors_bytes(key)
     return save_tensors({key: materialize(value)})
 
 
@@ -92,6 +95,10 @@ class TensorDownloadable(CacheableObject):
             if base_obj is None:
                 return
             key = self.keys[index]
+            if isinstance(base_obj[key], _LazyRef):
+                # A disk-backed item is one file read; holding a second copy per receiver ahead of the
+                # request costs more memory than the overlap saves.
+                return
             future = stream_thread_pool.submit(_serialize_item, key, base_obj[key])
             if future:
                 self._prefetch_futures[index] = future

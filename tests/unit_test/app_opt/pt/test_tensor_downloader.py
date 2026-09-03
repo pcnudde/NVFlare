@@ -77,6 +77,22 @@ class TestTensorDownloadableBasic:
         # Downloadable IS affected (this is expected - protection is at broadcast level)
         assert downloadable.base_obj["model"][0].item() == 999.0
 
+    def test_disk_refs_are_served_from_the_file_without_prefetch(self, tmp_path):
+        from safetensors.torch import save_file
+
+        from nvflare.app_opt.pt.lazy_tensor_dict import safetensors_refs
+
+        tensors = {"first": torch.arange(4.0), "second": torch.ones(2)}
+        save_file(tensors, tmp_path / "model.safetensors")
+        downloadable = TensorDownloadable(safetensors_refs(str(tmp_path / "model.safetensors")), max_chunk_size=1)
+
+        rc, items, state = downloadable.produce({}, "receiver")
+
+        assert rc == ProduceRC.OK
+        assert torch.equal(load_tensors(bytes(items[0]))["first"], tensors["first"])
+        assert not downloadable._prefetch_futures  # one file read per request beats a second copy held ahead
+        assert downloadable.cache is None
+
     def test_prefetches_next_tensor(self):
         tensors = {
             "first": torch.tensor([1.0]),
@@ -126,7 +142,7 @@ class TestTensorDownloadableBasic:
         with pytest.raises(RuntimeError, match="released"):
             downloadable.produce_item(0)
 
-    def test_lazy_refs_are_materialized_per_item_and_batched_without_a_cache(self, tmp_path):
+    def test_lazy_refs_are_served_from_the_file_and_batched_without_a_cache(self, tmp_path):
         tensors = {"a": torch.arange(4.0), "b": torch.ones(2)}
         save_file(tensors, tmp_path / "model.safetensors")
         downloadable = TensorDownloadable(
@@ -139,8 +155,9 @@ class TestTensorDownloadableBasic:
 
         assert rc == ProduceRC.OK
         assert len(items) == 2
-        assert torch.equal(load_tensors(items[0])["a"], tensors["a"])
-        assert torch.equal(load_tensors(items[1])["b"], tensors["b"])
+        # Items are byte buffers copied from the file; the transport decodes them to bytes on the receiver.
+        assert torch.equal(load_tensors(bytes(items[0]))["a"], tensors["a"])
+        assert torch.equal(load_tensors(bytes(items[1]))["b"], tensors["b"])
         downloadable.release()
 
     def test_lazy_refs_serve_concurrent_receivers_without_serializing_them(self):

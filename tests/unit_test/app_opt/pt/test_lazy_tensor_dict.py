@@ -129,6 +129,35 @@ class TestWriteSafetensors:
             write_safetensors(path, {"__metadata__": metadata["a"]}, iter([]))
 
 
+class TestLazyRefWireBytes:
+    def test_bytes_match_safetensors_serialization_for_the_item_key(self, tmp_path):
+        from safetensors.torch import load as load_tensors
+        from safetensors.torch import save as save_tensors
+
+        from nvflare.app_opt.pt.lazy_tensor_dict import safetensors_refs
+
+        tensors = {"w": torch.randn(3, 5), "b": torch.arange(7, dtype=torch.bfloat16), "m": torch.tensor([True, False])}
+        save_file(tensors, tmp_path / "model.safetensors")
+        refs = safetensors_refs(str(tmp_path / "model.safetensors"))
+
+        for key, tensor in tensors.items():
+            wire = refs[key].to_safetensors_bytes("T3")
+            assert bytes(wire) == save_tensors({"T3": tensor})
+            assert torch.equal(load_tensors(bytes(wire))["T3"], tensor)
+
+    def test_truncated_file_is_rejected(self, tmp_path):
+        from nvflare.app_opt.pt.lazy_tensor_dict import safetensors_refs
+
+        path = tmp_path / "model.safetensors"
+        save_file({"w": torch.ones(1024)}, path)
+        ref = safetensors_refs(str(path))["w"]
+        with open(path, "r+b") as f:
+            f.truncate(path.stat().st_size - 512)
+
+        with pytest.raises(ValueError, match="shorter"):
+            ref.to_safetensors_bytes()
+
+
 class TestTempDirRef:
     def test_cleanup_on_del(self):
         temp_dir = tempfile.mkdtemp(prefix="nvflare_test_")
