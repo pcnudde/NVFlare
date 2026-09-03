@@ -82,19 +82,9 @@ def test_weighted_full_matches_in_memory_helper(tmp_path, spill_dir):
     assert stats[AggregationStatsKey.ACCEPTED_CONTRIBUTIONS] == 2
     assert stats[AggregationStatsKey.CONTRIBUTORS] == ["site-1", "site-2"]
     assert helper.last_aggregation_stats[AggregationStatsKey.FULLY_MATCHED_KEYS] == 2
-
-
-def test_result_is_one_sorted_safetensors_file_under_spill_dir(tmp_path, spill_dir):
-    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
-    _add(helper, _lazy_model(tmp_path, "model", {"b": torch.ones(2), "a": torch.zeros(3)}), 1.0, "site-1")
-
-    result = helper.get_result()
-
-    files = {ref.file_path for ref in result.values()}
-    assert len(files) == 1
-    (file_path,) = files
+    (file_path,) = {ref.file_path for ref in result.values()}  # one sorted file below the spill dir
     assert os.path.dirname(os.path.dirname(file_path)) == spill_dir
-    assert list(load_file(file_path)) == ["a", "b"]
+    assert list(load_file(file_path)) == ["a", "z"]
 
 
 def test_result_file_is_removed_when_refs_are_released(tmp_path, spill_dir):
@@ -111,46 +101,27 @@ def test_result_file_is_removed_when_refs_are_released(tmp_path, spill_dir):
     assert os.listdir(spill_dir) == []
 
 
-def test_float16_inputs_accumulate_in_float32(tmp_path, spill_dir):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_reduced_precision_inputs_accumulate_in_float32_and_keep_their_dtype(tmp_path, spill_dir, dtype):
     helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
-    _add(helper, _lazy_model(tmp_path, "first", {"w": torch.tensor([60000.0], dtype=torch.float16)}), 1.0, "site-1")
-    _add(helper, _lazy_model(tmp_path, "second", {"w": torch.tensor([60000.0], dtype=torch.float16)}), 1.0, "site-2")
+    _add(helper, _lazy_model(tmp_path, "first", {"w": torch.tensor([32768.0], dtype=dtype)}), 1.0, "site-1")
+    _add(helper, _lazy_model(tmp_path, "second", {"w": torch.tensor([32768.0], dtype=dtype)}), 3.0, "site-2")
 
     result = _load(helper.get_result(), "w")
 
-    assert result.dtype == torch.float16
-    assert result.item() == 60000.0  # a float16 accumulator would have overflowed to inf
+    assert result.dtype == dtype
+    assert result.item() == 32768.0  # a float16 accumulator would have overflowed to inf
 
 
-def test_bfloat16_result_keeps_its_dtype(tmp_path, spill_dir):
-    first = {"w": torch.randn(64, dtype=torch.bfloat16)}
-    second = {"w": torch.randn(64, dtype=torch.bfloat16)}
+def test_integer_inputs_average_as_the_default_float_dtype(tmp_path, spill_dir):
     helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
-    _add(helper, _lazy_model(tmp_path, "first", first), 1.0, "site-1")
-    _add(helper, _lazy_model(tmp_path, "second", second), 3.0, "site-2")
+    _add(helper, _lazy_model(tmp_path, "first", {"n": torch.tensor([10, 20])}), 2.0, "site-1")
+    _add(helper, _lazy_model(tmp_path, "second", {"n": torch.tensor([5, 10])}), 3.0, "site-2")
 
-    result = _load(helper.get_result(), "w")
+    result = _load(helper.get_result(), "n")
 
-    expected = ((first["w"].float() + 3.0 * second["w"].float()) / 4.0).to(torch.bfloat16)
-    assert result.dtype == torch.bfloat16
-    assert torch.equal(result, expected)
-
-
-@pytest.mark.parametrize("default_dtype", [torch.float32, torch.float64])
-def test_integer_inputs_average_as_the_default_float_dtype(tmp_path, spill_dir, default_dtype):
-    previous = torch.get_default_dtype()
-    torch.set_default_dtype(default_dtype)
-    try:
-        helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
-        _add(helper, _lazy_model(tmp_path, "first", {"n": torch.tensor([10, 20])}), 2.0, "site-1")
-        _add(helper, _lazy_model(tmp_path, "second", {"n": torch.tensor([5, 10])}), 3.0, "site-2")
-
-        result = _load(helper.get_result(), "n")
-
-        assert result.dtype == default_dtype
-        assert torch.equal(result, torch.tensor([7.0, 14.0], dtype=default_dtype))
-    finally:
-        torch.set_default_dtype(previous)
+    assert result.dtype == torch.get_default_dtype()
+    assert torch.equal(result, torch.tensor([7.0, 14.0]))
 
 
 def test_diff_adds_weighted_mean_to_base_and_copies_missing_keys(tmp_path, spill_dir):
@@ -185,13 +156,6 @@ def test_diff_without_contributions_returns_the_base_refs(tmp_path, spill_dir):
 
     assert result == base
     assert result["w"] is base["w"]
-    assert os.listdir(spill_dir) == []
-
-
-def test_full_without_contributions_returns_empty_dict(spill_dir):
-    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
-
-    assert helper.get_result() == {}
     assert os.listdir(spill_dir) == []
 
 

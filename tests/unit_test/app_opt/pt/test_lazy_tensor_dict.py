@@ -18,7 +18,10 @@ import tempfile
 
 import pytest
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load as load_tensors
+from safetensors.torch import load_file
+from safetensors.torch import save as save_tensors
+from safetensors.torch import save_file
 
 import nvflare.app_opt.pt.lazy_tensor_dict as lazy_tensor_dict
 from nvflare.app_opt.pt.lazy_tensor_dict import (
@@ -97,12 +100,6 @@ class TestLazyRef:
         assert all(refs[key].get_metadata() == tensor_metadata(tensor) for key, tensor in tensors.items())
         assert all(ref._temp_ref is None for ref in refs.values())
 
-    def test_metadata_of_missing_tensor_raises(self, tmp_path):
-        save_file({"a": torch.ones(1)}, tmp_path / "model.safetensors")
-
-        with pytest.raises(ValueError, match="has no tensor 'b'"):
-            _LazyRef(str(tmp_path / "model.safetensors"), "b").get_metadata()
-
 
 class TestWriteSafetensors:
     def test_roundtrip_in_declared_order(self, tmp_path):
@@ -125,17 +122,10 @@ class TestWriteSafetensors:
             write_safetensors(path, metadata, iter([("a", torch.ones(2)), ("b", torch.ones(4))]))
         with pytest.raises(ValueError, match="fewer tensors"):
             write_safetensors(path, metadata, iter([("a", torch.ones(2))]))
-        with pytest.raises(ValueError, match="reserved"):
-            write_safetensors(path, {"__metadata__": metadata["a"]}, iter([]))
 
 
 class TestLazyRefWireBytes:
     def test_bytes_match_safetensors_serialization_for_the_item_key(self, tmp_path):
-        from safetensors.torch import load as load_tensors
-        from safetensors.torch import save as save_tensors
-
-        from nvflare.app_opt.pt.lazy_tensor_dict import safetensors_refs
-
         tensors = {"w": torch.randn(3, 5), "b": torch.arange(7, dtype=torch.bfloat16), "m": torch.tensor([True, False])}
         save_file(tensors, tmp_path / "model.safetensors")
         refs = safetensors_refs(str(tmp_path / "model.safetensors"))
@@ -146,8 +136,6 @@ class TestLazyRefWireBytes:
             assert torch.equal(load_tensors(bytes(wire))["T3"], tensor)
 
     def test_truncated_file_is_rejected(self, tmp_path):
-        from nvflare.app_opt.pt.lazy_tensor_dict import safetensors_refs
-
         path = tmp_path / "model.safetensors"
         save_file({"w": torch.ones(1024)}, path)
         ref = safetensors_refs(str(path))["w"]

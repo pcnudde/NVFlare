@@ -78,7 +78,7 @@ def read_safetensors_header(data: bytes) -> dict:
 
 @dataclass(frozen=True)
 class _TensorLocation:
-    """Where a tensor's bytes live in its safetensors file, as absolute file offsets."""
+    """Metadata of a tensor plus the absolute byte range of its data in its safetensors file."""
 
     metadata: TensorMetadata
     start: int
@@ -97,34 +97,21 @@ def _encode_header(metadata: Mapping[str, TensorMetadata]) -> bytes:
     return struct.pack("<Q", len(header_bytes)) + header_bytes
 
 
-@lru_cache(maxsize=4096)
-def _read_file_layout(file_path: str, mtime_ns: int, file_size: int) -> dict:
-    del mtime_ns  # part of the cache key only, so a rewritten file is read again
+def read_safetensors_layout(file_path: str) -> dict[str, _TensorLocation]:
+    """Metadata and byte range of every tensor in a safetensors file, reading only its header."""
     with open(file_path, "rb") as tensor_file:
         size_field = tensor_file.read(_HEADER_SIZE_FIELD)
         header_size = struct.unpack("<Q", size_field)[0] if len(size_field) == _HEADER_SIZE_FIELD else 0
         # A corrupt size field must not turn into a huge allocation; the parser reports the short read.
-        header = tensor_file.read(min(header_size, file_size))
+        header = tensor_file.read(min(header_size, os.fstat(tensor_file.fileno()).st_size))
     data_start = _HEADER_SIZE_FIELD + header_size
-    result = {}
+    layout = {}
     for key, entry in read_safetensors_header(size_field + header).items():
-        if key == "__metadata__":
-            continue
-        start, end = entry["data_offsets"]
-        metadata = TensorMetadata(shape=tuple(entry["shape"]), dtype=entry["dtype"], nbytes=end - start)
-        result[key] = _TensorLocation(metadata=metadata, start=data_start + start, end=data_start + end)
-    return result
-
-
-def read_safetensors_layout(file_path: str) -> dict[str, _TensorLocation]:
-    """Metadata and byte range of every tensor in a safetensors file, reading only its header."""
-    stat = os.stat(file_path)
-    return _read_file_layout(os.path.realpath(file_path), stat.st_mtime_ns, stat.st_size)
-
-
-def read_safetensors_metadata(file_path: str) -> dict[str, TensorMetadata]:
-    """Return the metadata of every tensor in a safetensors file, reading only its header."""
-    return {key: location.metadata for key, location in read_safetensors_layout(file_path).items()}
+        if key != "__metadata__":
+            start, end = entry["data_offsets"]
+            metadata = TensorMetadata(shape=tuple(entry["shape"]), dtype=entry["dtype"], nbytes=end - start)
+            layout[key] = _TensorLocation(metadata, data_start + start, data_start + end)
+    return layout
 
 
 @lru_cache(maxsize=None)
@@ -166,8 +153,6 @@ def write_safetensors(
     ``metadata`` fixes the header before any tensor exists; ``tensors`` must yield the
     same keys in the same order with matching shape and dtype.
     """
-    if "__metadata__" in metadata:
-        raise ValueError("'__metadata__' is reserved by safetensors")
     expected_keys = iter(metadata)
     with open(file_path, "wb") as output:
         output.write(_encode_header(metadata))
@@ -233,36 +218,36 @@ class _LazyRef:
         file_path: str,
         key: str,
         temp_ref: Optional[_TempDirRef] = None,
-        metadata: Optional[TensorMetadata] = None,
+        location: Optional[_TensorLocation] = None,
     ):
         self.file_path = file_path
         self.key = key
         self._temp_ref = temp_ref
-        self.metadata = metadata
+        self._location = location
 
     def materialize(self):
         """Load tensor from safetensors file. Opens mmap, copies data out, closes mmap."""
         with safe_open(self.file_path, framework="pt") as f:
             return f.get_tensor(self.key)
 
-    def _location(self) -> _TensorLocation:
-        try:
-            return read_safetensors_layout(self.file_path)[self.key]
-        except KeyError as e:
-            raise ValueError(f"safetensors file '{self.file_path}' has no tensor '{self.key}'") from e
+    def location(self) -> _TensorLocation:
+        """Metadata and byte range, read once from the file header when not supplied at creation."""
+        if self._location is None:
+            try:
+                self._location = read_safetensors_layout(self.file_path)[self.key]
+            except KeyError as e:
+                raise ValueError(f"safetensors file '{self.file_path}' has no tensor '{self.key}'") from e
+        return self._location
 
     def get_metadata(self) -> TensorMetadata:
-        """Tensor metadata, read once from the file header when it was not supplied at creation."""
-        if self.metadata is None:
-            self.metadata = self._location().metadata
-        return self.metadata
+        return self.location().metadata
 
     def to_safetensors_bytes(self, key: Optional[str] = None) -> bytearray:
         """The tensor as a single-tensor safetensors payload named ``key``, copied straight from the file.
 
         This is the wire form of a streamed tensor item, produced with one read and no tensor object.
         """
-        location = self._location()
+        location = self.location()
         header = _encode_header({key or self.key: location.metadata})
         payload = bytearray(len(header) + location.end - location.start)
         payload[: len(header)] = header
@@ -280,8 +265,8 @@ class _LazyRef:
 def safetensors_refs(file_path: str, temp_ref: Optional[_TempDirRef] = None) -> dict[str, _LazyRef]:
     """Return a lazy ref for every tensor in a safetensors file."""
     return {
-        key: _LazyRef(file_path, key, temp_ref, metadata)
-        for key, metadata in read_safetensors_metadata(file_path).items()
+        key: _LazyRef(file_path, key, temp_ref, location)
+        for key, location in read_safetensors_layout(file_path).items()
     }
 
 

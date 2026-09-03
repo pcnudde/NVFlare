@@ -153,76 +153,69 @@ NumPy arrays are not handled by `TensorDecomposer`.
 
 ## Lazy Aggregation and Safetensors Persistence
 
-Inbound offload alone still leaves three model-sized copies on the server: the accumulator built
-by `WeightedAggregationHelper`, the global model held in memory, and the deep copy of the task data
-taken at broadcast time. With `enable_tensor_disk_offload=True`, FedAvg's built-in aggregation
-therefore works on lazy refs end to end (`nvflare/app_opt/pt/lazy_aggregation.py`):
+Inbound offload alone leaves three model-sized copies on the server: the accumulator in
+`WeightedAggregationHelper`, the global model, and the broadcast copy of the task data. With
+`enable_tensor_disk_offload=True`, FedAvg's built-in aggregation therefore uses
+`LazyWeightedAggregationHelper` (`nvflare/app_opt/pt/lazy_aggregation.py`):
 
-- `LazyWeightedAggregationHelper.add()` records each contribution's refs, weight and key
-  statistics; no tensor is loaded during result callbacks.
-- `get_result()` walks the model keys in sorted order. For each key it materializes one client
-  tensor at a time, accumulates into a single accumulator (float32 for bf16/fp16 inputs, cast back
-  on write) and streams the tensor into a new safetensors file below the offload root
-  (`<root>/nvflare_aggregate_*/model.safetensors`). The header is derived from the contributions'
-  metadata before any tensor is produced.
-- The result is a dict of `_LazyRef` into that file, owned by a `_TempDirRef` exactly like inbound
-  chunk files. The file is removed when the last ref is released, normally when the next round
-  replaces the global model. Aggregate files are never rewritten, so refs held by other components
-  stay valid.
-- `ParamsType.DIFF` contributions are applied to the base model by the helper and keys without
-  contributions are copied from it, one tensor at a time. FedAvg treats the result as a full model.
-- Custom aggregators are unaffected and still receive refs.
+- `add()` records each contribution's refs and weight; nothing is loaded in result callbacks.
+- `get_result()` walks the keys in sorted order, materializes one contribution tensor at a time into a
+  single accumulator (float32 for bf16/fp16 inputs, cast back on write) and streams the aggregate into
+  `<offload root>/nvflare_aggregate_*/model.safetensors`, whose header is derived from the
+  contributions' metadata up front.
+- The result is a dict of `_LazyRef` into that file, owned by a `_TempDirRef` like inbound chunk files;
+  the file goes away when the last ref is released, normally when the next round replaces the model.
+  Aggregate files are never rewritten.
+- `ParamsType.DIFF` contributions are added to the base model and keys without contributions are
+  copied from it; FedAvg receives a full model. Custom aggregators still receive refs.
 
-Once an aggregate exists the global model is a dict of refs. Outbound task data is serialized by
-`TensorDecomposer`, which declares `_LazyRef` as an alias of `torch.Tensor`
-(`Decomposer.supported_aliases`), so `TensorDownloadable` materializes one tensor per item while
-producing chunks, keeps normal chunk batching, and disables its cross-receiver chunk cache for
-ref-backed payloads. A deep copy of a ref is a ref. The wire format and the clients are unchanged.
+Outbound, `TensorDecomposer` declares `_LazyRef` as an alias of `torch.Tensor`
+(`Decomposer.supported_aliases`), and `TensorDownloadable` serves a ref by copying its byte range
+straight from the safetensors file, without prefetch or a cross-receiver cache. The wire format and the
+clients are unchanged.
 
 ### PTSafetensorsModelPersistor
 
-`PTFileModelPersistor` keeps a state dict in memory and loads the initial checkpoint with
-`torch.load`. To drop that copy, and to start from a checkpoint that does not fit in server memory,
-use `PTSafetensorsModelPersistor` (`nvflare/app_opt/pt/safetensors_model_persistor.py`):
+`PTFileModelPersistor` keeps a state dict in memory and loads checkpoints with `torch.load`.
+`PTSafetensorsModelPersistor` (`nvflare/app_opt/pt/safetensors_model_persistor.py`) instead:
 
-- `load_model()` returns refs into a `.safetensors` file, a Hugging Face
-  `model.safetensors.index.json`, or a directory containing either. Nothing is loaded.
-- `save_model()` writes `FL_global_model.safetensors` in the app log dir. When the weights are refs
-  into one complete file, which is what lazy aggregation produces, the file is hard-linked (copied
-  when the offload root is on another file system); otherwise tensors are streamed one at a time.
-  Writes go to a `.tmp` file and are published with `os.replace`.
-- `GLOBAL_BEST_MODEL_AVAILABLE` saves the current global model to `best_FL_global_model.safetensors`
-  the same way.
-- Only tensors are persisted, not `FLModel.meta`. The model inventory used by cross-site evaluation
-  is not implemented. As with `PTFileModelPersistor`, the source checkpoint is loaded on every start.
+- `load_model()` returns refs into a `.safetensors` file, a Hugging Face `model.safetensors.index.json`,
+  or a directory containing either. Nothing is loaded.
+- `save_model()` writes `FL_global_model.safetensors` to the app log dir through a `.tmp` file and
+  `os.replace`. Refs into one complete file, which is what lazy aggregation produces, are hard-linked
+  (copied across file systems); anything else is streamed one tensor at a time.
+  `GLOBAL_BEST_MODEL_AVAILABLE` saves `best_FL_global_model.safetensors` the same way.
+- Only tensors are persisted, not `FLModel.meta`; the model inventory used by cross-site evaluation is
+  not implemented. The persistor requires `ExchangeFormat.PYTORCH` and the PyTorch recipe rejects
+  other formats.
 
-`PTFileModelPersistor` accepts lazy aggregation output as well: it materializes refs while updating
-its in-memory state dict, so existing `enable_tensor_disk_offload` jobs keep working with one
-model-sized copy at save time. `FLModelUtils.update_model` likewise materializes a lazy base value
-when applying an in-memory DIFF.
+`PTFileModelPersistor` still accepts lazy aggregation output by materializing refs into its state dict,
+so existing offload jobs keep working with one model-sized copy at save time.
 
 ### Fewer Copies on the In-Memory Path
 
-Two model-sized copies that did not depend on offload are gone as well:
-
-- `WFCommServer` deep-copied `task.data` once per broadcast so that clients still downloading were not
-  affected by controllers that modify the payload in place after early aggregation (PR #4100). FedAvg
-  waits for every client task before `update_model()` and never updates tensor storage in place, so it
-  creates its tasks with `immutable_data_storage=True`. The communicator then copies only the
-  containers and shares tensor and array storage. Other controllers keep the full copy; a FedAvg
-  subclass that mutates the global model in place while clients are still downloading must set
+- `WFCommServer` deep-copied `task.data` per broadcast to protect clients still downloading from
+  controllers that modify the payload in place (PR #4100). FedAvg never does, so it creates tasks with
+  `immutable_data_storage=True` and the communicator copies only the containers. A FedAvg subclass
+  that mutates the global model in place while clients download must set
   `immutable_task_data_storage = False`.
-- `PTFileModelPersistor` releases the `nn.Module` after capturing its state dict, and instantiates a
-  dict-configured model only when no checkpoint supplies the weights. The module's parameters were
-  otherwise kept alive for the whole job after the first aggregation replaced them.
+- `PTFileModelPersistor` releases the `nn.Module` after capturing its state dict and instantiates a
+  dict-configured model only when no checkpoint supplies the weights.
 
-### Configuration
+### Memory and Disk
+
+```text
+aggregation  O(largest tensor)               one input tensor + one accumulator
+outbound     O(receivers * in-flight items)  one serialized item per pending request per receiver
+inbound      O(clients * response)           unchanged
+persistence  O(largest tensor)               streamed, or a zero-copy hard link
+```
+
+The offload root follows `TMPDIR` and must be a real disk (on tmpfs the aggregate lives in RAM), ideally
+on the workspace's file system so saves are links. Disk holds the current round's contributions plus the
+previous and the new aggregate.
 
 ```python
-from nvflare.app_opt.pt import PTSafetensorsModelPersistor
-from nvflare.app_opt.pt.recipes.fedavg import FedAvgRecipe
-from nvflare.client.config import ExchangeFormat
-
 recipe = FedAvgRecipe(
     name="qwen_fedavg",
     min_clients=2,
@@ -233,23 +226,6 @@ recipe = FedAvgRecipe(
     enable_tensor_disk_offload=True,
 )
 ```
-
-The persistor requires `ExchangeFormat.PYTORCH`; the PyTorch recipe rejects other formats.
-
-### Memory and Disk
-
-```text
-aggregation  O(largest tensor)               one input tensor + one accumulator
-outbound     O(receivers * largest tensor)   one serialized item per receiver, plus bounded prefetch
-inbound      O(clients * response)           unchanged
-persistence  O(largest tensor)               streamed, or a zero-copy hard link
-```
-
-Disk below the offload root holds the current round's client contributions, the previous aggregate
-until the new one replaces it, and the new aggregate. The offload root follows `TMPDIR`; on a tmpfs
-`/tmp` the aggregate would live in RAM, so point `TMPDIR` at a disk, ideally on the same file system
-as the workspace so saves are links rather than copies. Unit tests establish the code path; the 72B
-memory target still needs a production measurement.
 
 ## Custom Aggregator Contract
 

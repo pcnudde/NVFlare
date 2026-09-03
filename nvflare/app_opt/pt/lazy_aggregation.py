@@ -17,7 +17,6 @@
 import math
 import os
 import tempfile
-from functools import lru_cache
 from typing import Any, Iterator, Mapping, Optional, Tuple
 
 import torch
@@ -57,21 +56,6 @@ def _output_metadata(item: TensorMetadata) -> TensorMetadata:
     return TensorMetadata(
         shape=item.shape, dtype=safetensors_dtype(dtype), nbytes=math.prod(item.shape) * dtype.itemsize
     )
-
-
-@lru_cache(maxsize=None)
-def _promotes_in_place(source: torch.dtype, target: torch.dtype) -> bool:
-    """Whether ``target.add_(source)`` accepts the source dtype without an explicit conversion."""
-    try:
-        return torch.promote_types(source, target) == target
-    except RuntimeError:  # float8 dtypes take part in no promotion
-        return False
-
-
-def _accumulate(accumulator: torch.Tensor, tensor: torch.Tensor, weight: float) -> None:
-    if not _promotes_in_place(tensor.dtype, accumulator.dtype):
-        tensor = tensor.to(accumulator.dtype)
-    accumulator.add_(tensor, alpha=weight)
 
 
 def _check_contribution_value(key: str, value) -> None:
@@ -189,12 +173,12 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
                 accumulator = tensor.to(_accumulation_dtype(tensor.dtype), copy=not isinstance(value, _LazyRef))
                 accumulator.mul_(weight)
             else:
-                _accumulate(accumulator, tensor, weight)
+                accumulator.add_(tensor, alpha=weight)  # same dtype as the first contribution, checked up front
             total_weight += weight
             del tensor
         accumulator.div_(total_weight)
         if base_value is not None:
-            _accumulate(accumulator, materialize(base_value), 1.0)
+            accumulator.add_(materialize(base_value))
         return accumulator.to(output_dtype)
 
     def _spill(self, metadata: dict, tensors: Iterator[Tuple[str, torch.Tensor]]) -> dict:

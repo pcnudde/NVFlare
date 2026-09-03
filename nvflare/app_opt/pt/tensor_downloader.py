@@ -29,7 +29,14 @@ from nvflare.fuel.f3.streaming.download_service import download_object
 from nvflare.fuel.f3.streaming.obj_downloader import ObjectDownloader
 from nvflare.fuel.f3.streaming.stream_utils import stream_thread_pool
 
-from .lazy_tensor_dict import LazyTensorDict, _cleanup_temp_dir, _LazyRef, materialize, read_safetensors_header
+from .lazy_tensor_dict import (
+    LazyTensorDict,
+    _cleanup_temp_dir,
+    _LazyRef,
+    materialize,
+    metadata_of,
+    read_safetensors_header,
+)
 
 _TWO_MB = 2 * 1024 * 1024
 _ACTIVE_DISK_TENSOR_CONSUMERS = weakref.WeakSet()
@@ -107,11 +114,7 @@ class TensorDownloadable(CacheableObject):
         base_obj = self.base_obj
         if base_obj is None:
             return None
-        value = base_obj[self.keys[index]]
-        if isinstance(value, torch.Tensor):
-            return value.numel() * value.element_size()
-        get_metadata = getattr(value, "get_metadata", None)
-        return get_metadata().nbytes if callable(get_metadata) else None
+        return metadata_of(base_obj[self.keys[index]]).nbytes
 
     def release(self):
         with self._prefetch_lock:

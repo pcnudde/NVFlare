@@ -35,7 +35,7 @@ from .lazy_tensor_dict import (
     _LazyRef,
     materialize,
     metadata_of,
-    read_safetensors_metadata,
+    read_safetensors_layout,
     safetensors_refs,
     write_safetensors,
 )
@@ -59,18 +59,10 @@ def load_safetensors_refs(path: str) -> dict[str, _LazyRef]:
 
 def _index_refs(index_path: str) -> dict[str, _LazyRef]:
     with open(index_path) as index_file:
-        index = json.load(index_file)
-    weight_map = index.get("weight_map") if isinstance(index, dict) else None
-    if not isinstance(weight_map, dict) or not weight_map:
-        raise ValueError(f"safetensors index has no weight_map: {index_path}")
-    index_dir = os.path.realpath(os.path.dirname(index_path))
+        weight_map = json.load(index_file)["weight_map"]
     refs = {}
-    for key, shard_name in weight_map.items():
-        shard_path = os.path.realpath(os.path.join(index_dir, str(shard_name)))
-        shard_metadata = read_safetensors_metadata(shard_path) if os.path.dirname(shard_path) == index_dir else {}
-        if key not in shard_metadata:
-            raise ValueError(f"safetensors index entry '{key}' points to an invalid shard: {shard_name}")
-        refs[key] = _LazyRef(shard_path, key, metadata=shard_metadata[key])
+    for shard_name in sorted(set(weight_map.values())):
+        refs.update(safetensors_refs(os.path.join(os.path.dirname(index_path), shard_name)))
     return refs
 
 
@@ -82,14 +74,7 @@ def _single_source_file(weights: dict) -> Optional[str]:
     if len(files) != 1:
         return None
     (file_path,) = files
-    return file_path if set(read_safetensors_metadata(file_path)) == set(weights) else None
-
-
-def _link_or_copy(source: str, destination: str) -> None:
-    try:
-        os.link(source, destination)
-    except OSError:
-        shutil.copyfile(source, destination)
+    return file_path if set(read_safetensors_layout(file_path)) == set(weights) else None
 
 
 class PTSafetensorsModelPersistor(ModelPersistor):
@@ -170,7 +155,10 @@ class PTSafetensorsModelPersistor(ModelPersistor):
         try:
             source = _single_source_file(weights)
             if source:
-                _link_or_copy(source, str(temp_path))
+                try:
+                    os.link(source, temp_path)
+                except OSError:  # another file system
+                    shutil.copyfile(source, temp_path)
             else:
                 metadata = {key: metadata_of(value) for key, value in weights.items()}
                 write_safetensors(
