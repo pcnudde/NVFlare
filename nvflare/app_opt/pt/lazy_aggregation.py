@@ -27,6 +27,7 @@ from nvflare.app_common.utils.lazy_value import is_lazy_value
 
 from .lazy_tensor_dict import (
     TensorMetadata,
+    _cleanup_temp_dir,
     _LazyRef,
     _TempDirRef,
     materialize,
@@ -35,6 +36,8 @@ from .lazy_tensor_dict import (
     safetensors_refs,
     write_safetensors,
 )
+
+_AGGREGATE_PREFIX = "nvflare_aggregate_"
 
 
 def _output_dtype(dtype: torch.dtype) -> torch.dtype:
@@ -71,7 +74,9 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
     ``add()`` only records contribution refs. ``get_result()`` materializes one
     contribution tensor at a time per key, accumulates it into a single accumulator and
     streams the aggregate into a new safetensors file below ``spill_dir``. The result
-    is a dict of ``_LazyRef``; the file is removed once every ref to it is released.
+    is a dict of ``_LazyRef``. Cleanup is explicit: once the new aggregate is written,
+    the previous aggregate below ``spill_dir`` and the consumed contribution files are
+    deleted; the job removes ``spill_dir`` itself at the end of the run.
 
     The result is always a full model: for ``ParamsType.DIFF`` contributions the mean
     difference is added to ``base_model`` and keys without contributions are copied
@@ -137,8 +142,16 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
                 metadata = {key: self._result_metadata(key, base) for key in keys}
                 return self._spill(metadata, self._result_tensors(keys, base))
             finally:
+                self._release_contributions()
                 self.reset_stats()
-                self.base_model = {}  # let the previous aggregate's files go once the caller drops its refs
+                self.base_model = {}
+
+    def _release_contributions(self) -> None:
+        """Delete the consumed contribution files now instead of waiting for garbage collection."""
+        for pending in self.total.values():
+            for value, _ in pending:
+                if isinstance(value, _LazyRef):
+                    value.release()
 
     def _result_metadata(self, key: str, base: Mapping[str, Any]) -> TensorMetadata:
         pending = self.total.get(key)
@@ -182,7 +195,7 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
         return accumulator.to(output_dtype)
 
     def _spill(self, metadata: dict, tensors: Iterator[Tuple[str, torch.Tensor]]) -> dict:
-        temp_dir = tempfile.mkdtemp(prefix="nvflare_aggregate_", dir=self.spill_dir)
+        temp_dir = tempfile.mkdtemp(prefix=_AGGREGATE_PREFIX, dir=self.spill_dir)
         temp_ref = _TempDirRef(temp_dir)
         file_path = os.path.join(temp_dir, "model.safetensors")
         try:
@@ -190,7 +203,14 @@ class LazyWeightedAggregationHelper(WeightedAggregationHelper):
         except BaseException:
             temp_ref.cleanup()
             raise
+        self._remove_previous_aggregates(keep=os.path.basename(temp_dir))
         return safetensors_refs(file_path, temp_ref)
+
+    def _remove_previous_aggregates(self, keep: str) -> None:
+        """The new aggregate replaces the model, so earlier aggregate files below spill_dir go now."""
+        for entry in os.scandir(self.spill_dir):
+            if entry.name.startswith(_AGGREGATE_PREFIX) and entry.name != keep:
+                _cleanup_temp_dir(entry.path)
 
     def _check_abort(self):
         if self.abort_signal is not None and self.abort_signal.triggered:

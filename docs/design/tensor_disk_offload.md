@@ -163,9 +163,10 @@ Inbound offload alone leaves three model-sized copies on the server: the accumul
   single accumulator (float32 for bf16/fp16 inputs, cast back on write) and streams the aggregate into
   `<offload root>/nvflare_aggregate_*/model.safetensors`, whose header is derived from the
   contributions' metadata up front.
-- The result is a dict of `_LazyRef` into that file, owned by a `_TempDirRef` like inbound chunk files;
-  the file goes away when the last ref is released, normally when the next round replaces the model.
-  Aggregate files are never rewritten.
+- The result is a dict of `_LazyRef` into that file. Cleanup is explicit, as for inbound chunk files:
+  once the new aggregate is written, the previous aggregate below the offload root and the consumed
+  contribution files are deleted, and the root itself is removed at the end of the run. `_TempDirRef`
+  garbage collection is only a fallback. Aggregate files are never rewritten.
 - `ParamsType.DIFF` contributions are added to the base model and keys without contributions are
   copied from it; FedAvg receives a full model. Custom aggregators still receive refs.
 

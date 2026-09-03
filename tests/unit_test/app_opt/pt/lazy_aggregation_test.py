@@ -87,18 +87,23 @@ def test_weighted_full_matches_in_memory_helper(tmp_path, spill_dir):
     assert list(load_file(file_path)) == ["a", "z"]
 
 
-def test_result_file_is_removed_when_refs_are_released(tmp_path, spill_dir):
+def test_next_aggregation_deletes_the_previous_aggregate_and_the_consumed_contributions(tmp_path, spill_dir):
+    first = _lazy_model(tmp_path, "first", {"w": torch.ones(2)})
+    contribution_dir = os.path.dirname(first["w"].file_path)
     helper = LazyWeightedAggregationHelper(spill_dir=spill_dir)
-    _add(helper, _lazy_model(tmp_path, "model", {"w": torch.ones(2)}), 1.0, "site-1")
-    result = helper.get_result()
-    aggregate_dir = os.path.dirname(result["w"].file_path)
-    assert os.path.isdir(aggregate_dir)
+    _add(helper, first, 1.0, "site-1")
+    previous = helper.get_result()
+    previous_dir = os.path.dirname(previous["w"].file_path)
+    assert not os.path.exists(contribution_dir)
+    assert os.path.isdir(previous_dir)
 
-    del result
-    gc.collect()
+    helper = LazyWeightedAggregationHelper(spill_dir=spill_dir, base_model=previous)
+    _add(helper, _lazy_model(tmp_path, "second", {"w": torch.full((2,), 3.0)}), 1.0, "site-1")
+    result = helper.get_result(ParamsType.DIFF)
 
-    assert not os.path.exists(aggregate_dir)
-    assert os.listdir(spill_dir) == []
+    assert torch.equal(_load(result, "w"), torch.tensor([4.0, 4.0]))  # the base stayed readable while aggregating
+    assert not os.path.exists(previous_dir)
+    assert os.listdir(spill_dir) == [os.path.basename(os.path.dirname(result["w"].file_path))]
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

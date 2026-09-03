@@ -73,6 +73,16 @@ class TestLazyRef:
         ref = _LazyRef(file_path=file_path, key=st_key, temp_ref=_TempDirRef(temp_dir))
         assert "layer1.bias" in repr(ref)
 
+    def test_release_deletes_an_owned_dir_and_ignores_a_user_checkpoint(self, temp_safetensors, tmp_path):
+        key_to_file, temp_dir, _ = temp_safetensors
+        save_file({"a": torch.ones(1)}, tmp_path / "checkpoint.safetensors")
+
+        LazyTensorDict(key_to_file=key_to_file, temp_dir=temp_dir).make_lazy_ref("layer1.weight").release()
+        safetensors_refs(str(tmp_path / "checkpoint.safetensors"))["a"].release()
+
+        assert not os.path.exists(temp_dir)
+        assert (tmp_path / "checkpoint.safetensors").exists()
+
     def test_deepcopy_shares_temp_dir_lifetime(self, temp_safetensors):
         key_to_file, temp_dir, tensors = temp_safetensors
         ref = LazyTensorDict(key_to_file=key_to_file, temp_dir=temp_dir).make_lazy_ref("layer1.weight")

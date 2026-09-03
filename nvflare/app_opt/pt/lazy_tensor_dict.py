@@ -242,6 +242,11 @@ class _LazyRef:
     def get_metadata(self) -> TensorMetadata:
         return self.location().metadata
 
+    def release(self) -> None:
+        """Delete the owned temp directory behind this ref now; refs into user checkpoints are left alone."""
+        if self._temp_ref is not None:
+            self._temp_ref.cleanup()
+
     def to_safetensors_bytes(self, key: Optional[str] = None) -> bytearray:
         """The tensor as a single-tensor safetensors payload named ``key``, copied straight from the file.
 
