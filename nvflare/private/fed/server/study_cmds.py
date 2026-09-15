@@ -307,8 +307,8 @@ class StudyCommandModule(CommandModule, CommandUtil):
         site_orgs = (study_def or {}).get("site_orgs", {})
         return caller_org in site_orgs
 
-    def _is_list_visible_to_caller(self, conn: Connection, study_def: dict) -> bool:
-        return self._is_visible_to_caller(conn, study_def)
+    def _is_list_visible_to_caller(self, conn: Connection, study_name: str, study_def: dict) -> bool:
+        return study_name in conn.get_prop(ConnProps.CERT_STUDIES, ()) or self._is_visible_to_caller(conn, study_def)
 
     def _study_list_item(self, conn: Connection, study_name: str) -> dict:
         role = self._caller_role(conn)
@@ -649,7 +649,7 @@ class StudyCommandModule(CommandModule, CommandUtil):
         study_details = []
         if registry:
             for study_name, study_def in registry.get_studies().items():
-                if self._is_list_visible_to_caller(conn, study_def):
+                if self._is_list_visible_to_caller(conn, study_name, study_def):
                     studies.append(study_name)
                     study_details.append(self._study_list_item(conn, study_name))
         self._reply(

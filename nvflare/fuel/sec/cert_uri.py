@@ -17,8 +17,8 @@
 Certificate attributes travel as https URI Subject Alternative Names under a root the project
 owns rather than as private X.509 extensions: a URI under a controlled domain is globally
 unique without an OID allocation, and Go, cryptography and OpenSSL parse it natively.
-Readers match the root exactly, ignore URIs on other hosts, and reject malformed URIs
-under the root.
+Readers match the root exactly and ignore URIs on other hosts. Identity URI readers
+reject malformed entries; admin login validates the separate study URI format.
 """
 
 from typing import Iterable, List
@@ -28,6 +28,7 @@ from cryptography import x509
 
 NVFLARE_CERT_URI_ROOT = "https://nvidia.com/nvflare/"
 _V1_PREFIX = NVFLARE_CERT_URI_ROOT + "v1/"
+ADMIN_STUDY_URI_PREFIX = _V1_PREFIX + "project/"
 
 # https://nvidia.com/nvflare/v1/<kind>/<percent-encoded value>
 JOB_URI_KIND = "job"  # leaf: the job the credential belongs to
@@ -51,7 +52,8 @@ def uri_general_names(uris: Iterable[str]) -> List[x509.UniformResourceIdentifie
 def cert_uri_values(cert: x509.Certificate, kind: str) -> List[str]:
     """Values of one kind carried by the certificate's NVFlare URI SANs.
 
-    Raises ValueError for a URI under the NVFlare root that is not a well-formed v1 entry.
+    Study URIs are left to admin login. Other entries under the NVFlare root must
+    be well-formed v1 identity URIs or raise ValueError.
     """
     try:
         san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
@@ -63,6 +65,8 @@ def cert_uri_values(cert: x509.Certificate, kind: str) -> List[str]:
             continue
         if not uri.startswith(_V1_PREFIX):
             raise ValueError(f"unsupported NVFlare certificate URI: {uri}")
+        if uri.startswith(ADMIN_STUDY_URI_PREFIX):
+            continue
         uri_kind, separator, encoded_value = uri[len(_V1_PREFIX) :].partition("/")
         if not separator or not uri_kind or not encoded_value or "/" in encoded_value:
             raise ValueError(f"malformed NVFlare certificate URI: {uri}")

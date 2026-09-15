@@ -723,6 +723,30 @@ class TestListStudiesVisibility:
             }
         ]
 
+    def test_lead_sees_registry_and_certificate_studies(self):
+        registry = _make_registry(
+            {
+                "registry-study": {
+                    "site_orgs": {"org_a": ["site-a"]},
+                    "admins": ["lead@example.com"],
+                },
+                "certificate-study": {"site_orgs": {"org_b": ["site-b"]}},
+                "hidden-study": {"site_orgs": {"org_c": ["site-c"]}},
+            }
+        )
+        conn = _FakeConnection(role="lead", org="org_a", user="lead@example.com")
+        conn._props[ConnProps.CERT_STUDIES] = ("certificate-study", "not-in-registry")
+        with (
+            patch("nvflare.private.fed.server.study_cmds.StudyRegistryService.get_registry", return_value=registry),
+            patch(
+                "nvflare.private.fed.server.study_cmds.AuthorizationService.authorize",
+                side_effect=self._authorize_submit_for_roles("lead"),
+            ),
+        ):
+            self._module().cmd_list_studies(conn, ["list_studies"])
+
+        assert conn.last_reply["studies"] == ["certificate-study", "registry-study"]
+
     def test_member_visible_study_cannot_submit(self):
         registry = _make_registry(
             {
