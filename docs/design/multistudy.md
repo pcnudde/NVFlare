@@ -231,9 +231,9 @@ For a valid named study session, the certificate-baked role remains the effectiv
 
 ### Certificate-Derived Study Membership
 
-See the published [multi-study guide](certificate_study_entitlements) for the URI SAN contract,
-validation, and entitlement lifetime, and the [provisioning guide](step_ca_study_entitlements)
-for issuer configuration and the downloadable template.
+For the URI SAN contract, validation, and entitlement lifetime, see "Certificate-Derived Study Membership"
+in `docs/user_guide/admin_guide/multi_study_guide.rst`. Issuer configuration and the downloadable template
+are in `docs/programming_guide/provisioning_system.rst`.
 
 ### What Is Study-Scoped
 
