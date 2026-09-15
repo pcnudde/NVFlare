@@ -22,7 +22,7 @@ from nvflare.fuel.sec.admin_cert import (
     get_admin_study_entitlements,
     validate_admin_leaf_cert,
 )
-from nvflare.fuel.sec.cert_uri import ADMIN_STUDY_URI_PREFIX
+from nvflare.fuel.sec.cert_uri import ADMIN_STUDY_URI_PREFIX, cert_uri_values
 from nvflare.lighter.utils import Identity, generate_cert, generate_keys
 
 _PROJECT = "demo"
@@ -155,6 +155,7 @@ def test_get_admin_study_entitlements_does_not_restrict_project_label(project):
     "uri",
     [
         "https://nvidia.com/nvflare/v2/project/demo/study/study-a",
+        ADMIN_STUDY_URI_PREFIX,
         f"{ADMIN_STUDY_URI_PREFIX}{_PROJECT}/all-studies",
         _study_uri("default"),
         _study_uri("default\n"),
@@ -166,8 +167,12 @@ def test_get_admin_study_entitlements_does_not_restrict_project_label(project):
     ],
 )
 def test_get_admin_study_entitlements_rejects_invalid_nvflare_uri(uri):
+    cert = _make_cert_with_uris(uri)
     with pytest.raises(AdminCertValidationError):
-        get_admin_study_entitlements(_make_cert_with_uris(uri))
+        get_admin_study_entitlements(cert)
+    for kind in ("cell", "job", "ca"):
+        with pytest.raises(ValueError):
+            cert_uri_values(cert, kind)
 
 
 def test_get_admin_study_entitlements_rejects_duplicates_and_too_many_studies():

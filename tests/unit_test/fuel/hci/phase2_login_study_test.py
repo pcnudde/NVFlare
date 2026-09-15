@@ -379,7 +379,11 @@ def test_handle_cert_login_with_real_study_certificate(
         uri_names=[f"https://nvidia.com/nvflare/v1/project/demo-project/study/{cert_study}"],
     )
     origin = new_admin_client_name()
-    CellIdentityResolver().require_match(origin, user, "admin", peer_cert=cert)
+    if expected_reply == "REJECT":
+        with pytest.raises(ValueError, match="malformed study URI"):
+            CellIdentityResolver().require_match(origin, user, "admin", peer_cert=cert)
+    else:
+        CellIdentityResolver().require_match(origin, user, "admin", peer_cert=cert)
     conn = _make_conn(study=study)
     conn.get_prop(ConnProps.CMD_HEADERS).update(
         cert=serialize_cert(cert), signature=sign_content(user, admin_key, return_str=False)

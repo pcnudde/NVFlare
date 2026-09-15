@@ -12,14 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import re
-
 from cryptography import x509
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from nvflare.apis.job_def import DEFAULT_STUDY
-from nvflare.apis.utils.format_check import type_pattern_mapping
-from nvflare.fuel.sec.cert_uri import ADMIN_STUDY_URI_PREFIX, NVFLARE_CERT_URI_ROOT
+from nvflare.fuel.sec.cert_uri import NVFLARE_CERT_URI_ROOT, parse_admin_study_uri
 
 ADMIN_CERT_PLACEHOLDER_CN = "nvflare-admin"
 MAX_ADMIN_STUDIES = 64
@@ -42,14 +38,10 @@ def get_admin_study_entitlements(cert: x509.Certificate) -> tuple[str, ...]:
     for uri in san.get_values_for_type(x509.UniformResourceIdentifier):
         if not uri.startswith(NVFLARE_CERT_URI_ROOT):
             continue
-        if not uri.startswith(ADMIN_STUDY_URI_PREFIX):
-            _invalid_entitlements("unsupported URI")
-        project, separator, study = uri[len(ADMIN_STUDY_URI_PREFIX) :].partition("/study/")
-        if not separator or not re.fullmatch(r"(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+", project):
-            _invalid_entitlements("invalid project URI segment")
-        if study == DEFAULT_STUDY or not re.fullmatch(type_pattern_mapping["study"], study):
-            _invalid_entitlements("invalid study name")
-        studies.append(study)
+        try:
+            studies.append(parse_admin_study_uri(uri))
+        except ValueError as ex:
+            raise AdminCertValidationError(f"invalid admin study entitlements: {ex}") from ex
 
     if len(studies) > MAX_ADMIN_STUDIES:
         _invalid_entitlements("too many studies")
