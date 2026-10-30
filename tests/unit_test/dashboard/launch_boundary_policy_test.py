@@ -41,8 +41,20 @@ def args(tmp_path):
 
 @pytest.fixture
 def docker(monkeypatch):
+    # Other suites replace Docker SDK modules during collection. Own the exception
+    # hierarchy together with the client boundary so collection order cannot leak in.
+    class DockerException(Exception):
+        pass
+
+    class APIError(DockerException):
+        pass
+
+    class NotFound(APIError):
+        pass
+
     client = Mock()
-    proxy = SimpleNamespace(from_env=Mock(return_value=client), errors=subject.docker.errors)
+    errors = SimpleNamespace(DockerException=DockerException, APIError=APIError, NotFound=NotFound)
+    proxy = SimpleNamespace(from_env=Mock(return_value=client), errors=errors)
     monkeypatch.setattr(subject, "docker", proxy)
     clock = isolate_time(monkeypatch, subject)
     monkeypatch.setattr(clock, "sleep", Mock())
