@@ -141,7 +141,11 @@ def test_invalid_engine_or_storage_is_rejected_before_job_access(storage):
 def test_scan_stops_when_filter_declines_and_skips_empty_metadata(storage, monkeypatch):
     manager, _, ctx = storage
     store = Mock(spec=StorageSpec)
-    store.list_objects.return_value = [manager.job_uri("job-one"), manager.job_uri("job-two")]
+    store.list_objects.return_value = [
+        manager.job_uri("job-one"),
+        manager.job_uri("job-two"),
+        manager.job_uri("job-three"),
+    ]
     store.get_meta.side_effect = [{}, {"name": "second"}]
     monkeypatch.setattr(manager, "_get_job_store", lambda _: store)
     job_filter = Mock()
@@ -149,6 +153,7 @@ def test_scan_stops_when_filter_declines_and_skips_empty_metadata(storage, monke
     manager._scan(job_filter, ctx)
     assert job_filter.filter_job.call_count == 1
     assert job_filter.filter_job.call_args.args[0].job_id == "job-two"
+    assert store.get_meta.call_count == 2
     store.list_objects.return_value = []
     manager._scan(job_filter, ctx)
     assert job_filter.filter_job.call_count == 1

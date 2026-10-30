@@ -77,6 +77,7 @@ def test_script_arguments_preserve_secret_as_one_argv_element(argv, monkeypatch)
     "lookup_error, kill_error",
     [(ProcessLookupError(), None), (PermissionError(), ProcessLookupError()), (None, PermissionError())],
 )
+@pytest.mark.skipif(subject.os.name != "posix", reason="POSIX process-group cleanup policy")
 def test_process_group_cleanup_handles_disappeared_or_inaccessible_processes(monkeypatch, lookup_error, kill_error):
     lookup = Mock(return_value=4321, side_effect=lookup_error)
     kill = Mock(side_effect=kill_error)
@@ -90,6 +91,7 @@ def test_process_group_cleanup_handles_disappeared_or_inaccessible_processes(mon
         kill.assert_called_once_with(1234 if lookup_error else 4321, signal.SIGKILL)
 
 
+@pytest.mark.skipif(subject.os.name != "posix", reason="POSIX waitpid policy")
 def test_wait_reaps_pid_once_and_delegates_popen_wait(monkeypatch):
     waitpid = Mock(return_value=(1234, 5 << 8))
     monkeypatch.setattr(subject.os, "waitpid", waitpid)
@@ -103,6 +105,7 @@ def test_wait_reaps_pid_once_and_delegates_popen_wait(monkeypatch):
     process.wait.assert_called_once_with()
 
 
+@pytest.mark.skipif(subject.os.name != "posix", reason="POSIX waitpid policy")
 def test_reaped_child_wait_is_tolerated_and_poll_marks_unknown_exit(monkeypatch):
     monkeypatch.setattr(subject.os, "waitpid", Mock(side_effect=ChildProcessError()))
     adapter = subject.ProcessAdapter(pid=1234)
