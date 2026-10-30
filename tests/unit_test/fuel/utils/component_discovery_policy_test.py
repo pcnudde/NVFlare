@@ -60,7 +60,7 @@ def test_scanner_registers_only_public_local_components_and_contains_import_erro
     assert set(table["Public"]) == {f"{scanner_package}.components.first", f"{scanner_package}.components.second"}
     assert "_Private" not in table and "Plain" not in table and "FLComponent" not in table
     assert ("Optional" in table) is not exclude_libs
-    assert "unavailable native extension" in caplog.text
+    assert "Try to import module round95_scanpkg.components.broken" in caplog.text
     scanner._class_table = table
     with pytest.raises(ConfigError, match="Multiple modules"):
         scanner.get_module_name("Public")

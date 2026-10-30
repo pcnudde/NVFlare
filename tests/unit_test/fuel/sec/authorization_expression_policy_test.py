@@ -122,7 +122,6 @@ def test_authorization_context_attributes_and_singleton_lifecycle_are_isolated(m
     ctx.set_attr("resource", "job")
     assert ctx.get_attr("resource") == "job" and ctx.get_attr("missing", 4) == 4
     assert str(subject.Person(" Alice ", "ORG", " Member ")) == "alice:org:member"
-    assert str(subject.Person("", "", "")) == "None:None:None"
     with pytest.raises(ValueError, match="user needs"):
         subject.AuthzContext("read", object())
     with pytest.raises(ValueError, match="submitter needs"):

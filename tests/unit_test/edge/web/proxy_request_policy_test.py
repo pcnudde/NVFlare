@@ -26,6 +26,11 @@ from nvflare.edge.web.models.api_error import ApiError
 from nvflare.edge.web.views import feg_views as views
 
 
+@pytest.fixture(autouse=True)
+def preserve_blueprint_registration_state(monkeypatch):
+    monkeypatch.setattr(views.feg_bp, "_got_registered_once", views.feg_bp._got_registered_once)
+
+
 @pytest.mark.parametrize("option", ["--ssl-cert", "--ssl-key"])
 def test_proxy_requires_complete_tls_pair(monkeypatch, option, capsys):
     monkeypatch.setattr(sys, "argv", ["proxy", "9000", "map.json", "ca.pem", option, "value"])
