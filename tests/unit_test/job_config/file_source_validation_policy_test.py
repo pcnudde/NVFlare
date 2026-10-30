@@ -30,6 +30,8 @@ from nvflare.job_config.file_source import FileSource
 def test_source_validation_rejects_invalid_destination_before_export(tmp_path, kwargs, message):
     source = tmp_path / "data.txt"
     source.write_text("data")
+    if kwargs.get("dest_dir") == "/absolute":
+        kwargs = {**kwargs, "dest_dir": str(tmp_path / "absolute")}
     with pytest.raises(ValueError, match=message):
         FileSource(str(source), **kwargs)
     with pytest.raises(ValueError, match="does not exist"):
