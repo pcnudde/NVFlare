@@ -19,7 +19,15 @@ import pytest
 pytest.importorskip("docker")
 
 from nvflare.apis.job_launcher_spec import JobProcessArgs, JobReturnCode  # noqa: E402
-from nvflare.app_opt.job_launcher import docker_launcher as module  # noqa: E402
+
+
+@pytest.fixture
+def module():
+    # Original Docker tests install their SDK boundary during collection. Resolve
+    # the production module afterwards so its SDK reference stays consistent.
+    from nvflare.app_opt.job_launcher import docker_launcher
+
+    return docker_launcher
 
 
 @pytest.mark.parametrize(
@@ -38,14 +46,14 @@ from nvflare.app_opt.job_launcher import docker_launcher as module  # noqa: E402
         ),
     ],
 )
-def test_parent_endpoint_validation_rejects_malformed_or_inconsistent_transport_before_rewriting(args, reason):
+def test_parent_endpoint_validation_rejects_malformed_or_inconsistent_transport_before_rewriting(module, args, reason):
     original = dict(args)
     with pytest.raises(ValueError, match=reason):
         module._rewrite_parent_url(args, "site")
     assert args == original
 
 
-def test_absent_parent_endpoint_is_unchanged_and_ambiguous_gpu_requests_are_rejected():
+def test_absent_parent_endpoint_is_unchanged_and_ambiguous_gpu_requests_are_rejected(module):
     args = {"unrelated": "value"}
     rewritten, shared_path = module._rewrite_parent_url(args, "site")
     assert rewritten is args and shared_path is None
@@ -53,7 +61,7 @@ def test_absent_parent_endpoint_is_unchanged_and_ambiguous_gpu_requests_are_reje
         module._get_gpu_request({}, {}, {"device_requests": [{"capabilities": [["gpu"]], "count": 1}] * 2})
 
 
-def test_container_transport_errors_do_not_claim_exit_confirmation_or_restartability():
+def test_container_transport_errors_do_not_claim_exit_confirmation_or_restartability(module):
     client = Mock()
     client.containers.get.side_effect = RuntimeError("daemon unavailable")
     item = module.DockerJobHandle("id", "name", client, watch_exit=False)

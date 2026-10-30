@@ -19,12 +19,19 @@ from unittest.mock import Mock
 
 import pytest
 
-from nvflare.dashboard.application import blob as module
 from nvflare.lighter.constants import PropKey
 
 
+@pytest.fixture
+def module(app):
+    # The app fixture establishes its temporary database before configuration is imported.
+    from nvflare.dashboard.application import blob
+
+    return blob
+
+
 @pytest.mark.parametrize("operator_props", [{}, {PropKey.ROLE: "project_admin", "operator": "trusted"}])
-def test_admin_kit_uses_operator_properties_after_stored_user_properties(monkeypatch, operator_props):
+def test_admin_kit_uses_operator_properties_after_stored_user_properties(module, monkeypatch, operator_props):
     user = SimpleNamespace(
         email="alice@example.org",
         role=SimpleNamespace(name="org_admin"),
@@ -45,7 +52,9 @@ def test_admin_kit_uses_operator_properties_after_stored_user_properties(monkeyp
 
 
 @pytest.mark.parametrize("target", ["server", "admin"])
-def test_kit_provisioning_merges_operator_project_and_server_properties_and_fakes_archive_boundary(monkeypatch, target):
+def test_kit_provisioning_merges_operator_project_and_server_properties_and_fakes_archive_boundary(
+    module, monkeypatch, target
+):
     project = SimpleNamespace(
         scheme="grpc",
         app_location="registry/image:tag",
@@ -102,7 +111,7 @@ def test_kit_provisioning_merges_operator_project_and_server_properties_and_fake
     assert not Path(archive.call_args.kwargs["cwd"]).exists()
 
 
-def test_unsafe_download_key_is_rejected_before_database_or_provisioning(monkeypatch):
+def test_unsafe_download_key_is_rejected_before_database_or_provisioning(module, monkeypatch):
     store = Mock()
     monkeypatch.setattr(module, "Store", store)
     with pytest.raises(RuntimeError, match="unsafe download key"):
@@ -110,7 +119,7 @@ def test_unsafe_download_key_is_rejected_before_database_or_provisioning(monkeyp
     store.get_user.assert_not_called()
 
 
-def test_user_blob_selects_user_preparation_and_error_logger_keeps_failure_visible(monkeypatch, capsys):
+def test_user_blob_selects_user_preparation_and_error_logger_keeps_failure_visible(module, monkeypatch, capsys):
     generate = Mock(return_value=("bytes", "user.zip"))
     monkeypatch.setattr(module, "_gen_kit", generate)
     assert module.gen_user_blob("safe", 7) == ("bytes", "user.zip")

@@ -18,10 +18,17 @@ import pytest
 
 pytest.importorskip("docker")
 
-from nvflare.app_opt.job_launcher import docker_launcher as module  # noqa: E402
+
+@pytest.fixture
+def module():
+    # Original Docker tests install their SDK boundary during collection. Resolve
+    # the production module afterwards so its SDK reference stays consistent.
+    from nvflare.app_opt.job_launcher import docker_launcher
+
+    return docker_launcher
 
 
-def test_missing_docker_backend_is_reported_before_client_connection(monkeypatch):
+def test_missing_docker_backend_is_reported_before_client_connection(module, monkeypatch):
     launcher = module.ClientDockerJobLauncher(workspace="/workspace")
     monkeypatch.setattr(module, "_DOCKER_AVAILABLE", False)
     with pytest.raises(RuntimeError, match="docker SDK not installed"):
@@ -29,7 +36,7 @@ def test_missing_docker_backend_is_reported_before_client_connection(monkeypatch
     assert launcher._docker_client is None
 
 
-def test_docker_network_api_error_does_not_cache_unvalidated_client(monkeypatch):
+def test_docker_network_api_error_does_not_cache_unvalidated_client(module, monkeypatch):
     launcher = module.ClientDockerJobLauncher(workspace="/workspace")
     api = Mock()
     api.networks.get.side_effect = module.docker.errors.APIError("network permission denied")
@@ -41,7 +48,7 @@ def test_docker_network_api_error_does_not_cache_unvalidated_client(monkeypatch)
 
 
 @pytest.mark.parametrize("failure", ["missing", "api-error"])
-def test_container_removal_errors_remain_contained_without_claiming_exit_confirmation(failure):
+def test_container_removal_errors_remain_contained_without_claiming_exit_confirmation(module, failure):
     api = Mock()
     error_type = module.docker.errors.NotFound if failure == "missing" else module.docker.errors.APIError
     api.containers.get.side_effect = error_type("container disappeared")
