@@ -67,6 +67,7 @@ def test_cleanup_loop_checks_shutdown_frequently_and_removal_on_interval(server,
 
     def pause(interval):
         sleeps.append(interval)
+        assert len(sleeps) <= 2, "cleanup ignored the shutdown flag"
         if len(sleeps) == 2:
             server.shutdown = True
 
