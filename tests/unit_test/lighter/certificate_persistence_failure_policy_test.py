@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -52,7 +53,8 @@ def test_listener_certificate_uses_server_identity_and_tightens_private_key_perm
     assert (tmp_path / "server.crt").read_bytes() == b"certificate-pem"
     key = tmp_path / "server.key"
     assert key.read_bytes() == b"private-pem"
-    assert key.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert key.stat().st_mode & 0o777 == 0o600
 
 
 def test_existing_admin_certificate_cannot_be_reused_for_changed_role(monkeypatch, tmp_path):
