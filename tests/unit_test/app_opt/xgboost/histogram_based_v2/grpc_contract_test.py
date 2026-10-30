@@ -18,6 +18,8 @@ from unittest.mock import MagicMock
 import grpc
 import pytest
 
+pytest.importorskip("xgboost")
+
 from nvflare.apis.fl_constant import FLContextKey, ReservedKey
 from nvflare.apis.fl_context import FLContext
 from nvflare.app_opt.xgboost.histogram_based_v2 import grpc_client as client_module

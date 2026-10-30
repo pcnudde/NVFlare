@@ -17,6 +17,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+pytest.importorskip("xgboost")
+
 from nvflare.apis.fl_constant import ReservedKey, ReturnCode
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.shareable import Shareable, make_reply

@@ -16,7 +16,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-import xgboost as xgb
+
+xgb = pytest.importorskip("xgboost")
 
 from nvflare.apis.fl_constant import FLContextKey, ReservedKey
 from nvflare.apis.fl_context import FLContext

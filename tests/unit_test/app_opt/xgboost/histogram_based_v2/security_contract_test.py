@@ -15,7 +15,8 @@
 from unittest.mock import MagicMock
 
 import pytest
-import tenseal as ts
+
+pytest.importorskip("xgboost")
 
 from nvflare.apis.event_type import EventType
 from nvflare.apis.fl_context import FLContext
@@ -70,6 +71,7 @@ def test_server_gather_combines_encrypted_vectors_or_preserves_rank_mapping(hori
     contexts = []
     values = []
     if horizontal:
+        ts = pytest.importorskip("tenseal")
         crypto = ts.context(ts.SCHEME_TYPE.CKKS, 4096, coeff_mod_bit_sizes=[30, 20, 30], n_threads=1)
         crypto.global_scale = 2**20
         values = [ts.ckks_vector(crypto, [1, 2]), ts.ckks_vector(crypto, [3, 4])]
@@ -219,6 +221,7 @@ def test_vertical_gather_reconstructs_sorted_histograms_pads_and_hides_non_label
 
 
 def test_horizontal_gather_encrypts_decrypts_and_appends_zero_worker_payloads(client):
+    ts = pytest.importorskip("tenseal")
     client.tenseal_context = ts.context(ts.SCHEME_TYPE.CKKS, 4096, coeff_mod_bit_sizes=[30, 20, 30], n_threads=1)
     client.tenseal_context.global_scale = 2**20
     client.data_converter.decode_histograms.return_value = [1.5, 2.5]

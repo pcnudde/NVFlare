@@ -16,7 +16,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-import tenseal as ts
+
+ts = pytest.importorskip("tenseal")
 
 from nvflare.apis.dxo import DXO, DataKind, MetaKey, from_shareable
 from nvflare.apis.event_type import EventType
