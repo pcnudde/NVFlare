@@ -226,17 +226,26 @@ def test_shutdown_client_contains_cleanup_exceptions(client_runner):
     client.communicator.cell.stop.assert_not_called()
 
 
-def test_end_run_clients_picks_only_unfinished_idle_clients(client_runner):
+def test_end_run_clients_picks_only_unfinished_idle_clients(client_runner, monkeypatch):
     first, second = client_runner.federated_clients
     client_runner.clients_finished_end_run = [first.client_name]
-    task = Mock()
+    task = Mock(side_effect=[None])
     client_runner.do_one_task = task
+    original_pick = client_runner._pick_next_client
+    picks = []
+
+    def pick_once():
+        picks.append(True)
+        assert len(picks) <= 1, "END_RUN selection did not finish after processing the remaining client"
+        return original_pick()
+
+    monkeypatch.setattr(client_runner, "_pick_next_client", pick_once)
     lock = threading.Lock()
     client_runner._end_run_clients("0", lock, 2, 13)
     task.assert_called_once_with(second, 2, "0", lock, timeout=13, task_name=RunnerTask.END_RUN)
     assert client_runner.clients_finished_end_run == [first.client_name, second.client_name]
     assert not second.simulate_running
-    assert client_runner._pick_next_client() is None
+    assert original_pick() is None
 
 
 def test_client_thread_reuses_selected_client_and_records_end_run(client_runner, monkeypatch):
