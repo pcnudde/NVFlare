@@ -56,7 +56,7 @@ def api(tmp_path):
 )
 def test_unresolved_result_transfer_cannot_be_mistaken_for_success_after_session_end(api, ending, reason):
     waiter = Mock(transaction_id="tx", outcome=None)
-    waiter.wait.return_value = None
+    waiter.wait.side_effect = [None, AssertionError("result waiter unexpectedly retried after session end")]
     waiter.done.return_value = ending is None
     if ending:
         setattr(api, ending, True)
@@ -108,7 +108,9 @@ def test_ambiguous_result_resolution_uses_terminal_transfer_or_session_authority
         _result_publication_end_reason=lambda: session_end,
     )
     session = AttachTrainerSession(api)
-    session._accepted_result_attempt_from_status = Mock(return_value=None)
+    session._accepted_result_attempt_from_status = Mock(
+        side_effect=[None, AssertionError("ambiguous result resolution unexpectedly retried")]
+    )
     waiter = Mock()
     waiter.done.return_value = finished
     waiter.wait.return_value = SimpleNamespace(status=TransferProgressState.FAILED)

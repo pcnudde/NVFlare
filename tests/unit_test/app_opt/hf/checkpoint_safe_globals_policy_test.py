@@ -26,7 +26,7 @@ from nvflare.app_opt.hf import api as module  # noqa: E402
 
 def test_checkpoint_resume_allowlist_contains_numpy_reconstruction_and_dtypes_without_duplicates(monkeypatch):
     register = Mock()
-    monkeypatch.setattr(torch.serialization, "add_safe_globals", register)
+    monkeypatch.setattr(torch.serialization, "add_safe_globals", register, raising=False)
     module._allow_torch_checkpoint_resume_globals()
     register.assert_called_once()
     allowed = register.call_args.args[0]
@@ -38,7 +38,7 @@ def test_checkpoint_resume_allowlist_contains_numpy_reconstruction_and_dtypes_wi
 
 
 def test_checkpoint_allowlisting_supports_torch_without_safe_globals_api(monkeypatch):
-    monkeypatch.setattr(torch.serialization, "add_safe_globals", None)
+    monkeypatch.delattr(torch.serialization, "add_safe_globals", raising=False)
     assert module._allow_torch_checkpoint_resume_globals() is None
 
 

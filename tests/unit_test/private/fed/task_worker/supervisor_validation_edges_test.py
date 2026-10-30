@@ -60,7 +60,7 @@ def test_caller_deadline_validation_and_expiration_bound_worker_wait(tmp_path, m
 def test_finite_caller_deadline_caps_settlement_wait(tmp_path, monkeypatch):
     arguments, handle = _attempt(tmp_path)
     monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: 10.0, time=lambda: 10.0))
-    handle.poll.return_value = SETTLED
+    handle.poll.side_effect = [SETTLED]
     result = module.TaskSupervisor().run(**arguments, deadline_provider=lambda: 12.0)
     assert result.result["value"] == 2
     handle.wait_for_settlement.assert_called_once_with(timeout=2.0)
@@ -69,6 +69,7 @@ def test_finite_caller_deadline_caps_settlement_wait(tmp_path, monkeypatch):
 @pytest.mark.parametrize("failure", ["handle", "completion", "abort-after-staging"])
 def test_attempt_identity_mismatch_and_prelaunch_abort_cannot_validate_result(tmp_path, monkeypatch, failure):
     arguments, handle = _attempt(tmp_path)
+    handle.poll.side_effect = [handle.poll.return_value]
     supervisor = module.TaskSupervisor()
     launch = arguments["launcher"].launch_task.side_effect
     if failure == "handle":
@@ -107,7 +108,8 @@ def test_attempt_identity_mismatch_and_prelaunch_abort_cannot_validate_result(tm
 
 
 def test_retention_marks_known_attempt_failed_and_reports_unwritable_diagnostics(tmp_path, monkeypatch):
-    arguments, _ = _attempt(tmp_path)
+    arguments, handle = _attempt(tmp_path)
+    handle.poll.side_effect = [handle.poll.return_value]
     supervisor = module.TaskSupervisor()
     outcome = supervisor.run(**arguments)
     attempt = supervisor._attempts[outcome.identity]
