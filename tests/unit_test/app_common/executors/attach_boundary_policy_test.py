@@ -224,6 +224,6 @@ def test_source_release_wait_has_finite_clock_budget(backend, monkeypatch):
     monkeypatch.setattr(backend, "_result_source_confirmed_disconnected", Mock(return_value=False))
     clock = isolate_time(monkeypatch, subject)
     clock.monotonic = Mock(side_effect=[0, 1000])
-    backend.logger.warning = Mock()
+    monkeypatch.setattr(backend.logger, "warning", Mock())
     backend._wait_for_result_source_release(backend._session)
     backend.logger.warning.assert_called_once()

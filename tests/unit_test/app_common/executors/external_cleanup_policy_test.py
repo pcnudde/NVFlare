@@ -179,9 +179,9 @@ def test_procfs_thread_inspection_treats_uncertainty_as_unknown(runtime, monkeyp
     assert backend._linux_process_has_live_threads("123") is None
 
 
-def test_exit_code_write_reports_missing_or_unwritable_run_directory(runtime, tmp_path):
+def test_exit_code_write_reports_missing_or_unwritable_run_directory(runtime, tmp_path, monkeypatch):
     backend, _ = runtime
-    backend.logger.error = Mock()
+    monkeypatch.setattr(backend.logger, "error", Mock())
     backend._run_dir = None
     backend._write_process_exit_code(3)
     backend._run_dir = str(tmp_path / "missing")
