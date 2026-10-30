@@ -37,7 +37,15 @@ def isolated_service(monkeypatch):
     monkeypatch.setattr(RM, "_logger", Mock())
     monkeypatch.setattr(RM, "_query_interval", 1.0)
     clock = isolate_time(monkeypatch, rm)
-    clock.time = Mock(return_value=100)
+    remaining_reads = 32
+
+    def policy_time():
+        nonlocal remaining_reads
+        remaining_reads -= 1
+        assert remaining_reads >= 0, "Reliable-message policy clock exhausted its finite polling budget"
+        return 100
+
+    clock.time = Mock(side_effect=policy_time)
     clock.sleep = Mock()
     return clock
 
