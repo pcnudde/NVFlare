@@ -1,0 +1,4 @@
+nvflare>=2.10.0
+torch
+numpy
+transformers>=4.45,<5

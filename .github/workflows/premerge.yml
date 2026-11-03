@@ -241,6 +241,7 @@ jobs:
           python3 -m pytest -q
           tests/integration_test/fast/client_api_external_process_lifecycle_test.py
           tests/integration_test/fast/cj_recovery_e2e_test.py
+          tests/integration_test/fast/pt_checkpoint_resume_test.py
       # Check the zero-argument learning gate and actual client-model submission
       # and evaluation across sites using the shared Hello PyTorch client.
       - name: Run Hello PyTorch learning and evaluation

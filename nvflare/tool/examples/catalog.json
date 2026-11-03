@@ -244,6 +244,10 @@
     "source_path": "examples/advanced/psi",
     "category": "advanced"
   },
+  "pt-checkpoint": {
+    "source_path": "examples/advanced/pt_checkpoint",
+    "category": "advanced"
+  },
   "qwen3-vl": {
     "source_path": "examples/advanced/qwen3-vl",
     "category": "advanced"
